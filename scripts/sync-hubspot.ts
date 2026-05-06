@@ -58,7 +58,7 @@ for (const expected of state.pipelines.deals) {
   }
 
   for (const expStage of expected.stages) {
-    const liveStage = live.stages.find((s) => s.id === expStage.id);
+    const liveStage = live.stages.find((s) => String(s.id) === String(expStage.id));
     if (!liveStage) {
       drift.push({ surface: "pipeline", resource_id: `${expected.id}/${expStage.id}`, field: "exists", expected: true, actual: false, fixable: false });
       continue;
