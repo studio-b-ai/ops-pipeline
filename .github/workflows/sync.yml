@@ -1,0 +1,90 @@
+name: Studio B ops — sync mirrors (reusable)
+
+# Reusable workflow consumed by Studio B operations repos to push canonical
+# repo state to downstream mirrors (Slack canvas, HubSpot pipeline + properties +
+# workflows). Hand-edits to those mirrors get stomped on next consumer push.
+#
+# Consumer repos call this workflow with `uses:` like:
+#
+#   jobs:
+#     sync:
+#       uses: studio-b-ai/ops-pipeline/.github/workflows/sync.yml@v1
+#       secrets:
+#         SLACK_BOT_TOKEN: ${{ secrets.STUDIOB_SLACK_BOT_TOKEN }}
+#         HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
+#
+# Consumer must have at repo root:
+#   - ops.yaml (config — Slack canvas/channel, HubSpot portal/pipeline)
+#   - infra/hubspot.yaml (canonical HubSpot state)
+#   - docs/canvas/*.md (canvas-source files referenced by ops.yaml)
+#
+# See ops-template repo for a working starting point.
+
+on:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        description: Git ref to checkout in consumer repo
+        required: false
+        type: string
+        default: ""
+      report_only:
+        description: If true, sync-hubspot runs in report-only mode (no PATCH)
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      SLACK_BOT_TOKEN:
+        required: true
+      HUBSPOT_ACCESS_TOKEN:
+        required: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout consumer repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref }}
+
+      - name: Checkout ops-pipeline (sync logic)
+        uses: actions/checkout@v4
+        with:
+          repository: studio-b-ai/ops-pipeline
+          ref: v1
+          path: .ops-pipeline
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install ops-pipeline deps
+        working-directory: .ops-pipeline/scripts
+        run: npm ci || npm install
+
+      - name: Sync Slack canvas
+        working-directory: .ops-pipeline/scripts
+        env:
+          REPO_ROOT: ${{ github.workspace }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: npx tsx sync-canvas.ts
+
+      - name: Reconcile HubSpot
+        working-directory: .ops-pipeline/scripts
+        env:
+          REPO_ROOT: ${{ github.workspace }}
+          HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: npx tsx sync-hubspot.ts
+        continue-on-error: ${{ inputs.report_only }}
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          curl -s -X POST -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"channel\":\"$(node -e 'const y=require(`yaml`).parse(require(`fs`).readFileSync(`ops.yaml`,`utf-8`));console.log(y.notifications.channel)' 2>/dev/null || echo C0B1F86H6BZ)\",\"text\":\":x: *ops-pipeline sync failed* on \`${{ github.repository }}\` commit \`${{ github.sha }}\`. See <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|run logs>.\"}" \
+            https://slack.com/api/chat.postMessage

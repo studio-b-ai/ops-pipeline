@@ -1,0 +1,20 @@
+{
+  "name": "@studio-b-ai/marketing-ops-scripts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sync + drift-check scripts. Reads ops.yaml + infra/hubspot.yaml, reconciles Slack canvas + HubSpot live state.",
+  "scripts": {
+    "sync:canvas": "tsx sync-canvas.ts",
+    "sync:hubspot": "tsx sync-hubspot.ts",
+    "drift:check": "tsx drift-check.ts"
+  },
+  "dependencies": {
+    "yaml": "^2.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

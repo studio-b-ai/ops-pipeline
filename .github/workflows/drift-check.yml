@@ -1,0 +1,57 @@
+name: Studio B ops — drift-check (reusable)
+
+# Weekly drift probe for Studio B operations repos. Reads consumer repo's
+# ops.yaml + infra/hubspot.yaml, probes live HubSpot + Slack canvas, posts
+# any drift to the configured channel.
+#
+# Consumer repos schedule this via:
+#
+#   on:
+#     schedule:
+#       - cron: "0 13 * * 1"  # Mondays 09:00 ET
+#     workflow_dispatch: {}
+#   jobs:
+#     drift:
+#       uses: studio-b-ai/ops-pipeline/.github/workflows/drift-check.yml@v1
+#       secrets:
+#         SLACK_BOT_TOKEN: ${{ secrets.STUDIOB_SLACK_BOT_TOKEN }}
+#         HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
+
+on:
+  workflow_call:
+    secrets:
+      SLACK_BOT_TOKEN:
+        required: true
+      HUBSPOT_ACCESS_TOKEN:
+        required: true
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout consumer repo
+        uses: actions/checkout@v4
+
+      - name: Checkout ops-pipeline (sync logic)
+        uses: actions/checkout@v4
+        with:
+          repository: studio-b-ai/ops-pipeline
+          ref: v1
+          path: .ops-pipeline
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install ops-pipeline deps
+        working-directory: .ops-pipeline/scripts
+        run: npm ci || npm install
+
+      - name: Run drift-check
+        working-directory: .ops-pipeline/scripts
+        env:
+          REPO_ROOT: ${{ github.workspace }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
+        run: npx tsx drift-check.ts
+        continue-on-error: true
