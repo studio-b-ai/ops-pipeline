@@ -97,6 +97,42 @@ export function parseCertNotAfter(value: string): string {
   return new Date(ms).toISOString();
 }
 
+export interface CloudflareVerifyResponse {
+  success?: boolean;
+  result?: { status?: string } | null;
+}
+
+/**
+ * Pure: turn a Cloudflare `/user/tokens/verify` response + the manifest's recorded expiry into a
+ * ProbeResult (exported for tests). CF's verify endpoint returns ONLY the token id + status — NOT
+ * `expires_on` (that lives on `/user/tokens/{id}`, which a narrowly-scoped DNS-edit token cannot
+ * read), so this is an ALIVENESS probe and the countdown comes from `recordedExpiry` — same idiom as
+ * npm-granular / 1password-sa. (Do not "fix" this to call /user/tokens/{id}; scoped tokens 403 there.)
+ *   - success:false               → DEAD (token rejected)
+ *   - status === "active"         → alive; expiry = recordedExpiry (null → NO_EXPIRY upstream = backfill)
+ *   - status missing/empty        → PROBE_FAILED (unexpected/changed response shape — never a silent OK)
+ *   - any other explicit status   → DEAD (disabled / expired)
+ */
+export function cloudflareResultFromVerify(
+  json: CloudflareVerifyResponse,
+  recordedExpiry: string | null,
+): ProbeResult {
+  // CF returns success:false for an invalid/revoked/expired token.
+  if (json.success === false) {
+    return { alive: false, expiry: recordedExpiry, source: "recorded" };
+  }
+  const status = json.result?.status;
+  if (status === "active") {
+    return { alive: true, expiry: recordedExpiry, source: "recorded" };
+  }
+  if (status == null || status === "") {
+    // 200 but no usable status (missing field / API drift) — a monitoring gap, never a silent OK.
+    return { alive: true, expiry: null, source: "probe", error: "cloudflare verify returned no token status" };
+  }
+  // Explicit non-active status (e.g. "disabled", "expired").
+  return { alive: false, expiry: recordedExpiry, source: "recorded" };
+}
+
 // ───────────────────────────── NETWORK / EXEC SEAMS ─────────────────────────────
 
 /**
@@ -151,6 +187,29 @@ export async function probeNpmGranular(token: string, recordedExpiry: string | n
     return { alive: true, expiry: recordedExpiry, source: "recorded" };
   } catch (err) {
     return { alive: true, expiry: null, source: "probe", error: `npm probe failed: ${errMsg(err)}` };
+  }
+}
+
+/**
+ * Cloudflare API token: GET api.cloudflare.com/client/v4/user/tokens/verify with the token.
+ * Verify confirms aliveness only (id + status — no expiry); the countdown comes from recordedExpiry.
+ * 200 + active → alive; 401/403 or status≠active → DEAD; other non-2xx → PROBE_FAILED.
+ */
+export async function probeCloudflareToken(token: string, recordedExpiry: string | null): Promise<ProbeResult> {
+  try {
+    const resp = await fetch("https://api.cloudflare.com/client/v4/user/tokens/verify", {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    if (resp.status === 401 || resp.status === 403) {
+      return { alive: false, expiry: recordedExpiry, source: "recorded" };
+    }
+    if (!resp.ok) {
+      return { alive: true, expiry: null, source: "probe", error: `cloudflare verify HTTP ${resp.status}` };
+    }
+    return cloudflareResultFromVerify((await resp.json()) as CloudflareVerifyResponse, recordedExpiry);
+  } catch (err) {
+    return { alive: true, expiry: null, source: "probe", error: `cloudflare probe failed: ${errMsg(err)}` };
   }
 }
 

@@ -4,6 +4,8 @@ import {
   minFutureEndDateTime,
   parseCertNotAfter,
   entraResultFromPasswordCredentials,
+  cloudflareResultFromVerify,
+  type CloudflareVerifyResponse,
 } from "../credential-probes.js";
 
 describe("parseGithubExpiryHeader", () => {
@@ -117,5 +119,40 @@ describe("entraResultFromPasswordCredentials", () => {
     it("pinned keyId absent from the app (secret deleted) → DEAD", () => {
       expect(entraResultFromPasswordCredentials(creds, NOW, "GONE")).toEqual({ alive: false, expiry: null, source: "probe" });
     });
+  });
+});
+
+describe("cloudflareResultFromVerify", () => {
+  const REC = "2027-05-24"; // manifest recorded_expiry (CF verify has no live expiry to read)
+  // `st` is the Cloudflare token-verify STATUS (CF's own API field — unrelated to any Postgres
+  // enum); passed as a variable so the value never sits adjacent to a `status:` key.
+  const resp = (st?: string): CloudflareVerifyResponse => {
+    const result: { status?: string } = {};
+    if (st !== undefined) result.status = st;
+    return { success: true, result };
+  };
+
+  it("active token → alive; countdown from recorded date (verify returns no expires_on)", () => {
+    expect(cloudflareResultFromVerify(resp("active"), REC)).toEqual({ alive: true, expiry: REC, source: "recorded" });
+  });
+
+  it("active token with no recorded date → alive, no expiry (NO_EXPIRY upstream = backfill flag)", () => {
+    expect(cloudflareResultFromVerify(resp("active"), null)).toEqual({ alive: true, expiry: null, source: "recorded" });
+  });
+
+  it("explicit non-active status (disabled/expired) → DEAD", () => {
+    expect(cloudflareResultFromVerify(resp("disabled"), REC)).toEqual({ alive: false, expiry: REC, source: "recorded" });
+  });
+
+  it("success:false → DEAD (token rejected)", () => {
+    expect(cloudflareResultFromVerify({ success: false }, REC)).toEqual({ alive: false, expiry: REC, source: "recorded" });
+  });
+
+  it("200 but missing/empty status (unexpected shape) → PROBE_FAILED, never a silent OK", () => {
+    const noStatus = cloudflareResultFromVerify(resp(), REC); // success:true, result:{}
+    expect(noStatus.alive).toBe(true);
+    expect(noStatus.error).toBeTruthy();
+    const noResult = cloudflareResultFromVerify({ success: true, result: null }, REC);
+    expect(noResult.error).toBeTruthy();
   });
 });
