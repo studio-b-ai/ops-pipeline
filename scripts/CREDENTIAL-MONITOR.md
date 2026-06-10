@@ -17,6 +17,7 @@ Daily (GitHub Actions cron, 14:00 UTC), for each item in [`credentials.manifest.
    | `npm-granular` | `registry.npmjs.org/-/whoami` → alive/dead (countdown from `recorded_expiry`) |
    | `entra-client-secret` | Graph `applications(appId=…)?$select=passwordCredentials` → the pinned secret's `endDateTime` (by `app_secret_key_id`), else app-level min future |
    | `1password-sa` | `op vault list` → alive/dead (countdown from `recorded_expiry`) |
+   | `cloudflare-api-token` | `api.cloudflare.com/client/v4/user/tokens/verify` → `status` alive/dead (countdown from `recorded_expiry`; verify returns no expiry) |
    | `tls-cert` | `node:tls` peer cert `notAfter` |
 3. Classifies → `OK | WARN(≤14/7/1) | DEAD | NO_EXPIRY | PROBE_FAILED`.
 4. Routes (Rule #165) — `WARN/DEAD/NO_EXPIRY/PROBE_FAILED` → **#agent-escalations** (`C0ATMSL2CR2`),
@@ -73,3 +74,24 @@ Then live-verify (Rule #234): `gh workflow run "Credential Expiry Monitor" --rep
 Append an item to `credentials.manifest.yaml` (op:// ref + metadata only — never a value). Pick the
 `type` whose probe matches, set `owner` + `keyless_alternative` (Rule #302 ladder), and `recorded_expiry`
 where the probe can't read it live (npm, 1P SA).
+
+## Inventory follow-ups (2026-06-10 fleet audit)
+
+Manifest reconciled against a fleet-wide publish/secret audit. Live items: `op-sa-acuops-hub`,
+`op-sa-client-asthetik-deploy`, `LMMI_REPO_PAT`, `entra-exo-app-secret`, `cloudflare-umbrella`.
+Three items are tracked OUTSIDE the live manifest, by design:
+
+- **Delete the dormant `PYPI_API_TOKEN`** on `studio-b-ai/acumatica-lint` — referenced only in a
+  workflow comment (OIDC trusted publishing is the live publish path), so it's an unmonitored static
+  secret with no consumer. Delete it rather than monitor it.
+- **EXO app cert (app `7e2dd464…`) expires 2028-05-20** — EXO app-only auth uses a CERTIFICATE
+  (Azure `keyCredentials`), not the client secret this monitor probes. It already has a 2028-03-20
+  rotation reminder in `studiob-exo-app-only-writes.md`. Add a `keyCredentials` probe before then if
+  active monitoring is wanted (low urgency — ~2 years out).
+- **GitHub Packages consume-side PATs (Rule #36)** — if any CI repo stores an *expiring* PAT to READ
+  `@studio-b-ai/*` GitHub-Packages, add it as a `github-pat-finegrained` item. Most consumers use the
+  ephemeral `GITHUB_TOKEN` (non-expiring), so assess before adding.
+
+**Dropped from scope (now keyless):** npm publish (`@studio-b-ai/clients` → OIDC), PyPI publish
+(`acumatica-lint` → OIDC), all GitHub-Packages *publish* (ephemeral `GITHUB_TOKEN`). See
+`~/Documents/brain/library/vendor/npm/2026-06-07-oidc-trusted-publishing-gotchas.md` § "Fleet audit 2026-06-10".

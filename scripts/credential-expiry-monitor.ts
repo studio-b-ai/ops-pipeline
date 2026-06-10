@@ -27,6 +27,7 @@ import { classify, type Classification, type CredStatus, type ProbeResult } from
 import {
   probeGithubPat,
   probeNpmGranular,
+  probeCloudflareToken,
   probeEntraSecret,
   probe1PasswordSA,
   getCertExpiry,
@@ -40,7 +41,13 @@ const STATE_FILE = join(HERE, "credential-alert-state.json");
 const CH_ESCALATIONS = "C0ATMSL2CR2"; // #agent-escalations (studiob-ai workspace — Rule #32/#165)
 const CH_NOTIFICATIONS = "C0B4B3F62H2"; // #agent-notifications (studiob-ai workspace)
 
-type CredType = "1password-sa" | "npm-granular" | "github-pat-finegrained" | "entra-client-secret" | "tls-cert";
+type CredType =
+  | "1password-sa"
+  | "npm-granular"
+  | "github-pat-finegrained"
+  | "entra-client-secret"
+  | "cloudflare-api-token"
+  | "tls-cert";
 
 interface ManifestItem {
   name: string;
@@ -97,6 +104,8 @@ async function runProbe(item: ManifestItem): Promise<ProbeResult> {
   switch (item.type) {
     case "github-pat-finegrained":
       return probeGithubPat(opRead(reqRef(item)));
+    case "cloudflare-api-token":
+      return probeCloudflareToken(opRead(reqRef(item)), recorded);
     case "npm-granular":
       return probeNpmGranular(opRead(reqRef(item)), recorded);
     case "1password-sa":
