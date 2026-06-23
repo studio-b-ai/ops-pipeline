@@ -19,6 +19,9 @@ name: "Cloudflare Token Rotation"
 #
 # GATE: if the 1P item "cloudflare-cf-token-mgmt" does not resolve (not yet provisioned),
 # the script exits 0 with an "awaiting Kevin's mint" message — NOT a CI failure.
+# The management token needs TWO CF permissions:
+#   User → API Tokens → Edit   (roll the umbrella token value)
+#   Zone → Zone → Read         (so the monitor's /zones aliveness probe passes)
 # See scripts/cloudflare-token-rotation.ts for the full spec.
 
 on:

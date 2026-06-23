@@ -7,8 +7,9 @@
  *
  * GATING (two independent guards — BOTH required for any live mutation):
  *   1. The `cloudflare-cf-token-mgmt` 1P item must resolve (Kevin mints this — it holds a CF
- *      management token with `User → API Tokens → Edit` scope, which the zone-scoped umbrella
- *      token cannot grant itself).  If the item is absent, the script exits 0 with an
+ *      management token with `User → API Tokens → Edit` (to roll the token value) +
+ *      `Zone → Zone → Read` (so the monitor's /zones probe also passes) scope.  If the item
+ *      is absent, the script exits 0 with an
  *      "awaiting Kevin's mint" message — NOT a failure.
  *   2. The `--rotate` CLI flag must be explicitly passed.  Default = DRY-RUN: the script
  *      describes what it would do without touching any live system.
@@ -26,7 +27,7 @@
  *     pass the verify endpoint; see studiob-cloudflare-api-tokens.md §"Verifying token validity").
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 
 // ── constants ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -120,8 +121,18 @@ async function cfGet<T>(path: string, mgmtToken: string): Promise<T> {
   return json.result as T;
 }
 
+/**
+ * CF token-roll response.  The new secret is in `result.value` (NOT `result` itself).
+ * Codex P1: earlier version typed `result` as `string` and returned it directly; CF wraps
+ * it in an object: `{ "result": { "id": "...", "value": "<new-token-string>", ... } }`.
+ */
+interface CfRollResult {
+  id?: string;
+  value?: string;
+}
+
 async function cfRoll(tokenId: string, mgmtToken: string): Promise<string> {
-  // PUT /user/tokens/{id}/value — rolls the secret; returns the new value.
+  // PUT /user/tokens/{id}/value — rolls the secret; CF returns the new value under result.value.
   const resp = await fetch(`${CF_BASE}/user/tokens/${tokenId}/value`, {
     method: "PUT",
     headers: {
@@ -131,11 +142,12 @@ async function cfRoll(tokenId: string, mgmtToken: string): Promise<string> {
     body: JSON.stringify({}),
     signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
   });
-  const json = (await resp.json()) as { success?: boolean; result?: string; errors?: unknown[] };
-  if (!json.success || !json.result) {
+  const json = (await resp.json()) as { success?: boolean; result?: CfRollResult; errors?: unknown[] };
+  if (!json.success || !json.result?.value) {
     throw new Error(`CF token roll failed: ${JSON.stringify(json.errors)}`);
   }
-  return json.result;
+  // Return only the new secret VALUE — never the id or any other fields.
+  return json.result.value;
 }
 
 /**
@@ -159,15 +171,15 @@ async function cfVerifyViaZones(token: string): Promise<boolean> {
 // ── Railway helpers ───────────────────────────────────────────────────────────────────────────────
 
 function railwayUpdateToken(service: string, value: string): void {
-  // Value is written via stdin through printf (Rule #62 — never railway variable set --set KEY=VALUE).
-  // We use execFileSync with a spawned printf+pipe because execFileSync doesn't support piping;
-  // the value is passed as argument to printf, never through shell interpolation.
-  const spawnSync = (await import("node:child_process")).spawnSync;
+  // Value is written via stdin through printf (Rule #62 — never `railway variable set KEY=VALUE`).
+  // spawnSync is imported at top level (not dynamic await, which is invalid in a sync function).
+  // --service targets the specific consumer; without it railway targets the linked default service,
+  // which could update the wrong project (codex P2 finding).
   const result = spawnSync(
     "sh",
-    ["-c", "printf '%s' \"$CF_NEW_VALUE\" | railway variable set --skip-deploys --stdin CF_API_TOKEN"],
+    ["-c", "printf '%s' \"$CF_NEW_VALUE\" | railway variable set --service \"$RAILWAY_SVC\" --skip-deploys --stdin CF_API_TOKEN"],
     {
-      env: { ...process.env, CF_NEW_VALUE: value },
+      env: { ...process.env, CF_NEW_VALUE: value, RAILWAY_SVC: service },
       cwd: process.cwd(),
       timeout: 60_000,
     },
@@ -221,8 +233,10 @@ async function main(): Promise<void> {
     if (!mgmtToken) {
       console.log(
         `management token not provisioned — rotation build complete, awaiting Kevin's mint.\n` +
-        `Create "${CF_MGMT_OP_ITEM}" in the "${OP_VAULT}" 1Password vault with a CF token that has` +
-        ` User → API Tokens → Edit scope, then re-run with --rotate.`,
+        `Create "${CF_MGMT_OP_ITEM}" in the "${OP_VAULT}" 1Password vault with a CF token that has\n` +
+        `  Permissions: User → API Tokens → Edit  (to roll the umbrella token)\n` +
+        `               Zone → Zone → Read         (so the monitor's /zones probe also passes)\n` +
+        `Then re-run with --rotate.`,
       );
       process.exit(0);
     }
