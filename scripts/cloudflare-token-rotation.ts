@@ -107,43 +107,47 @@ function opReadOrNull(item: string): string | null {
 }
 
 /**
- * Write a credential value to 1P via STDIN-only — the new token value NEVER appears in argv.
+ * Write a credential value to 1P — the token value NEVER appears in argv.
  *
- * `op item edit <item> --vault=V credential=<value>` puts the value in argv (process listings,
- * Node error.message, GitHub Actions diagnostics).  Instead, we use `op item edit --stdin` which
- * reads a JSON template from stdin.  The value flows only through the stdin pipe and the
- * OP_FIELD_VALUE env var — no argv, no shell substitution, no leak path.
+ * 1Password CLI v2 supports "secret references" in field assignment args via the
+ * `field=env:ENV_VAR_NAME` syntax: the ARG carries only the env-var NAME (not the value),
+ * and `op item edit` reads the real value from the environment itself.  This is the
+ * 1P-recommended pattern for injecting secrets without embedding them in process argv.
  *
- * Stdin format (1P CLI v2 item-template): a JSON object with "fields" containing the fields
- * to update.  Only the "credential" field needs to be listed for a password-type item.
+ * So: argv contains `"credential[password]=env:OP_FIELD_VALUE"` (safe to log)
+ *     env[OP_FIELD_VALUE] = <the actual new token> (never visible in argv or process listings)
+ *
+ * The write-capable SA token must be in OP_SERVICE_ACCOUNT_WRITE; the read-only
+ * OP_SERVICE_ACCOUNT_INFRA is insufficient.
  */
 function opWrite(item: string, value: string): void {
-  // Build the JSON template in Node; the value never touches a shell.
-  const template = JSON.stringify({
-    fields: [
-      {
-        label: "credential",
-        value, // Node writes this to the child's stdin pipe — never an argv element
-      },
-    ],
-  });
-
-  // spawnSync with `input` option writes the template to the child's stdin pipe directly;
-  // the value is never in argv, never interpolated into a shell string.
+  // `credential[password]=env:OP_FIELD_VALUE` tells op to read the field value from the
+  // OP_FIELD_VALUE env var — the value never appears in argv or shell arguments.
+  const writeToken = process.env.OP_SERVICE_ACCOUNT_WRITE;
+  if (!writeToken) {
+    throw new Error(
+      "OP_SERVICE_ACCOUNT_WRITE env var is required for 1P writes — " +
+      "the read-only OP_SERVICE_ACCOUNT_INFRA cannot update vault items. " +
+      "See KEVIN ACTION REQUIRED in the rotation script docs.",
+    );
+  }
   const result = spawnSync(
     "op",
-    ["item", "edit", item, `--vault=${OP_VAULT}`, "--stdin"],
+    ["item", "edit", item, `--vault=${OP_VAULT}`, "credential[password]=env:OP_FIELD_VALUE"],
     {
-      input: template,       // fed to stdin — the ONLY channel the value travels through
       encoding: "utf-8",
-      env: { ...process.env, OP_SERVICE_ACCOUNT_TOKEN: opServiceAccountToken() },
+      env: {
+        ...process.env,
+        OP_SERVICE_ACCOUNT_TOKEN: writeToken, // write-capable SA for the edit
+        OP_FIELD_VALUE: value,                // value consumed by op via env-ref, never via argv
+      },
       timeout: 30_000,
-      stdio: ["pipe", "ignore", "pipe"],
+      stdio: ["ignore", "ignore", "pipe"],
     },
   );
   if (result.status !== 0) {
-    // Sanitize: strip any occurrence of the value before surfacing the error.
     const rawErr = (result.stderr ?? "").trim();
+    // Sanitize: strip any occurrence of the value before surfacing the error.
     const safeErr = rawErr.replace(new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), "[REDACTED]");
     throw new Error(`op item edit failed for "${item}": ${safeErr}`);
   }

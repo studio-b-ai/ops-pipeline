@@ -15,6 +15,12 @@ name: "Cloudflare Token Rotation"
 #
 # SECRETS REQUIRED (all Kevin-gated — Rule #97):
 #   OP_SERVICE_ACCOUNT_INFRA   read-only "Studio B Infrastructure" 1P Service Account
+#                              (used for mgmt-token + umbrella-token READS; all dry-run paths)
+#   OP_SERVICE_ACCOUNT_WRITE   write-capable 1P Service Account for the same vault
+#                              (used ONLY for `op item edit` during live rotation; not needed for
+#                              dry-run. Kevin provisions: create a Service Account with Read+Write
+#                              access to "Studio B Infrastructure" vault, store token as a GH
+#                              Actions secret named OP_SERVICE_ACCOUNT_WRITE in this repo.)
 #   STUDIOB_SLACK_BOT_TOKEN    studiob-ai workspace bot token (Rule #32/#165)
 #
 # GATE: if the 1P item "cloudflare-cf-token-mgmt" does not resolve (not yet provisioned),
@@ -64,6 +70,9 @@ jobs:
         working-directory: scripts
         env:
           OP_SERVICE_ACCOUNT_INFRA: ${{ secrets.OP_SERVICE_ACCOUNT_INFRA }}
+          # OP_SERVICE_ACCOUNT_WRITE is only needed during live rotation (--rotate); the script
+          # checks for its presence and throws early if absent when `op item edit` would be called.
+          OP_SERVICE_ACCOUNT_WRITE: ${{ secrets.OP_SERVICE_ACCOUNT_WRITE }}
           STUDIOB_SLACK_BOT_TOKEN: ${{ secrets.STUDIOB_SLACK_BOT_TOKEN }}
         run: |
           # workflow_dispatch with rotate=true → live rotation; everything else → dry-run
