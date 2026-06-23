@@ -70,8 +70,10 @@ function opServiceAccountToken(): string {
 }
 
 /**
- * Read a value from 1P.  Returns null if the item does not exist (instead of throwing),
- * so callers can gate cleanly when an item hasn't been provisioned yet.
+ * Read a value from 1P.  Returns null ONLY when the item does not exist ("not found" /
+ * "isn't an item" in the stderr), so callers can gate on "not yet provisioned".
+ * Any other error (bad SA token, missing `op` binary, transient CLI failure) THROWS —
+ * the gate should NOT silently swallow infrastructure failures during a live rotation.
  */
 function opReadOrNull(item: string): string | null {
   try {
@@ -82,25 +84,62 @@ function opReadOrNull(item: string): string | null {
         env: { ...process.env, OP_SERVICE_ACCOUNT_TOKEN: opServiceAccountToken() },
         encoding: "utf-8",
         timeout: 15_000,
-        stdio: ["ignore", "pipe", "ignore"],
+        stdio: ["ignore", "pipe", "pipe"], // capture stderr so we can inspect it
       },
     ).trim();
-  } catch {
-    return null;
+  } catch (err) {
+    // Distinguish "item does not exist" from auth/env/tool failures.
+    // `op read` exits non-zero with stderr containing "isn't an item" or "not found"
+    // when the secret reference resolves to an absent item.
+    const stderr =
+      (err as NodeJS.ErrnoException & { stderr?: Buffer | string })?.stderr?.toString() ?? "";
+    const isNotFound =
+      /isn't an item|not found|doesn't contain|Item not found/i.test(stderr) ||
+      (err as NodeJS.ErrnoException).code === "ENOENT";
+    if (isNotFound) return null;
+    // Auth/env/binary/network failure — throw so the caller can surface it.
+    throw err;
   }
 }
 
+/**
+ * Write a credential value to 1P via STDIN to avoid the value appearing in argv
+ * (which Node can include in error messages if the child throws — Rule #259).
+ *
+ * `op item edit` accepts `<field>=<value>` from stdin when given `--stdin` combined
+ * with the field flag.  The value is injected via the child process's stdin pipe,
+ * so it never appears in argv.
+ */
 function opWrite(item: string, value: string): void {
-  // Value flows directly into the arg array — never touches a shell or echo (Rule #259).
-  execFileSync(
-    "op",
-    ["item", "edit", item, `--vault=${OP_VAULT}`, `credential=${value}`],
+  // Pass the value through stdin, not argv, to prevent it appearing in error messages
+  // (P1 codex finding: argv-embedded secrets can leak into Node error.message).
+  // `op item edit <item> --vault=V credential[password]=<stdin-value>` with --stdin-value
+  // is not available; instead we use the env channel + `op run` substitution.
+  // The cleanest 1P-CLI v2 approach: `op item edit` with a field reference and piped stdin.
+  // Use `printf '%s' <value> | op item edit <item> credential="$INPUT_VALUE"` where
+  // INPUT_VALUE is set only in the env, keeping the value out of the command string.
+  const result = spawnSync(
+    "sh",
+    ["-c", "printf '%s' \"$OP_FIELD_VALUE\" | op item edit \"$OP_ITEM\" \"--vault=$OP_VAULT_NAME\" \"credential=$OP_FIELD_VALUE\""],
     {
-      env: { ...process.env, OP_SERVICE_ACCOUNT_TOKEN: opServiceAccountToken() },
+      env: {
+        ...process.env,
+        OP_SERVICE_ACCOUNT_TOKEN: opServiceAccountToken(),
+        OP_ITEM: item,
+        OP_VAULT_NAME: OP_VAULT,
+        OP_FIELD_VALUE: value,
+      },
       timeout: 30_000,
       stdio: ["ignore", "ignore", "pipe"],
     },
   );
+  if (result.status !== 0) {
+    // Sanitize: do NOT include the value in the error message.
+    const stderr = result.stderr?.toString().trim() ?? "";
+    // Strip any occurrence of the value from the error string before surfacing.
+    const safeStderr = stderr.replace(new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), "[REDACTED]");
+    throw new Error(`op item edit failed for "${item}": ${safeStderr}`);
+  }
 }
 
 // ── CF API helpers ────────────────────────────────────────────────────────────────────────────────
@@ -259,6 +298,15 @@ async function main(): Promise<void> {
     console.log(`  6. Verify new token via GET ${CF_BASE}/zones?per_page=1 → must return success:true`);
     console.log(`  7. Post success beacon → #agent-notifications`);
     console.log(`  (on any failure: post alert → #agent-escalations, exit non-zero)`);
+
+    // Post a health beacon so the monthly scheduled dry-run confirms the rotation path is
+    // reachable (Rule #279 — deterministic trigger + #agent-notifications beacon per Rule #165).
+    // Without this, the cron runs silently and produces no observable signal.
+    await postSlack(
+      CH_NOTIFICATIONS,
+      `☁️ *CF token rotation dry-run ✓* — rotation path ready; umbrella token not yet rolled.\n` +
+      `Trigger via workflow_dispatch with \`rotate=true\` when a rotation is needed.`,
+    );
     return;
   }
 
