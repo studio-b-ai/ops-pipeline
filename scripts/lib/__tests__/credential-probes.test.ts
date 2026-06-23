@@ -5,7 +5,9 @@ import {
   parseCertNotAfter,
   entraResultFromPasswordCredentials,
   cloudflareResultFromVerify,
+  cloudflareResultFromZones,
   type CloudflareVerifyResponse,
+  type CloudflareZonesResponse,
 } from "../credential-probes.js";
 
 describe("parseGithubExpiryHeader", () => {
@@ -122,7 +124,46 @@ describe("entraResultFromPasswordCredentials", () => {
   });
 });
 
-describe("cloudflareResultFromVerify", () => {
+// ── cloudflareResultFromZones (the CURRENT probe parser — replaces /user/tokens/verify) ──────────
+//
+// WHY: zone-scoped tokens (Zone:DNS:Edit + Zone:Zone:Read) cannot pass /user/tokens/verify because
+// that endpoint requires User:Read.  The /zones endpoint proves the token is accepted by CF.
+// See studiob-cloudflare-api-tokens.md §"Verifying token validity".
+
+describe("cloudflareResultFromZones", () => {
+  const REC = "2027-05-24"; // manifest recorded_expiry
+
+  it("success:true → alive; countdown from recorded date (token cannot read its own expires_on)", () => {
+    const zones: CloudflareZonesResponse = { success: true, result: [{ id: "abc", name: "acuops.com" }] };
+    expect(cloudflareResultFromZones(zones, REC)).toEqual({ alive: true, expiry: REC, source: "recorded" });
+  });
+
+  it("success:true with empty result array → alive (token accepted even if no zones visible)", () => {
+    const zones: CloudflareZonesResponse = { success: true, result: [] };
+    expect(cloudflareResultFromZones(zones, REC)).toEqual({ alive: true, expiry: REC, source: "recorded" });
+  });
+
+  it("success:true with no recorded date → alive, no expiry (NO_EXPIRY upstream = backfill flag)", () => {
+    const zones: CloudflareZonesResponse = { success: true, result: [] };
+    expect(cloudflareResultFromZones(zones, null)).toEqual({ alive: true, expiry: null, source: "recorded" });
+  });
+
+  it("success:false → DEAD (token rejected / expired / revoked)", () => {
+    const zones: CloudflareZonesResponse = { success: false, result: null };
+    expect(cloudflareResultFromZones(zones, REC)).toEqual({ alive: false, expiry: REC, source: "recorded" });
+  });
+
+  it("success field absent → PROBE_FAILED (unexpected shape, never a silent OK)", () => {
+    const zones: CloudflareZonesResponse = {}; // no success field
+    const r = cloudflareResultFromZones(zones, REC);
+    expect(r.alive).toBe(true);
+    expect(r.error).toBeTruthy();
+  });
+});
+
+// ── cloudflareResultFromVerify (DEPRECATED — retained for test-compile; network seam uses /zones) ─
+
+describe("cloudflareResultFromVerify (deprecated — kept for existing test coverage)", () => {
   const REC = "2027-05-24"; // manifest recorded_expiry (CF verify has no live expiry to read)
   // `st` is the Cloudflare token-verify STATUS (CF's own API field — unrelated to any Postgres
   // enum); passed as a variable so the value never sits adjacent to a `status:` key.

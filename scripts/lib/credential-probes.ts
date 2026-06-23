@@ -97,27 +97,63 @@ export function parseCertNotAfter(value: string): string {
   return new Date(ms).toISOString();
 }
 
+/**
+ * Shape of a Cloudflare /client/v4/zones response (just the fields we need for the aliveness probe).
+ *
+ * WHY /zones INSTEAD OF /user/tokens/verify:
+ * The umbrella token (`studiob-cloudflare-dns-umbrella`) is ZONE-SCOPED (Zone:DNS:Edit +
+ * Zone:Zone:Read).  `/user/tokens/verify` requires `User:Read`, which this token intentionally
+ * does NOT have — the endpoint returns `success:false "Invalid API Token"` even when the token
+ * is perfectly valid.  This caused a daily false "Credential DEAD — cloudflare-umbrella" alert.
+ * The canonical fix (studiob-cloudflare-api-tokens.md lines 91-104) is to use `/zones` as the
+ * aliveness probe: `success:true` from a live /zones call proves the token works.
+ */
+export interface CloudflareZonesResponse {
+  success?: boolean;
+  result?: Array<{ id?: string; name?: string }> | null;
+}
+
+/**
+ * Pure: turn a Cloudflare `/client/v4/zones` response + the manifest's recorded expiry into a
+ * ProbeResult (exported for tests).
+ *
+ * Zone-scoped tokens cannot self-introspect via /user/tokens/verify (requires User:Read); the
+ * /zones endpoint proves the token is accepted by the CF API — that IS aliveness. The expiry
+ * countdown comes from `recordedExpiry` (same idiom as npm-granular / 1password-sa).
+ *   - success:true  → alive; expiry = recordedExpiry
+ *   - success:false → DEAD (token rejected / expired / revoked)
+ *   - unexpected shape (success absent) → PROBE_FAILED (never a silent OK)
+ */
+export function cloudflareResultFromZones(
+  json: CloudflareZonesResponse,
+  recordedExpiry: string | null,
+): ProbeResult {
+  if (json.success === true) {
+    return { alive: true, expiry: recordedExpiry, source: "recorded" };
+  }
+  if (json.success === false) {
+    return { alive: false, expiry: recordedExpiry, source: "recorded" };
+  }
+  // success field absent — unexpected API shape (never a silent OK).
+  return { alive: true, expiry: null, source: "probe", error: "cloudflare /zones returned unexpected shape (no success field)" };
+}
+
+// Keep the old verify-response type and parser exported so existing tests compile; the
+// NETWORK seam below now calls /zones instead.
 export interface CloudflareVerifyResponse {
   success?: boolean;
   result?: { status?: string } | null;
 }
 
 /**
- * Pure: turn a Cloudflare `/user/tokens/verify` response + the manifest's recorded expiry into a
- * ProbeResult (exported for tests). CF's verify endpoint returns ONLY the token id + status — NOT
- * `expires_on` (that lives on `/user/tokens/{id}`, which a narrowly-scoped DNS-edit token cannot
- * read), so this is an ALIVENESS probe and the countdown comes from `recordedExpiry` — same idiom as
- * npm-granular / 1password-sa. (Do not "fix" this to call /user/tokens/{id}; scoped tokens 403 there.)
- *   - success:false               → DEAD (token rejected)
- *   - status === "active"         → alive; expiry = recordedExpiry (null → NO_EXPIRY upstream = backfill)
- *   - status missing/empty        → PROBE_FAILED (unexpected/changed response shape — never a silent OK)
- *   - any other explicit status   → DEAD (disabled / expired)
+ * @deprecated The /user/tokens/verify endpoint is incompatible with zone-scoped tokens.
+ * Use cloudflareResultFromZones() instead. Retained only so existing test suites compile;
+ * the network seam (probeCloudflareToken) no longer calls this function.
  */
 export function cloudflareResultFromVerify(
   json: CloudflareVerifyResponse,
   recordedExpiry: string | null,
 ): ProbeResult {
-  // CF returns success:false for an invalid/revoked/expired token.
   if (json.success === false) {
     return { alive: false, expiry: recordedExpiry, source: "recorded" };
   }
@@ -126,10 +162,8 @@ export function cloudflareResultFromVerify(
     return { alive: true, expiry: recordedExpiry, source: "recorded" };
   }
   if (status == null || status === "") {
-    // 200 but no usable status (missing field / API drift) — a monitoring gap, never a silent OK.
     return { alive: true, expiry: null, source: "probe", error: "cloudflare verify returned no token status" };
   }
-  // Explicit non-active status (e.g. "disabled", "expired").
   return { alive: false, expiry: recordedExpiry, source: "recorded" };
 }
 
@@ -191,13 +225,23 @@ export async function probeNpmGranular(token: string, recordedExpiry: string | n
 }
 
 /**
- * Cloudflare API token: GET api.cloudflare.com/client/v4/user/tokens/verify with the token.
- * Verify confirms aliveness only (id + status — no expiry); the countdown comes from recordedExpiry.
- * 200 + active → alive; 401/403 or status≠active → DEAD; other non-2xx → PROBE_FAILED.
+ * Cloudflare API token aliveness probe: GET /client/v4/zones?per_page=1.
+ *
+ * WHY /zones AND NOT /user/tokens/verify:
+ * Zone-scoped tokens (e.g. studiob-cloudflare-dns-umbrella with Zone:DNS:Edit + Zone:Zone:Read)
+ * do NOT have User:Read, so /user/tokens/verify returns success:false "Invalid API Token" even
+ * for a perfectly valid token — causing a daily false DEAD alert. The /zones endpoint is the
+ * canonical probe for zone-scoped tokens (studiob-cloudflare-api-tokens.md §"Verifying token
+ * validity", lines 91-104): success:true proves the token is accepted. The expiry countdown
+ * comes from recordedExpiry (zone-scoped tokens cannot read their own expires_on either).
+ *   - success:true  → alive; expiry from recordedExpiry
+ *   - success:false → DEAD (rejected/expired/revoked)
+ *   - 401/403       → DEAD
+ *   - other non-2xx → PROBE_FAILED
  */
 export async function probeCloudflareToken(token: string, recordedExpiry: string | null): Promise<ProbeResult> {
   try {
-    const resp = await fetch("https://api.cloudflare.com/client/v4/user/tokens/verify", {
+    const resp = await fetch("https://api.cloudflare.com/client/v4/zones?per_page=1", {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
     });
@@ -205,9 +249,9 @@ export async function probeCloudflareToken(token: string, recordedExpiry: string
       return { alive: false, expiry: recordedExpiry, source: "recorded" };
     }
     if (!resp.ok) {
-      return { alive: true, expiry: null, source: "probe", error: `cloudflare verify HTTP ${resp.status}` };
+      return { alive: true, expiry: null, source: "probe", error: `cloudflare /zones HTTP ${resp.status}` };
     }
-    return cloudflareResultFromVerify((await resp.json()) as CloudflareVerifyResponse, recordedExpiry);
+    return cloudflareResultFromZones((await resp.json()) as CloudflareZonesResponse, recordedExpiry);
   } catch (err) {
     return { alive: true, expiry: null, source: "probe", error: `cloudflare probe failed: ${errMsg(err)}` };
   }
