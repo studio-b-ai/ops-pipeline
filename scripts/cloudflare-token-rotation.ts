@@ -88,57 +88,64 @@ function opReadOrNull(item: string): string | null {
       },
     ).trim();
   } catch (err) {
-    // Distinguish "item does not exist" from auth/env/tool failures.
-    // `op read` exits non-zero with stderr containing "isn't an item" or "not found"
-    // when the secret reference resolves to an absent item.
-    const stderr =
-      (err as NodeJS.ErrnoException & { stderr?: Buffer | string })?.stderr?.toString() ?? "";
-    const isNotFound =
-      /isn't an item|not found|doesn't contain|Item not found/i.test(stderr) ||
-      (err as NodeJS.ErrnoException).code === "ENOENT";
-    if (isNotFound) return null;
-    // Auth/env/binary/network failure — throw so the caller can surface it.
+    // Distinguish "item does not exist" from infrastructure failures.
+    // `op read` exits non-zero with stderr containing these patterns when the item is genuinely
+    // absent from the vault — these are the ONLY cases where we want to return null (gate: "not
+    // yet provisioned").  All other failures (ENOENT from missing `op` binary, auth errors, SA
+    // token problems, network timeouts) THROW so the caller cannot silently pass a broken runner.
+    const e = err as NodeJS.ErrnoException & { stderr?: Buffer | string };
+    if (e.code === "ENOENT") {
+      // `op` binary is not installed — this is an infrastructure failure, not a missing item.
+      throw new Error(`'op' (1Password CLI) is not installed or not on PATH — cannot read 1P item "${item}"`);
+    }
+    const stderr = e?.stderr?.toString() ?? "";
+    const isItemNotFound = /isn't an item|doesn't contain|Item not found/i.test(stderr);
+    if (isItemNotFound) return null;
+    // Auth/env/network failure — surface it.
     throw err;
   }
 }
 
 /**
- * Write a credential value to 1P via STDIN to avoid the value appearing in argv
- * (which Node can include in error messages if the child throws — Rule #259).
+ * Write a credential value to 1P via STDIN-only — the new token value NEVER appears in argv.
  *
- * `op item edit` accepts `<field>=<value>` from stdin when given `--stdin` combined
- * with the field flag.  The value is injected via the child process's stdin pipe,
- * so it never appears in argv.
+ * `op item edit <item> --vault=V credential=<value>` puts the value in argv (process listings,
+ * Node error.message, GitHub Actions diagnostics).  Instead, we use `op item edit --stdin` which
+ * reads a JSON template from stdin.  The value flows only through the stdin pipe and the
+ * OP_FIELD_VALUE env var — no argv, no shell substitution, no leak path.
+ *
+ * Stdin format (1P CLI v2 item-template): a JSON object with "fields" containing the fields
+ * to update.  Only the "credential" field needs to be listed for a password-type item.
  */
 function opWrite(item: string, value: string): void {
-  // Pass the value through stdin, not argv, to prevent it appearing in error messages
-  // (P1 codex finding: argv-embedded secrets can leak into Node error.message).
-  // `op item edit <item> --vault=V credential[password]=<stdin-value>` with --stdin-value
-  // is not available; instead we use the env channel + `op run` substitution.
-  // The cleanest 1P-CLI v2 approach: `op item edit` with a field reference and piped stdin.
-  // Use `printf '%s' <value> | op item edit <item> credential="$INPUT_VALUE"` where
-  // INPUT_VALUE is set only in the env, keeping the value out of the command string.
-  const result = spawnSync(
-    "sh",
-    ["-c", "printf '%s' \"$OP_FIELD_VALUE\" | op item edit \"$OP_ITEM\" \"--vault=$OP_VAULT_NAME\" \"credential=$OP_FIELD_VALUE\""],
-    {
-      env: {
-        ...process.env,
-        OP_SERVICE_ACCOUNT_TOKEN: opServiceAccountToken(),
-        OP_ITEM: item,
-        OP_VAULT_NAME: OP_VAULT,
-        OP_FIELD_VALUE: value,
+  // Build the JSON template in Node; the value never touches a shell.
+  const template = JSON.stringify({
+    fields: [
+      {
+        label: "credential",
+        value, // Node writes this to the child's stdin pipe — never an argv element
       },
+    ],
+  });
+
+  // spawnSync with `input` option writes the template to the child's stdin pipe directly;
+  // the value is never in argv, never interpolated into a shell string.
+  const result = spawnSync(
+    "op",
+    ["item", "edit", item, `--vault=${OP_VAULT}`, "--stdin"],
+    {
+      input: template,       // fed to stdin — the ONLY channel the value travels through
+      encoding: "utf-8",
+      env: { ...process.env, OP_SERVICE_ACCOUNT_TOKEN: opServiceAccountToken() },
       timeout: 30_000,
-      stdio: ["ignore", "ignore", "pipe"],
+      stdio: ["pipe", "ignore", "pipe"],
     },
   );
   if (result.status !== 0) {
-    // Sanitize: do NOT include the value in the error message.
-    const stderr = result.stderr?.toString().trim() ?? "";
-    // Strip any occurrence of the value from the error string before surfacing.
-    const safeStderr = stderr.replace(new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), "[REDACTED]");
-    throw new Error(`op item edit failed for "${item}": ${safeStderr}`);
+    // Sanitize: strip any occurrence of the value before surfacing the error.
+    const rawErr = (result.stderr ?? "").trim();
+    const safeErr = rawErr.replace(new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), "[REDACTED]");
+    throw new Error(`op item edit failed for "${item}": ${safeErr}`);
   }
 }
 
