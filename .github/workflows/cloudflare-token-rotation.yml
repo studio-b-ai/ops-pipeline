@@ -1,0 +1,83 @@
+name: "Cloudflare Token Rotation"
+
+# CLAUDE.md Rules #99 / #279 / #302 — gated token rotation for the CF umbrella token.
+#
+# HOW THIS WORKFLOW IS TRIGGERED:
+#   1. workflow_dispatch (Kevin's manual "rotate now" button, rotate=true)
+#      → Live rotation: rolls the CF token, updates 1P + Railway consumers, verifies.
+#   2. workflow_dispatch (dry-run, rotate=false — default)
+#      → Reports what it WOULD do; touches nothing live.
+#   3. Monthly scheduled dry-run (deterministic trigger per Rule #279)
+#      → Posts a beacon to #agent-notifications confirming the rotation path is healthy.
+#      → The credential-expiry monitor already fires WARN at ≤14d; the monthly dry-run
+#        is an independent "are we ready?" health check, not a rotation trigger.
+#        (A 1-year token on a monthly short-cadence auto-rotate would be pointless churn.)
+#
+# SECRETS REQUIRED (all Kevin-gated — Rule #97):
+#   OP_SERVICE_ACCOUNT_INFRA   read-only "Studio B Infrastructure" 1P Service Account
+#                              (used for mgmt-token + umbrella-token READS; all dry-run paths)
+#   OP_SERVICE_ACCOUNT_WRITE   write-capable 1P Service Account for the same vault
+#                              (used ONLY for `op item edit` during live rotation; not needed for
+#                              dry-run. Kevin provisions: create a Service Account with Read+Write
+#                              access to "Studio B Infrastructure" vault, store token as a GH
+#                              Actions secret named OP_SERVICE_ACCOUNT_WRITE in this repo.)
+#   STUDIOB_SLACK_BOT_TOKEN    studiob-ai workspace bot token (Rule #32/#165)
+#
+# GATE: if the 1P item "cloudflare-cf-token-mgmt" does not resolve (not yet provisioned),
+# the script exits 0 with an "awaiting Kevin's mint" message — NOT a CI failure.
+# The management token needs TWO CF permissions:
+#   User → API Tokens → Edit   (roll the umbrella token value)
+#   Zone → Zone → Read         (so the monitor's /zones aliveness probe passes)
+# See scripts/cloudflare-token-rotation.ts for the full spec.
+
+on:
+  workflow_dispatch:
+    inputs:
+      rotate:
+        description: "Execute live rotation (true) or dry-run only (false)"
+        type: boolean
+        default: false
+  schedule:
+    # Monthly on the 1st at 10:00 UTC — dry-run beacon (Rule #94: UTC-only cron)
+    - cron: "0 10 1 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloudflare-token-rotation
+  cancel-in-progress: false
+
+jobs:
+  rotate:
+    name: "Rotate or dry-run Cloudflare umbrella token"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: "Install 1Password CLI"
+        uses: 1password/install-cli-action@v1
+
+      - name: "Install deps"
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: "Run Cloudflare token rotation"
+        working-directory: scripts
+        env:
+          OP_SERVICE_ACCOUNT_INFRA: ${{ secrets.OP_SERVICE_ACCOUNT_INFRA }}
+          # OP_SERVICE_ACCOUNT_WRITE is only needed during live rotation (--rotate); the script
+          # checks for its presence and throws early if absent when `op item edit` would be called.
+          OP_SERVICE_ACCOUNT_WRITE: ${{ secrets.OP_SERVICE_ACCOUNT_WRITE }}
+          STUDIOB_SLACK_BOT_TOKEN: ${{ secrets.STUDIOB_SLACK_BOT_TOKEN }}
+        run: |
+          # workflow_dispatch with rotate=true → live rotation; everything else → dry-run
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.rotate }}" = "true" ]; then
+            npx tsx cloudflare-token-rotation.ts --rotate
+          else
+            npx tsx cloudflare-token-rotation.ts
+          fi
