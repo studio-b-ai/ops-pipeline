@@ -1,0 +1,83 @@
+name: Railway Volume Monitor
+
+# CLAUDE.md Rule #302 family — fleet-wide Railway volume-usage monitoring.
+#
+# Origin (2026-07-27, Kevin-authorized): the aesthetik-production `Postgres` service's 500MB
+# Railway volume sat at ≥96% for 24h+ with ZERO alerting, hit 100%, and crash-looped ~10 hours,
+# taking the whole Acumatica gateway down. Mirrors credential-expiry-monitor.yml's shape (same
+# cadence family, same alert channels, same `[skip ci]` dedup-state commit) for volume usage%
+# instead of credential expiry.
+#
+# Every 6h: for every project visible to RAILWAY_API_TOKEN (root `projects()` query, falling back
+# to scripts/railway-projects.manifest.yaml when that field errors for this token — a REAL,
+# verified-live degradation path, see scripts/lib/railway-volume-probes.ts file header), classify
+# every volume instance with `sizeMB > 0` into OK / WARN (≥75%) / CRITICAL (≥90%), and alert
+# #agent-escalations ONLY on a state TRANSITION (never per run — Rules #292/#358).
+#
+# Kevin-gated secret this workflow needs (added before this can go live):
+#   RAILWAY_API_TOKEN       Railway API token with read access to the projects being monitored.
+#                           NOT provisioned as part of this PR (Rule #363 — no secret values in the
+#                           repo) — Kevin's session sets it via
+#                             gh secret set RAILWAY_API_TOKEN --repo studio-b-ai/ops-pipeline --body "$TOKEN"
+#                           (Rule #98 — direct --body, never stdin.)
+#   STUDIOB_SLACK_BOT_TOKEN already present in this repo (used by credential-expiry-monitor.yml).
+#
+# ⚠️ GitHub Actions does not validate Actions-identifier rules (job keys / step ids) at authoring
+# time (Rules #198/#280) — after merge, run `gh workflow run "Railway Volume Monitor"
+# --repo studio-b-ai/ops-pipeline` once and confirm a real run appears, don't just trust the diff.
+
+on:
+  schedule:
+    - cron: "27 */6 * * *" # every 6h (GH Actions cron is UTC-only — Rule #94)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run the real query but skip Slack posts + state commit"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # commit the dedup state file (scripts/railway-volume-alert-state.json)
+
+concurrency:
+  group: railway-volume-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Run Railway volume monitor
+        working-directory: scripts
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          STUDIOB_SLACK_BOT_TOKEN: ${{ secrets.STUDIOB_SLACK_BOT_TOKEN }}
+        run: npx tsx railway-volume-monitor.ts ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+
+      - name: Commit dedup state if changed
+        # !cancelled() is REQUIRED here (Rule #320): the monitor step deliberately exits 1 on a
+        # fail-loud condition (every project's fetch failed this run), and an `if:` without a
+        # status-check function gets an IMPLICIT `success() &&` prepended by GitHub — silently
+        # skipping this commit exactly when it matters most (the PROBE_FAILED state for the
+        # outage never lands, so the NEXT run re-discovers the "transition" and re-alerts every
+        # cron instead of once — the same duplicate-alert failure mode #292/#358 exist to prevent).
+        if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || !inputs.dry_run) }}
+        run: |
+          # `git add` first so the check catches an untracked file too, not just tracked diffs.
+          git add scripts/railway-volume-alert-state.json
+          if ! git diff --staged --quiet -- scripts/railway-volume-alert-state.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore(volume-monitor): update alert dedup state [skip ci]"
+            git push
+          fi

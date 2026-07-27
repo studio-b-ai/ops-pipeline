@@ -9,6 +9,7 @@
     "sync:hubspot": "tsx sync-hubspot.ts",
     "drift:check": "tsx drift-check.ts",
     "monitor:credentials": "tsx credential-expiry-monitor.ts",
+    "monitor:railway-volumes": "tsx railway-volume-monitor.ts",
     "test": "vitest run"
   },
   "dependencies": {
