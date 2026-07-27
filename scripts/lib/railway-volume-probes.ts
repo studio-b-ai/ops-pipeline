@@ -109,9 +109,11 @@ export function parseProjectsRootResponse(json: GraphQLResponse<ProjectsRootResp
 
 /**
  * Try the root `projects()` connection (discovers every project the token can see — the ideal
- * "fleet-wide" path). Returns null when the field errors (quirk 2 above) so the caller falls back
- * to the manifest list; this is a DEGRADATION, not a token-invalid condition (that's `probeTokenAlive`'s
- * job), so it must never itself raise or post an escalation.
+ * "fleet-wide" path). Returns null when the field errors (quirk 2 above); the caller unions
+ * whatever this returns (including null → treated as empty) with the manifest list. This is a
+ * DEGRADATION signal, never a token-invalid one — see the file header on why "token can't do its
+ * job" is decided elsewhere (every project's per-project fetch failing), not here — so this must
+ * never itself raise or post an escalation.
  */
 export async function discoverProjectIds(token: string): Promise<ProjectRef[] | null> {
   try {

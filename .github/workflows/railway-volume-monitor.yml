@@ -65,7 +65,13 @@ jobs:
         run: npx tsx railway-volume-monitor.ts ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
 
       - name: Commit dedup state if changed
-        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.dry_run }}
+        # !cancelled() is REQUIRED here (Rule #320): the monitor step deliberately exits 1 on a
+        # fail-loud condition (every project's fetch failed this run), and an `if:` without a
+        # status-check function gets an IMPLICIT `success() &&` prepended by GitHub — silently
+        # skipping this commit exactly when it matters most (the PROBE_FAILED state for the
+        # outage never lands, so the NEXT run re-discovers the "transition" and re-alerts every
+        # cron instead of once — the same duplicate-alert failure mode #292/#358 exist to prevent).
+        if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || !inputs.dry_run) }}
         run: |
           # `git add` first so the check catches an untracked file too, not just tracked diffs.
           git add scripts/railway-volume-alert-state.json
