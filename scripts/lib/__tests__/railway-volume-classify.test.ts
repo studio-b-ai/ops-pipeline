@@ -70,4 +70,19 @@ describe("computeTransition", () => {
     // Documents the contract the main script relies on: state.get(key) ?? "OK".
     expect(computeTransition("OK", "WARN").changed).toBe(true);
   });
+
+  it.each(["OK", "WARN", "CRITICAL"] as const)(
+    "%s → PROBE_FAILED is an escalation (project-level fetch-failure dedup, mirrors credential-expiry-monitor's PROBE_FAILED)",
+    (prev) => {
+      expect(computeTransition(prev, "PROBE_FAILED")).toEqual({ changed: true, direction: "escalate" });
+    },
+  );
+
+  it("PROBE_FAILED → OK is a recovery (the project's fetch started working again)", () => {
+    expect(computeTransition("PROBE_FAILED", "OK")).toEqual({ changed: true, direction: "recover" });
+  });
+
+  it("PROBE_FAILED → PROBE_FAILED is unchanged (never re-alert every run while still broken)", () => {
+    expect(computeTransition("PROBE_FAILED", "PROBE_FAILED")).toEqual({ changed: false, direction: "none" });
+  });
 });

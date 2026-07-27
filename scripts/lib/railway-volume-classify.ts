@@ -20,6 +20,17 @@
 
 export type VolumeStatus = "OK" | "WARN" | "CRITICAL";
 
+/**
+ * Superset of VolumeStatus used ONLY for state-transition dedup: `computeTransition` also drives
+ * per-PROJECT "could we even fetch this project's volumes?" tracking (a project-level GraphQL
+ * error — e.g. a bad project id, or a resolver bug like the aesthetik-production `service{}` one
+ * documented in railway-volume-probes.ts — must not silently vanish into a console.warn; it gets
+ * the same once-per-transition escalation treatment as a volume's own WARN/CRITICAL, mirroring
+ * credential-expiry-monitor.ts's PROBE_FAILED status). Ranked WORSE than CRITICAL so entering it
+ * from any volume-usage status is always an escalation, and leaving it is always a recovery.
+ */
+export type MonitorStatus = VolumeStatus | "PROBE_FAILED";
+
 /** WARN at ≥75% used, CRITICAL at ≥90% — per the chip spec (2026-07-27 authorization). */
 export const WARN_THRESHOLD_PCT = 75;
 export const CRITICAL_THRESHOLD_PCT = 90;
@@ -46,22 +57,22 @@ export function classifyUsage(currentSizeMB: number, sizeMB: number): UsageClass
   return { usagePct, status };
 }
 
-const RANK: Record<VolumeStatus, number> = { OK: 0, WARN: 1, CRITICAL: 2 };
+const RANK: Record<MonitorStatus, number> = { OK: 0, WARN: 1, CRITICAL: 2, PROBE_FAILED: 3 };
 
 export interface Transition {
   changed: boolean;
-  /** "escalate" = getting worse (OK→WARN, OK→CRITICAL, WARN→CRITICAL); "recover" = getting better. */
+  /** "escalate" = getting worse (OK→WARN, OK→CRITICAL, WARN→CRITICAL, any→PROBE_FAILED); "recover" = getting better. */
   direction: "escalate" | "recover" | "none";
 }
 
 /**
- * Pure: compare the volume's previous persisted status to its current one.
+ * Pure: compare a volume's (or a project-probe's) previous persisted status to its current one.
  *
- * A volume never seen before has no entry in the state file — the caller passes `prev = "OK"` for
- * that case (documented at the callsite), so a first-ever WARN/CRITICAL still alerts (it's a real
- * transition from the assumed baseline) while a first-ever OK stays silent.
+ * An entity never seen before has no entry in the state file — the caller passes `prev = "OK"` for
+ * that case (documented at the callsite), so a first-ever WARN/CRITICAL/PROBE_FAILED still alerts
+ * (it's a real transition from the assumed baseline) while a first-ever OK stays silent.
  */
-export function computeTransition(prev: VolumeStatus, curr: VolumeStatus): Transition {
+export function computeTransition(prev: MonitorStatus, curr: MonitorStatus): Transition {
   if (prev === curr) return { changed: false, direction: "none" };
   return { changed: true, direction: RANK[curr] > RANK[prev] ? "escalate" : "recover" };
 }

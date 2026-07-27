@@ -1,14 +1,16 @@
-# Railway Volume Usage Monitor — known-projects fallback manifest (CLAUDE.md Rule #302 family).
+# Railway Volume Usage Monitor — known-projects safety-net manifest (CLAUDE.md Rule #302 family).
 #
-# The monitor FIRST tries the GraphQL `projects(first:)` root query to discover every project
-# visible to RAILWAY_API_TOKEN — the ideal fleet-wide path, no manifest maintenance needed. It
-# falls back to this list ONLY when that field errors.
+# The monitor tries the GraphQL `projects(first:)` root query to discover every project visible
+# to RAILWAY_API_TOKEN — the ideal fleet-wide path, no manifest maintenance needed — and UNIONS
+# whatever it finds with this list (deduped by id), rather than treating this manifest as an
+# either/or fallback. When the root query errors entirely, this list is ALL the monitor checks.
 #
-# That fallback is a REAL, verified-live path, not a hypothetical: probing the actual Railway API
-# on 2026-07-27 with a real account token, `projects(first:)` returned
+# That degradation path is REAL, verified-live, not a hypothetical: probing the actual Railway API
+# on 2026-07-27 with a real (CLI-session) account token, `projects(first:)` returned
 # `{"errors":[{"message":"Not Authorized"}], "data": null}` while `project(id: "...")` on the SAME
-# token worked fine for every project below. Whatever scope RAILWAY_API_TOKEN ends up with, this
-# manifest is what keeps the monitor fleet-wide if the root query is unavailable to it too.
+# token worked fine for every project below. Whatever scope RAILWAY_API_TOKEN ends up with
+# (Account or Workspace — see lib/railway-volume-probes.ts file header), this manifest is what
+# keeps the monitor fleet-wide if the root query is unavailable, or only partially scoped, to it.
 #
 # Keep this easy to extend: add a project below and the next run picks it up, no code change.
 # Get a project's id: `railway status` inside a linked checkout, the Railway dashboard (project

@@ -13,12 +13,16 @@
  *    sets one.
  *
  * 2. The root `Query.projects` connection is NOT reliably available to every token shape — a real
- *    personal-account token got `{"errors":[{"message":"Not Authorized", ...}], "data": null}` on
- *    `projects(first: N)` while `Query.project(id: ...)` on the SAME token worked fine for the same
- *    projects. Railway's GraphQL API also returns HTTP 200 on auth/permission failures — the error
- *    surfaces ONLY in the `errors` array, never the HTTP status — so `discoverProjectIds` treats
- *    ANY error on the `projects` field as "unavailable, fall back to the manifest list" rather than
- *    trying to pattern-match the message.
+ *    personal-account (CLI-session) token got `{"errors":[{"message":"Not Authorized", ...}],
+ *    "data": null}` on `projects(first: N)` while `Query.project(id: ...)` on the SAME token
+ *    worked fine for the same projects. Railway's GraphQL API also returns HTTP 200 on
+ *    auth/permission failures — the error surfaces ONLY in the `errors` array, never the HTTP
+ *    status — so `discoverProjectIds` treats ANY error on the `projects` field as "unavailable"
+ *    (returns null) rather than trying to pattern-match the message. The caller
+ *    (railway-volume-monitor.ts) UNIONS whatever this returns with the manifest list rather than
+ *    treating the manifest as an either/or fallback — a Workspace or Account token might return a
+ *    real-but-scoped-differently project list, so the manifest stays a safety net even when
+ *    discovery partly works.
  *
  * A THIRD quirk shaped the query itself: selecting the nested `VolumeInstance.service { ... }`
  * object field 500s ("Problem processing request", no field-level detail) for the
@@ -31,6 +35,18 @@
  * in `parseProjectVolumesResponse`. Do not re-add the nested `service` selection without re-testing
  * against aesthetik-production first — it silently breaks the ENTIRE per-project query, which would
  * starve monitoring for exactly the project this monitor exists for.
+ *
+ * A FOURTH thing this file deliberately does NOT do (codex review finding, corrected before merge):
+ * gate on a `me { id }` liveness probe as "the token is dead if this errors". Per Railway's own
+ * docs (docs.railway.com/integrations/api, "Choosing a token type"), `me` is explicitly account-only
+ * — "This query cannot be used with a workspace or project token because the data returned is
+ * scoped to your personal account." A Workspace token is Railway's OWN recommended type for
+ * exactly this use case ("Best For: Team CI/CD, shared automation"), so gating fail-loud on `me`
+ * would mark a perfectly valid, correctly-scoped workspace token as DEAD and abort every run before
+ * checking a single volume — a worse failure mode than the one this monitor exists to catch.
+ * Instead, "the token can't do its job" is defined operationally in railway-volume-monitor.ts as
+ * "every project's volume fetch failed this run" — token-type-agnostic, and it's the same signal
+ * whether the root cause is an invalid token, a wrong-scope token, or a network outage.
  */
 
 export const RAILWAY_GRAPHQL_URL = "https://backboard.railway.com/graphql/v2";
@@ -63,37 +79,6 @@ export async function graphqlRequest<T>(
     throw new Error(`Railway GraphQL HTTP ${resp.status}`);
   }
   return (await resp.json()) as GraphQLResponse<T>;
-}
-
-// ───────────────────────────── token liveness ─────────────────────────────
-
-const ME_QUERY = `query VolMonWhoAmI { me { id } }`;
-
-export interface LivenessResult {
-  ok: boolean;
-  error?: string;
-}
-
-/**
- * Dedicated liveness probe for RAILWAY_API_TOKEN. `me` is the cheapest field every valid token can
- * resolve regardless of project/team scoping, so — unlike `projects()` (quirk 2 above) — an error
- * here means the token itself is dead/expired/malformed, not merely under-scoped. This is the ONLY
- * place this monitor treats a Railway API error as "the token is invalid" (Rule #302 family: fail
- * loud on a dead credential; a silently-dead monitor is worse than none).
- */
-export async function probeTokenAlive(token: string): Promise<LivenessResult> {
-  try {
-    const json = await graphqlRequest<{ me: { id: string } | null }>(token, ME_QUERY);
-    if (json.errors && json.errors.length > 0) {
-      return { ok: false, error: json.errors.map((e) => e.message).join("; ") };
-    }
-    if (!json.data?.me?.id) {
-      return { ok: false, error: "me query returned no data" };
-    }
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
-  }
 }
 
 // ───────────────────────────── project discovery ─────────────────────────────
