@@ -1,1 +1,13 @@
-{}
+{
+  "acudev-prod@2026-06-08T23:32:03.339Z": "QUIET",
+  "cli-kevin-macbook-2026-07@2026-07-10T21:29:25.607Z": "QUIET",
+  "cli-kevin-sandbox-canary@2026-07-10T23:42:12.290Z": "QUIET",
+  "cli-kevin-sandbox-canary@2026-07-10T23:42:28.775Z": "QUIET",
+  "heritage-gateway-primary-v2@2026-06-08T03:34:41.728Z": "QUIET",
+  "quarterbook@2026-06-08T23:19:17.905Z": "QUIET",
+  "revocation-gate": "CLOSED",
+  "shuttle-prod@2026-06-10T01:10:10.401Z": "QUIET",
+  "support-agent-prod@2026-06-08T23:25:44.465Z": "QUIET",
+  "webhook-router-prod-v2@2026-06-08T03:40:36.660Z": "QUIET",
+  "webhook-router-prod@2026-06-10T03:04:33.468Z": "QUIET"
+}
