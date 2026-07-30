@@ -1,0 +1,70 @@
+name: Gateway Token Watch
+
+# CLAUDE.md Rule #279 — the deterministic trigger behind the 2026-07-30 per-consumer
+# gateway-token rollout's revocation gate. See scripts/gateway-token-watch.ts header for the
+# full design (Rule #413 durable-table read of acumatica_tenant_tokens.last_used_at; straggler
+# detection; transition-deduped alerts per Rules #292/#358; HUMAN-gated revocation per #97).
+#
+# Daily: legacy tokens used after the cutover → straggler escalation; all legacy tokens quiet
+# ≥3 days → one-time "revocation gate GREEN" escalation. Never revokes anything itself.
+#
+# Secrets:
+#   GATEWAY_DATABASE_URL     gateway Postgres (public proxy — GHA can't reach railway-internal).
+#                            ⚠️ Rule #99 dual-store: same value as studiob-api's DATABASE_URL —
+#                            rotate BOTH together when the DB moves off the public proxy.
+#   STUDIOB_SLACK_BOT_TOKEN  already present in this repo.
+#
+# ⚠️ Rules #198/#280: after merge, `gh workflow run "Gateway Token Watch"` once and confirm a
+# completed run — CI does not validate Actions-identifier rules.
+
+on:
+  schedule:
+    - cron: "7 13 * * *" # daily 13:07 UTC = 09:07 ET (GH cron is UTC-only — Rule #94)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run the real query but skip Slack posts + state commit"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # commit the dedup state file (scripts/gateway-token-watch-state.json)
+
+concurrency:
+  group: gateway-token-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Run gateway token watch
+        working-directory: scripts
+        env:
+          GATEWAY_DATABASE_URL: ${{ secrets.GATEWAY_DATABASE_URL }}
+          STUDIOB_SLACK_BOT_TOKEN: ${{ secrets.STUDIOB_SLACK_BOT_TOKEN }}
+        run: npx tsx gateway-token-watch.ts ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+
+      - name: Commit dedup state if changed
+        # !cancelled() REQUIRED (Rule #320): the watch exits 1 on fail-loud conditions, and an
+        # implicit success() would skip this commit exactly when the state most needs to land
+        # (same rationale as railway-volume-monitor.yml's commit step).
+        if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || !inputs.dry_run) }}
+        run: |
+          git add scripts/gateway-token-watch-state.json
+          if ! git diff --staged --quiet -- scripts/gateway-token-watch-state.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "chore(token-watch): update alert dedup state [skip ci]"
+            git push
+          fi
