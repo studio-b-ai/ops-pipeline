@@ -20,14 +20,18 @@ Daily (GitHub Actions cron, 14:00 UTC), for each item in [`credentials.manifest.
    | `cloudflare-api-token` | `api.cloudflare.com/client/v4/user/tokens/verify` → `status` alive/dead (countdown from `recorded_expiry`; verify returns no expiry) |
    | `tls-cert` | `node:tls` peer cert `notAfter` |
 3. Classifies → `OK | WARN(≤14/7/1) | DEAD | NO_EXPIRY | PROBE_FAILED`.
-4. Routes (Rule #165) — `WARN/DEAD/NO_EXPIRY/PROBE_FAILED` → **#agent-escalations** (`C0ATMSL2CR2`),
-   deduped per `(name, threshold)` so a daily cron doesn't re-fire (Rule #292; `DEAD` posts every run).
-   A daily `✅ N checked …` beacon → **#agent-notifications** (`C0B4B3F62H2`) — its **absence** is the
-   monitor's own staleness signal (Rule #279).
+4. **v2 (2026-07-31, Kevin directive): alerts are GitHub issues, not Slack** — one issue per
+   credential (label `credential-monitor`, title `[credential-monitor] <name> — <status>`), open =
+   needs attention, auto-closed with a comment once the credential classifies back to OK. A
+   status change while an issue is open (e.g. a WARN band tightening from 14d to 7d) comments +
+   retitles in place instead of opening a second issue — see `lib/severity-issue-reconcile.ts`.
+   An open issue for an active condition IS the dedup (Rules #292/#358 by construction); there is
+   no separate beacon post — the issue list itself (`gh issue list --repo studio-b-ai/ops-pipeline
+   --label credential-monitor`) is the current state.
 
 **Security:** credential VALUES are read into variables and passed to probes; they are NEVER logged,
-never put in alert text, never written to the state file (Rule #259/#282). Only NAME-level metadata +
-derived expiry DATES leave the process.
+never put in issue text (Rule #259/#282). Only NAME-level metadata + derived expiry DATES leave the
+process.
 
 ## Run locally
 
@@ -35,10 +39,13 @@ derived expiry DATES leave the process.
 cd scripts
 npm install
 npm test                                   # vitest — classify bands + probe parsers (no network)
-npx tsx credential-expiry-monitor.ts --dry-run   # classify from recorded dates only; NO secrets, NO Slack
+npx tsx credential-expiry-monitor.ts --dry-run   # classify from recorded dates only; NO secrets, NO probe network calls
 ```
 
-`--dry-run` needs no Service Account and posts nothing — it is the pre-SA verification path + what CI runs.
+`--dry-run` needs no Service Account and performs zero issue mutations — it IS the pre-SA
+verification path + what CI runs. It DOES run a real (read-only) `gh issue list` against this
+repo, since that needs only the workflow's own ambient `GITHUB_TOKEN`, not a Kevin-gated secret —
+so the printed issue-action preview reflects real open-issue state.
 
 ## ⚠️ Gates before this goes live (Kevin)
 
@@ -52,22 +59,19 @@ ops-pipeline currently holds **zero** repo secrets, so all of these must be set:
    gh secret set OP_SERVICE_ACCOUNT_INFRA --repo studio-b-ai/ops-pipeline --body "$INFRA_SA_TOKEN"
    ```
    (Rule #98 — direct `--body`, never stdin.)
-2. **Slack bot token** (the alert channels are in the studiob-ai workspace — Rule #32):
-   ```bash
-   gh secret set STUDIOB_SLACK_BOT_TOKEN --repo studio-b-ai/ops-pipeline --body "$STUDIOB_SLACK_BOT_TOKEN"
-   ```
-3. **(Optional) Entra Graph probe identity** (`Application.Read.All`) for the EXO-secret item; absent ⇒
+2. **(Optional) Entra Graph probe identity** (`Application.Read.All`) for the EXO-secret item; absent ⇒
    that item degrades to `PROBE_FAILED` (flagged, not silent):
    ```bash
    gh secret set ENTRA_TENANT_ID    --repo studio-b-ai/ops-pipeline --body "$ENTRA_TENANT_ID"
    gh secret set ENTRA_CLIENT_ID    --repo studio-b-ai/ops-pipeline --body "$ENTRA_CLIENT_ID"
    gh secret set ENTRA_CLIENT_SECRET --repo studio-b-ai/ops-pipeline --body "$ENTRA_CLIENT_SECRET"
    ```
-4. **Confirm the full Infra-vault inventory** + verify each `op_ref` against the real 1P item names
+3. **Confirm the full Infra-vault inventory** + verify each `op_ref` against the real 1P item names
    (the manifest was seeded WITHOUT vault access — `op_ref`s marked `# VERIFY` are best-guess).
 
 Then live-verify (Rule #234): `gh workflow run "Credential Expiry Monitor" --repo studio-b-ai/ops-pipeline`
-→ confirm it reads the Infra vault, classifies a known near-expiry item, and posts to #agent-escalations.
+→ confirm it reads the Infra vault, classifies a known near-expiry item, and opens/updates a
+`credential-monitor`-labeled issue for it.
 
 ## Adding a credential
 
