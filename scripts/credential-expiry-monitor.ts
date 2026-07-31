@@ -275,7 +275,8 @@ async function main(): Promise<void> {
 
   // Real issue-list read regardless of --dry-run (needs only the workflow's ambient GITHUB_TOKEN,
   // not a Kevin-gated secret — see file header) so the preview reflects real open-issue state.
-  const issues = listIssuesByLabel(REPO, LABEL);
+  // "open" only — this monitor never needs closed-issue history.
+  const issues = listIssuesByLabel(REPO, LABEL, "open");
   const openIssuesList = issues.filter((i) => i.state === "OPEN");
   const openByEntity = new Map<string, { issue: IssueRef; status: string }>();
   for (const i of openIssuesList) {

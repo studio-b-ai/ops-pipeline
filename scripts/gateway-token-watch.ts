@@ -77,7 +77,10 @@ function stragglerTitle(t: TokenRow): string {
 // ───────────────────────────── gh helpers (shared seam: lib/github-issues.ts) ─────────────────────────────
 
 function listWatchIssues(): IssueRef[] {
-  return listIssuesByLabel(REPO, LABEL);
+  // "all": this monitor's revocation-gate reconcile needs BOTH open issues (openByTitle) AND the
+  // set of EVER-CLOSED gate titles (closedTitles, reconcileGate's `everClosed`) — see
+  // lib/github-issues.ts's listIssuesByLabel doc comment for why every other monitor passes "open".
+  return listIssuesByLabel(REPO, LABEL, "all");
 }
 
 function ensureLabel(): void {

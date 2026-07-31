@@ -29,13 +29,24 @@ export function gh(args: string[]): string {
 }
 
 /**
- * All issues (open + closed) carrying `label` in `repo`, up to 200. Rule #322: `--json` always
- * returns valid JSON (a real `[]` for none) — no jq-"null" style traps to guard against.
+ * Issues carrying `label` in `repo` matching `state`. Rule #322: `--json` always returns valid
+ * JSON (a real `[]` for none) — no jq-"null" style traps to guard against.
+ *
+ * `state` is REQUIRED (no default) so every call site states what it actually needs — codex
+ * review finding (P2, fixed pre-merge): the previous always-`"all"` + `--limit 200` call mixed
+ * open and closed issues into one page cap, so a long-lived label could push an older
+ * STILL-OPEN issue off the page once enough newer closed issues accumulated, causing a caller
+ * to open a duplicate. Callers that only need "is X currently open" (every monitor except
+ * gateway-token-watch.ts's revocation-gate `everClosed` check) pass `"open"`, which both narrows
+ * the result set to what can actually still miss AND — since `gh`'s `-L` triggers additional
+ * paginated API requests under the hood — `limit: 1000` makes truncation implausible at any
+ * realistic scale (hundreds of simultaneously open alert issues would itself be a five-alarm
+ * operational signal, not a normal monitor page-cap risk).
  */
-export function listIssuesByLabel(repo: string, label: string): IssueRef[] {
+export function listIssuesByLabel(repo: string, label: string, state: "open" | "closed" | "all", limit = 1000): IssueRef[] {
   const out = gh([
-    "issue", "list", "--repo", repo, "--label", label, "--state", "all",
-    "--limit", "200", "--json", "number,title,state",
+    "issue", "list", "--repo", repo, "--label", label, "--state", state,
+    "--limit", String(limit), "--json", "number,title,state",
   ]);
   const parsed = JSON.parse(out) as IssueRef[];
   return Array.isArray(parsed) ? parsed : [];

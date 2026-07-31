@@ -16,16 +16,19 @@
  *
  * v2 (2026-07-31, Kevin directive): this is a ROTATION JOB, not a continuous watch, so only its
  * FAILURE/attention Slack posts convert to GitHub issues (label `cred-rotation`) — success posts
- * become console.log only (no issue, no Slack). Each fatal step (token not found, roll failed,
- * 1P update failed, verification failed) opens its own fixed-title issue on failure and closes it
- * the next time that SAME step is reached and passes (Rules #292/#358 — an issue that's already
- * open for an unresolved condition isn't reopened). The non-fatal per-Railway-consumer failure
- * (step 4) gets its own issue per service, same open/close treatment. There is no single
- * "close everything on success" sweep — each condition closes at the point in the control flow
- * where THIS run proves it, which is also correct for a run that fails at an earlier step (the
- * issues for steps already passed this run get closed; issues for unreached steps are left alone,
- * since this run says nothing about their current truth). The monthly dry-run health beacon
- * (success-class, not failure/attention) also becomes console.log only.
+ * become console.log only (no issue, no Slack). Each fatal step (CF token listing failed, token
+ * not found, roll failed, 1P update failed, verification failed) opens its own fixed-title issue
+ * on failure and closes it the next time that SAME step is reached and passes (Rules #292/#358 —
+ * an issue that's already open for an unresolved condition isn't reopened). The non-fatal
+ * per-Railway-consumer failure (step 4) gets its own issue per service, same open/close
+ * treatment. There is no single "close everything on success" sweep — each condition closes at
+ * the point in the control flow where THIS run proves it, which is also correct for a run that
+ * fails at an earlier step (the issues for steps already passed this run get closed; issues for
+ * unreached steps are left alone, since this run says nothing about their current truth). The
+ * monthly dry-run health beacon (success-class, not failure/attention) also becomes console.log
+ * only. (Codex review, fixed pre-merge: step 1's CF API call itself — as opposed to a successful
+ * call returning no matching token — is now also wrapped so an API-level failure there opens its
+ * own issue instead of throwing past all issue bookkeeping.)
  *
  * SECURITY (Rules #259/#282):
  *   - Credential VALUES are read directly into variables and NEVER logged, never included in
@@ -78,6 +81,12 @@ const REPO = "studio-b-ai/ops-pipeline";
 const LABEL = "cred-rotation";
 const LABEL_DESCRIPTION = "cloudflare-token-rotation alert state (open = a rotation step failed)";
 
+// TITLE_TOKEN_LOOKUP_FAILED (the CF API call itself errored — network/auth/scope) is distinct
+// from TITLE_TOKEN_NOT_FOUND (the call succeeded but returned no token by that name) — codex
+// review finding (P2, fixed pre-merge): the original step 1 only opened an issue for the latter,
+// so a `cfGet` throw (expired/under-scoped management token, CF API error) skipped issue creation
+// entirely, leaving a live-rotation failure invisible to the new issue-based alert state.
+const TITLE_TOKEN_LOOKUP_FAILED = "[cred-rotation] CF token listing failed";
 const TITLE_TOKEN_NOT_FOUND = "[cred-rotation] umbrella token not found";
 const TITLE_ROLL_FAILED = "[cred-rotation] token roll failed";
 const TITLE_1P_UPDATE_FAILED = "[cred-rotation] 1Password update failed (partial rotation — CF rolled, 1P stale)";
@@ -341,13 +350,22 @@ async function main(): Promise<void> {
   // ── LIVE ROTATION ───────────────────────────────────────────────────────────────────────────────
 
   // Real (read-only) issue-list snapshot for this run's open/close decisions — needs only the
-  // workflow's ambient GITHUB_TOKEN, not a Kevin-gated secret.
-  const openIssuesList = listIssuesByLabel(REPO, LABEL).filter((i) => i.state === "OPEN");
+  // workflow's ambient GITHUB_TOKEN, not a Kevin-gated secret. "open" only — this job never needs
+  // closed-issue history.
+  const openIssuesList = listIssuesByLabel(REPO, LABEL, "open").filter((i) => i.state === "OPEN");
   const openByTitle = new Map(openIssuesList.map((i) => [i.title, i]));
 
   // Step 1: Find the umbrella token's CF id
   console.log(`Step 1: listing CF tokens to find "${CF_UMBRELLA_TOKEN_NAME}"...`);
-  const tokens = await cfGet<CfTokenListItem[]>("/user/tokens", mgmtToken!);
+  let tokens: CfTokenListItem[];
+  try {
+    tokens = await cfGet<CfTokenListItem[]>("/user/tokens", mgmtToken!);
+  } catch (err) {
+    const msg = `CF token listing failed: ${err instanceof Error ? err.message : String(err)}`;
+    openFailureIssue(openByTitle, TITLE_TOKEN_LOOKUP_FAILED, `${msg}\n\nAuto-closes on the next rotation run whose token listing succeeds.`);
+    throw new Error(msg);
+  }
+  closeIfOpen(openByTitle, TITLE_TOKEN_LOOKUP_FAILED, "CF token listing succeeded — auto-closed by the rotation job.");
   const umbrella = tokens.find((t) => t.name === CF_UMBRELLA_TOKEN_NAME);
   if (!umbrella) {
     const msg = `CF token named "${CF_UMBRELLA_TOKEN_NAME}" not found — check the management token's scope.`;

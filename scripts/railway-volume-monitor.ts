@@ -8,12 +8,16 @@
  *
  * v2 (2026-07-31, Kevin directive): **GitHub issues instead of Slack**, mirroring
  * gateway-token-watch.ts (ops-pipeline#9) — an open issue IS the alert state. One issue per
- * volume instance (label `volume-monitor`), title `[volume-monitor] <project>/<service>/<volume>
- * — WARN|CRITICAL`; usage recovering below WARN auto-closes it with a comment. A per-project
- * fetch failure gets its own binary issue (`[volume-monitor] PROBE FAILED — <project>`),
- * auto-closed on the next successful fetch. If every project's fetch fails this run, one
- * `MONITOR BLIND` issue is opened in addition to the per-project ones (and the run still exits 1
- * — a silently-dead monitor is worse than none, see below). A severity change on an
+ * volume instance (label `volume-monitor`), title
+ * `[volume-monitor] <project>/<environment>/<service>/<volume> [<instanceId>] — WARN|CRITICAL`
+ * (codex review P1, fixed pre-merge: a bare `<project>/<service>/<volume>` key can collapse TWO
+ * distinct volume instances into one issue whenever a project has multiple environments sharing
+ * a service/volume name — `<environment>` + `[<instanceId>]` make the key match Railway's actual
+ * identity, not just its display name); usage recovering below WARN auto-closes it with a
+ * comment. A per-project fetch failure gets its own binary issue (`[volume-monitor] PROBE
+ * FAILED — <project>`), auto-closed on the next successful fetch. If every project's fetch fails
+ * this run, one `MONITOR BLIND` issue is opened in addition to the per-project ones (and the run
+ * still exits 1 — a silently-dead monitor is worse than none, see below). A severity change on an
  * ALREADY-OPEN volume issue (WARN→CRITICAL, or CRITICAL cooling to WARN) does NOT open a second
  * issue — it comments + retitles in place (`lib/severity-issue-reconcile.ts`'s
  * `reconcileSeverity`), because the stale title would otherwise misstate current severity
@@ -92,9 +96,17 @@ function projectProbeFailedTitle(projectName: string): string {
   return `[volume-monitor] PROBE FAILED — ${projectName}`;
 }
 
-/** Stable per-volume entity key for the severity-title convention: `<project>/<service>/<volume>`. */
+/**
+ * Stable per-volume entity key for the severity-title convention. Codex review finding (P1,
+ * fixed here): a bare `<project>/<service>/<volume>` key collapses DISTINCT VolumeRecords into
+ * one issue whenever a project has multiple environments (e.g. production + staging) sharing a
+ * service/volume name — the loop could then schedule a duplicate open, or close one
+ * environment's issue because a DIFFERENT environment's same-named volume recovered. Including
+ * `environmentName` + `volumeInstanceId` makes the key match Railway's actual identity for a
+ * volume instance, not just its display name.
+ */
 function volumeEntityKey(v: VolumeRecord): string {
-  return `${v.projectName}/${v.serviceName ?? "(detached)"}/${v.volumeName}`;
+  return `${v.projectName}/${v.environmentName}/${v.serviceName ?? "(detached)"}/${v.volumeName} [${v.volumeInstanceId}]`;
 }
 
 // ───────────────────────────── formatting ─────────────────────────────
@@ -198,7 +210,9 @@ async function main(): Promise<void> {
 
   // 2. Real issue-list read regardless of --dry-run (this IS the alert/dedup state — mirrors
   //    gateway-token-watch.ts's "--dry-run does the real query + real issue list, zero mutations").
-  const issues = listIssuesByLabel(REPO, LABEL);
+  //    "open" only — this monitor never needs closed-issue history (unlike gateway-token-watch's
+  //    revocation gate); the extra state.filter below is defense-in-depth, not load-bearing.
+  const issues = listIssuesByLabel(REPO, LABEL, "open");
   const openIssuesList = issues.filter((i) => i.state === "OPEN");
   const openByExactTitle = new Map(openIssuesList.map((i) => [i.title, i]));
   const openVolumeByEntity = new Map<string, { issue: IssueRef; status: string }>();
