@@ -162,7 +162,10 @@ function countOccurrences(s: string, needle: string): number {
  * - html family: `<!--…` with `-->` only as the (single) line suffix; or exactly `-->`.
  */
 function isStrictCommentLine(trimmed: string, markers: string[]): boolean {
-  if (markers.includes("#") && trimmed.startsWith("#")) return true;
+  // `#!` is a shebang, not a comment (codex pass-4 P2, 2026-07-31): swapping
+  // `#!/usr/bin/env python3` for `#!/bin/sh` is a behavioral change. Reject before
+  // the generic `#` accept.
+  if (markers.includes("#") && trimmed.startsWith("#")) return !trimmed.startsWith("#!");
   if (markers.includes("//")) {
     if (trimmed.startsWith("//")) return true;
     // ONLY complete single-line blocks: `/* ... */` with exactly one closer, as the

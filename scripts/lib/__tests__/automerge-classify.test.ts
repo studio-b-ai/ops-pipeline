@@ -313,6 +313,15 @@ describe("isStrictCommentLine via classifyDiffFile (block-comment suffix code, c
   it("rejects multi-block lines even when they end with a closer", () => {
     expect(ts("/* a */ x() /* b */")).toBe("code");
   });
+  it("rejects shebang lines — #! is behavioral, not a comment (codex pass-4 P2)", () => {
+    expect(classifyDiffFile("run.sh", ["#!/bin/sh"], ["#!/usr/bin/env python3"])).toBe("code");
+    expect(classifyDiffFile("run.py", ["#!/usr/bin/env python2"], [])).toBe("code");
+  });
+
+  it("still accepts normal hash comments", () => {
+    expect(classifyDiffFile("conf.yaml", ["# tuned per 2026-07-31 load program"], [])).toBe("comment-only");
+  });
+
   it("rejects html content after a closing marker", () => {
     expect(classifyDiffFile("page.html", ["<!-- c --> <script>x()</script>"], [])).toBe("code");
   });
