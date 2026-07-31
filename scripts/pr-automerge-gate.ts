@@ -100,6 +100,7 @@ interface PrJson {
   additions: number;
   deletions: number;
   headRefOid: string;
+  baseRefName: string;
   statusCheckRollup: RollupItem[];
   files: PrFile[];
 }
@@ -107,13 +108,25 @@ interface PrJson {
 function fetchPr(repo: string, pr: number): PrJson {
   const out = gh([
     "pr", "view", String(pr), "--repo", repo,
-    "--json", "author,labels,state,mergeStateStatus,additions,deletions,headRefOid,statusCheckRollup,files",
+    "--json", "author,labels,state,mergeStateStatus,additions,deletions,headRefOid,baseRefName,statusCheckRollup,files",
   ]);
   return JSON.parse(out) as PrJson;
 }
 
-function fetchDiff(repo: string, pr: number): string {
-  return gh(["pr", "diff", String(pr), "--repo", repo]);
+/**
+ * Fetch the diff BY PINNED SHA, not by PR number (codex P1 ABA fix, 2026-07-31):
+ * `gh pr diff <n>` resolves the PR's CURRENT head at call time — an attacker could
+ * push benign commit B (which gets reviewed), then force-push evaluated commit A
+ * back before the `--match-head-commit A` merge: A merges having had B reviewed.
+ * Deriving the diff from `compare/<base>...<headRefOid>` makes the reviewed bytes a
+ * pure function of the SAME sha the merge is pinned to — the race is closed by
+ * construction, not by timing.
+ */
+function fetchDiffBySha(repo: string, baseRefName: string, headRefOid: string): string {
+  return gh([
+    "api", `repos/${repo}/compare/${encodeURIComponent(baseRefName)}...${headRefOid}`,
+    "-H", "Accept: application/vnd.github.diff",
+  ]);
 }
 
 function mergePr(repo: string, pr: number, headRefOid: string): void {
@@ -168,16 +181,27 @@ function parseUnifiedDiff(diff: string): ParsedDiffFile[] {
     binary = false;
   }
 
+  // Header-zone tracking (codex P2 fix, 2026-07-31): `---`/`+++` lines are file
+  // headers ONLY between a `diff --git` line and that file's first `@@` hunk. Inside
+  // hunks, a changed content line can legitimately begin with those bytes (an added
+  // `++counter;` renders as `+++counter;`) — without the zone gate such lines were
+  // swallowed as phantom headers and vanished from classification (fail-open).
+  let inHeaderZone = false;
   for (const line of diff.split("\n")) {
     if (line.startsWith("diff --git ")) {
       flush();
+      inHeaderZone = true;
       continue;
     }
-    if (line.startsWith("--- ")) {
+    if (line.startsWith("@@")) {
+      inHeaderZone = false;
+      continue;
+    }
+    if (inHeaderZone && line.startsWith("--- ")) {
       oldPath = stripAbPrefix(line.slice(4).trim());
       continue;
     }
-    if (line.startsWith("+++ ")) {
+    if (inHeaderZone && line.startsWith("+++ ")) {
       newPath = stripAbPrefix(line.slice(4).trim());
       continue;
     }
@@ -275,7 +299,7 @@ async function main(): Promise<void> {
   }
 
   // ── Cheap legs 2-5, computed from already-fetched data — BEFORE any API spend ──
-  const diff = fetchDiff(repo, pr);
+  const diff = fetchDiffBySha(repo, prJson.baseRefName, prJson.headRefOid);
   const parsed = parseUnifiedDiff(diff);
   // Reconcile against the PR's own AUTHORITATIVE file list (prJson.files), not just
   // whatever the diff parser happened to find hunks for — a pure rename or mode-only

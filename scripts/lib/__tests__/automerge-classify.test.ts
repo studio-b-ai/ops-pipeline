@@ -223,8 +223,10 @@ describe("isRollupClean", () => {
 
   // ───── Positives ─────
 
-  it("is clean with an empty rollup", () => {
-    expect(isRollupClean([])).toBe(true);
+  it("is UNCLEAN with an empty rollup — no CI is not green CI (codex P3 fix)", () => {
+    // "Full CI green" requires CI to exist: a repo with zero checks queues for a
+    // human instead of vacuously passing the CI leg.
+    expect(isRollupClean([])).toBe(false);
   });
 
   it("is clean with all legacy SUCCESS/EXPECTED states", () => {
@@ -288,5 +290,37 @@ describe("reconcileFileClasses", () => {
       { path: "README.md", fileClass: "doc" },
       { path: "src/lib/thing.ts", fileClass: "comment-only" },
     ]);
+  });
+});
+
+describe("isStrictCommentLine via classifyDiffFile (block-comment suffix code, codex P2 fix)", () => {
+  // ───── Negative controls first (Rule #322) ─────
+  const ts = (line: string) => classifyDiffFile("src/x.ts", [line], []);
+
+  it("rejects code after a closing block comment", () => {
+    expect(ts("/* comment */ doEvil()")).toBe("code");
+  });
+  it("rejects code after a bare closer", () => {
+    expect(ts("*/ doEvil()")).toBe("code");
+  });
+  it("rejects generator-method lines masquerading as continuation stars", () => {
+    expect(ts("*method() {}")).toBe("code");
+  });
+  it("rejects multi-block lines even when they end with a closer", () => {
+    expect(ts("/* a */ x() /* b */")).toBe("code");
+  });
+  it("rejects html content after a closing marker", () => {
+    expect(classifyDiffFile("page.html", ["<!-- c --> <script>x()</script>"], [])).toBe("code");
+  });
+
+  // ───── Positives ─────
+  it("accepts pure line, opener, continuation, and closer comment shapes", () => {
+    expect(ts("// plain")).toBe("comment-only");
+    expect(ts("/* open block")).toBe("comment-only");
+    expect(ts("* continuation text")).toBe("comment-only");
+    expect(ts("* ends the block */")).toBe("comment-only");
+    expect(ts("/* one-line block */")).toBe("comment-only");
+    expect(ts("*/")).toBe("comment-only");
+    expect(classifyDiffFile("page.html", ["<!-- pure comment -->"], [])).toBe("comment-only");
   });
 });

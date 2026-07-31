@@ -136,10 +136,53 @@ export function classifyDiffFile(
   const allCommentOrBlank = changed.every((line) => {
     const trimmed = line.trim();
     if (trimmed === "") return true;
-    return markers.some((marker) => trimmed.startsWith(marker));
+    return isStrictCommentLine(trimmed, markers);
   });
 
   return allCommentOrBlank ? "comment-only" : "code";
+}
+
+function countOccurrences(s: string, needle: string): number {
+  let n = 0;
+  for (let i = s.indexOf(needle); i !== -1; i = s.indexOf(needle, i + needle.length)) n++;
+  return n;
+}
+
+/**
+ * Strict full-line comment shapes only (codex P2 fix, 2026-07-31): the previous
+ * `startsWith(marker)` check waved through executable code after block-comment
+ * delimiters — `/* x *​/ doEvil()`, `*​/ doEvil()`, and generator methods like
+ * `*method() {}` (bare-`*` prefix) all classified as comment-only. Rules:
+ * - hash family: line starts with `#`.
+ * - c-like family: `//…`; OR exactly `*​/`; OR a continuation line `*` / `* …`
+ *   (star followed by whitespace/end — `*method()` fails) or an opener `/*…`,
+ *   where in both cases a closing `*​/` may appear ONLY as the line's final
+ *   characters, at most once. Multi-block lines (`/* a *​/ x /* b *​/`) fail even
+ *   when they end with a closer — fail-closed to the human queue.
+ * - html family: `<!--…` with `-->` only as the (single) line suffix; or exactly `-->`.
+ */
+function isStrictCommentLine(trimmed: string, markers: string[]): boolean {
+  if (markers.includes("#") && trimmed.startsWith("#")) return true;
+  if (markers.includes("//")) {
+    if (trimmed.startsWith("//")) return true;
+    if (trimmed === "*/") return true;
+    const isContinuation = /^\*($|\s)/.test(trimmed);
+    const isOpener = trimmed.startsWith("/*");
+    if (isContinuation || isOpener) {
+      const closes = countOccurrences(isOpener ? trimmed.slice(2) : trimmed, "*/");
+      return closes === 0 || (closes === 1 && trimmed.endsWith("*/"));
+    }
+    return false;
+  }
+  if (markers.includes("<!--")) {
+    if (trimmed === "-->") return true;
+    if (trimmed.startsWith("<!--")) {
+      const closes = countOccurrences(trimmed.slice(4), "-->");
+      return closes === 0 || (closes === 1 && trimmed.endsWith("-->"));
+    }
+    return false;
+  }
+  return false;
 }
 
 // ───────────────────────────── file-list reconciliation ─────────────────────────────
@@ -243,6 +286,11 @@ const CLEAN_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
  * read as "clean").
  */
 export function isRollupClean(rollup: RollupItem[]): boolean {
+  // Empty rollup = NOT clean (codex P3 fix, 2026-07-31): "full CI green" requires
+  // CI to exist. A caller repo with zero checks — or an unexpectedly-empty rollup
+  // response — must queue for a human, not vacuously pass the CI leg. Repos without
+  // CI never auto-merge; that is deliberate policy, not a bug.
+  if (rollup.length === 0) return false;
   for (const item of rollup) {
     if (item.state !== undefined) {
       if (!CLEAN_LEGACY_STATES.has(item.state)) return false;
