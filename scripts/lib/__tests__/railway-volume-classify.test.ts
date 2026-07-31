@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyUsage, computeTransition, WARN_THRESHOLD_PCT, CRITICAL_THRESHOLD_PCT } from "../railway-volume-classify.js";
+import { classifyUsage, WARN_THRESHOLD_PCT, CRITICAL_THRESHOLD_PCT } from "../railway-volume-classify.js";
 
 describe("classifyUsage", () => {
   it("throws when sizeMB is not > 0 (caller must filter first — spec: only sizeMB > 0 volumes)", () => {
@@ -43,46 +43,7 @@ describe("classifyUsage", () => {
   });
 });
 
-describe("computeTransition", () => {
-  it("no change → unchanged, direction none", () => {
-    expect(computeTransition("OK", "OK")).toEqual({ changed: false, direction: "none" });
-    expect(computeTransition("WARN", "WARN")).toEqual({ changed: false, direction: "none" });
-    expect(computeTransition("CRITICAL", "CRITICAL")).toEqual({ changed: false, direction: "none" });
-  });
-
-  it.each([
-    ["OK", "WARN"],
-    ["OK", "CRITICAL"],
-    ["WARN", "CRITICAL"],
-  ] as const)("%s → %s is an escalation", (prev, curr) => {
-    expect(computeTransition(prev, curr)).toEqual({ changed: true, direction: "escalate" });
-  });
-
-  it.each([
-    ["WARN", "OK"],
-    ["CRITICAL", "OK"],
-    ["CRITICAL", "WARN"],
-  ] as const)("%s → %s is a recovery", (prev, curr) => {
-    expect(computeTransition(prev, curr)).toEqual({ changed: true, direction: "recover" });
-  });
-
-  it("a first-ever WARN alerts (caller passes prev='OK' for an unseen volume)", () => {
-    // Documents the contract the main script relies on: state.get(key) ?? "OK".
-    expect(computeTransition("OK", "WARN").changed).toBe(true);
-  });
-
-  it.each(["OK", "WARN", "CRITICAL"] as const)(
-    "%s → PROBE_FAILED is an escalation (project-level fetch-failure dedup, mirrors credential-expiry-monitor's PROBE_FAILED)",
-    (prev) => {
-      expect(computeTransition(prev, "PROBE_FAILED")).toEqual({ changed: true, direction: "escalate" });
-    },
-  );
-
-  it("PROBE_FAILED → OK is a recovery (the project's fetch started working again)", () => {
-    expect(computeTransition("PROBE_FAILED", "OK")).toEqual({ changed: true, direction: "recover" });
-  });
-
-  it("PROBE_FAILED → PROBE_FAILED is unchanged (never re-alert every run while still broken)", () => {
-    expect(computeTransition("PROBE_FAILED", "PROBE_FAILED")).toEqual({ changed: false, direction: "none" });
-  });
-});
+// `computeTransition`/`MonitorStatus`/`Transition` were removed in the v2 (issues-as-alert-state)
+// conversion — the open/closed GitHub issue (via lib/severity-issue-reconcile.ts's
+// `reconcileSeverity`, tested in severity-issue-reconcile.test.ts) is the dedup now, not a
+// prev-vs-curr transition computation. See railway-volume-classify.ts's file header.

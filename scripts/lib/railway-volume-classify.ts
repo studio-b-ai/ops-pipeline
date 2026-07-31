@@ -1,35 +1,25 @@
 /**
- * railway-volume-classify.ts — pure classification + state-transition logic for the fleet-wide
- * Railway volume-usage monitor (CLAUDE.md Rule #302 family).
+ * railway-volume-classify.ts — pure classification logic for the fleet-wide Railway
+ * volume-usage monitor (CLAUDE.md Rule #302 family).
  *
  * Origin: 2026-07-27 — the aesthetik-production `Postgres` service's 500MB Railway volume sat at
  * ≥96% for 24h+ with ZERO alerting, hit 100%, and crash-looped ~10 hours, taking the whole
- * Acumatica gateway down. This monitor exists so a volume climbing toward full is a Slack alert,
- * not a multi-hour outage discovered by users.
+ * Acumatica gateway down. This monitor exists so a volume climbing toward full is caught, not a
+ * multi-hour outage discovered by users.
  *
  * Pure (no I/O, no network) so it is fully unit-testable. Mirrors credential-classify.ts's shape:
- * network/parsing lives in railway-volume-probes.ts; this file only classifies numbers and
- * compares states.
+ * network/parsing lives in railway-volume-probes.ts; this file only turns numbers into a status.
  *
- * Alerting law (Rules #292/#358): a monitor must alert once per STATE TRANSITION, never per run —
- * a cron re-firing the same WARN every 6h forever trains the reader to ignore the channel. So this
- * module's job is narrow: turn (currentSizeMB, sizeMB) into a status, and turn (prevStatus,
- * currStatus) into "did this change, and which direction" — the caller (railway-volume-monitor.ts)
- * owns persisting prevStatus and deciding whether to post.
+ * v2 (2026-07-31, Kevin directive): alert state moved from a committed dedup-state-file +
+ * transition-computation (this file used to also export `computeTransition`/`MonitorStatus` for
+ * that) to auto-reconciled GitHub issues — an open issue for an entity now IS the dedup, and a
+ * severity change on an already-open issue is a comment+retitle (see
+ * `lib/severity-issue-reconcile.ts`'s `reconcileSeverity`), not a "did the status change since
+ * last run" computation. `computeTransition`/`MonitorStatus`/`Transition` are removed as dead code
+ * (nothing calls them post-conversion — verified via repo-wide grep before deletion).
  */
 
 export type VolumeStatus = "OK" | "WARN" | "CRITICAL";
-
-/**
- * Superset of VolumeStatus used ONLY for state-transition dedup: `computeTransition` also drives
- * per-PROJECT "could we even fetch this project's volumes?" tracking (a project-level GraphQL
- * error — e.g. a bad project id, or a resolver bug like the aesthetik-production `service{}` one
- * documented in railway-volume-probes.ts — must not silently vanish into a console.warn; it gets
- * the same once-per-transition escalation treatment as a volume's own WARN/CRITICAL, mirroring
- * credential-expiry-monitor.ts's PROBE_FAILED status). Ranked WORSE than CRITICAL so entering it
- * from any volume-usage status is always an escalation, and leaving it is always a recovery.
- */
-export type MonitorStatus = VolumeStatus | "PROBE_FAILED";
 
 /** WARN at ≥75% used, CRITICAL at ≥90% — per the chip spec (2026-07-27 authorization). */
 export const WARN_THRESHOLD_PCT = 75;
@@ -55,24 +45,4 @@ export function classifyUsage(currentSizeMB: number, sizeMB: number): UsageClass
   const status: VolumeStatus =
     usagePct >= CRITICAL_THRESHOLD_PCT ? "CRITICAL" : usagePct >= WARN_THRESHOLD_PCT ? "WARN" : "OK";
   return { usagePct, status };
-}
-
-const RANK: Record<MonitorStatus, number> = { OK: 0, WARN: 1, CRITICAL: 2, PROBE_FAILED: 3 };
-
-export interface Transition {
-  changed: boolean;
-  /** "escalate" = getting worse (OK→WARN, OK→CRITICAL, WARN→CRITICAL, any→PROBE_FAILED); "recover" = getting better. */
-  direction: "escalate" | "recover" | "none";
-}
-
-/**
- * Pure: compare a volume's (or a project-probe's) previous persisted status to its current one.
- *
- * An entity never seen before has no entry in the state file — the caller passes `prev = "OK"` for
- * that case (documented at the callsite), so a first-ever WARN/CRITICAL/PROBE_FAILED still alerts
- * (it's a real transition from the assumed baseline) while a first-ever OK stays silent.
- */
-export function computeTransition(prev: MonitorStatus, curr: MonitorStatus): Transition {
-  if (prev === curr) return { changed: false, direction: "none" };
-  return { changed: true, direction: RANK[curr] > RANK[prev] ? "escalate" : "recover" };
 }
