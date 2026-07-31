@@ -1,0 +1,72 @@
+name: Squasher auto-merge gate (reusable)
+
+# CLAUDE.md Rule #279 amendment — Kevin-approved 2026-07-30. The ONE narrow,
+# explicitly-scoped exception to the never-auto-merge law (#97): a bug-squasher CCR
+# pull request auto-merges ONLY when every leg in scripts/lib/automerge-classify.ts
+# `gateDecision` passes. See scripts/pr-automerge-gate.ts for the full leg list and
+# design rationale (fail-closed classification, cost-ordered legs, SHA-pinned merge).
+#
+# This is the REUSABLE half — it lives here so every fenced-in caller repo shares one
+# canonical gate implementation. Callers `uses:` this workflow and pass `repo` +
+# `pr_number`; see studio-b-ai/studiob's .github/workflows/squasher-automerge.yml for
+# the caller shape.
+#
+# Pinning note: this workflow checks out studio-b-ai/ops-pipeline at `main` (NOT the
+# repo's `@v1` tag convention used by sync.yml/drift-check.yml) — this is a brand-new,
+# single-repo Rule #169 canary, not yet part of the vetted `@v1` fleet. Graduating it
+# to `@v1` pinning (both for this checkout step AND for how callers reference this
+# workflow's own `uses:` ref) is a follow-up once the pilot proves out — a controller
+# decision, not automated here.
+#
+# Secrets:
+#   ANTHROPIC_API_KEY   the independent-review leg (Claude Sonnet 5). Forwarded
+#                       explicitly by the caller — provisioned by the controller
+#                       AFTER this PR merges (Rule #363: chips never touch secrets).
+#   (gh CLI auth = the job's own GITHUB_TOKEN via GH_TOKEN below — scoped to the
+#   CALLER's repo with whatever permissions the caller's job grants; no separate
+#   secret needed for merge/comment.)
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: "org/repo of the PR being evaluated (the caller's own repo, e.g. github.repository)"
+        required: true
+        type: string
+      pr_number:
+        description: "PR number to evaluate"
+        required: true
+        type: string
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+concurrency:
+  group: squasher-automerge-${{ inputs.repo }}-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    name: "Evaluate squasher auto-merge gate"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ops-pipeline (gate scripts live here, not in the caller repo)
+        uses: actions/checkout@v4
+        with:
+          repository: studio-b-ai/ops-pipeline
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Run pr-automerge-gate
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: npx tsx pr-automerge-gate.ts --repo "${{ inputs.repo }}" --pr "${{ inputs.pr_number }}"
