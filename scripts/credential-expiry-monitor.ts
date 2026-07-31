@@ -4,20 +4,40 @@
  *
  * Daily (GH Actions cron): for each item in credentials.manifest.yaml, read its value via the
  * read-only "Studio B Infrastructure" 1Password Service Account (OP_SERVICE_ACCOUNT_INFRA), run
- * the type's ACTIVE probe (real expiry/aliveness — not the recorded date), classify, and route:
- *   WARN / DEAD / NO_EXPIRY / PROBE_FAILED → #agent-escalations (C0ATMSL2CR2), deduped (Rule #292)
- *   a daily "✅ N checked …" beacon       → #agent-notifications (C0B4B3F62H2) — its ABSENCE is
- *                                            the monitor's own staleness signal (Rule #279)
+ * the type's ACTIVE probe (real expiry/aliveness — not the recorded date), classify, and route.
  *
- * `--dry-run` classifies from the recorded dates only — NO secrets, NO network, NO Slack posts —
- * so the logic is testable before the Infra SA exists.
+ * v2 (2026-07-31, Kevin directive): **GitHub issues instead of Slack**, mirroring
+ * gateway-token-watch.ts (ops-pipeline#9) and railway-volume-monitor.ts's v2. One issue per
+ * credential (label `credential-monitor`), title `[credential-monitor] <name> — <status>` where
+ * `<status>` mirrors the credential's alert class 1:1: `WARN-14`/`WARN-7`/`WARN-1` (the WARN
+ * band, tightest-matching), `DEAD`, `NO_EXPIRY`, or `PROBE_FAILED`. The issue auto-closes (with a
+ * comment) once the credential classifies back to OK. A status change on an ALREADY-OPEN issue
+ * (e.g. a WARN band tightening from 14d to 7d, or DEAD easing to WARN after a rotation) comments +
+ * retitles in place instead of opening a second issue (`lib/severity-issue-reconcile.ts`'s
+ * `reconcileSeverity` — Rule #412: a stale title would misstate current severity). This replaces
+ * both the Slack posts AND the committed dedup-state file of v1; unlike v1's DEAD status (which
+ * posted to Slack on EVERY run, no dedup — the "urgent, never mute" theory), DEAD now behaves like
+ * every other status: open once, stay open, auto-close on recovery. That's a deliberate
+ * improvement, not an oversight — an open issue is a much stronger "don't ignore this" signal than
+ * a message that scrolls off a channel, and this monitor's whole point is to stop re-alerting on
+ * an unchanged condition (Rules #292/#358).
+ *
+ * `--dry-run` (or workflow_dispatch `dry_run: true`) classifies each item from its recorded
+ * expiry date ONLY — NO secrets read, NO probe network calls (Rule #302's "pre-SA verification
+ * path", unchanged from v1) — but DOES perform a real (read-only) `gh issue list` against this
+ * repo, since that needs only the workflow's own ambient GITHUB_TOKEN, not a Kevin-gated secret,
+ * so the issue-action preview reflects real state. Zero issue mutations either way.
+ *
+ * Probing logic (evaluate/runProbe/classify and every probeXxx function in
+ * lib/credential-probes.ts) is UNCHANGED by this conversion — only how results become
+ * alerts changed.
  *
  * SECURITY (Rule #259/#282): credential VALUES are read into variables and passed to probes; they
- * are NEVER logged, never put in alert text, never written to the state file. Only NAME-level
- * metadata + derived expiry DATES flow out.
+ * are NEVER logged, never put in issue text. Only NAME-level metadata + derived expiry DATES flow
+ * out.
  */
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -33,13 +53,15 @@ import {
   getCertExpiry,
   type EntraProbeCreds,
 } from "./lib/credential-probes.js";
+import { reconcileSeverity, buildSeverityTitle, parseSeverityTitle } from "./lib/severity-issue-reconcile.js";
+import { listIssuesByLabel, ensureLabel, openIssue, closeIssue, commentIssue, retitleIssue, type IssueRef } from "./lib/github-issues.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_FILE = join(HERE, "credentials.manifest.yaml");
-const STATE_FILE = join(HERE, "credential-alert-state.json");
 
-const CH_ESCALATIONS = "C0ATMSL2CR2"; // #agent-escalations (studiob-ai workspace — Rule #32/#165)
-const CH_NOTIFICATIONS = "C0B4B3F62H2"; // #agent-notifications (studiob-ai workspace)
+const REPO = "studio-b-ai/ops-pipeline";
+const LABEL = "credential-monitor";
+const LABEL_DESCRIPTION = "credential-expiry-monitor alert state (open = a credential needs attention)";
 
 type CredType =
   | "1password-sa"
@@ -97,7 +119,7 @@ function entraCredsOrNull(): EntraProbeCreds | null {
   return null;
 }
 
-// ───────────────────────────── probing ─────────────────────────────
+// ───────────────────────────── probing (UNCHANGED by this conversion) ─────────────────────────────
 
 async function runProbe(item: ManifestItem): Promise<ProbeResult> {
   const recorded = item.recorded_expiry ?? null;
@@ -147,83 +169,86 @@ async function evaluate(item: ManifestItem, dryRun: boolean): Promise<ItemResult
   };
 }
 
-// ───────────────────────────── alerting + dedup ─────────────────────────────
+// ───────────────────────────── status key (mirrors the old dedupKey's granularity) ─────────────────────────────
 
-function dedupKey(r: ItemResult): string {
+/**
+ * The per-credential severity string used in the issue title. "OK" clears; a WARN status is
+ * split into `WARN-<threshold>` so a band tightening (14d → 7d → 1d) retitles the open issue
+ * instead of silently sitting under a stale "WARN-14" title while the real threshold is 1 —
+ * mirrors v1's dedup granularity (`${name}:warn:${threshold}`), 1:1.
+ */
+function statusKey(r: ItemResult): string {
   const st = statusOf(r);
-  if (st === "WARN") return `${r.item.name}:warn:${r.classification.threshold}`;
-  return `${r.item.name}:${st.toLowerCase()}`;
+  if (st === "WARN") return `WARN-${r.classification.threshold}`;
+  return st;
 }
 
-function alertText(r: ItemResult): string | null {
+// ───────────────────────────── issue bodies / comments ─────────────────────────────
+
+function credentialHeadline(r: ItemResult): string {
   const { item } = r;
   const c = r.classification;
   const st = statusOf(r);
-  const owner = item.owner ?? "?";
-  const keyless = item.keyless_alternative ? ` → consider moving to ${item.keyless_alternative}` : "";
   const expDate = c.expiry ? c.expiry.slice(0, 10) : "unknown";
   if (st === "DEAD") {
-    return `:red_circle: *Credential DEAD* — \`${item.name}\` (${item.type}) failed its aliveness probe — expired or revoked. Rotate now. Owner: ${owner}.`;
+    return `**DEAD** — \`${item.name}\` (${item.type}) failed its aliveness probe — expired or revoked. Rotate now.`;
   }
   if (st === "WARN") {
     const d = c.daysToExpiry ?? 0;
-    const when = d < 0 ? `*OVERDUE by ${Math.abs(d)}d*` : `expires in *${d}d*`;
-    return `:warning: *Credential expiring* — \`${item.name}\` (${item.type}) ${when} (${expDate}). Owner: ${owner}.${keyless}`;
+    const when = d < 0 ? `**OVERDUE by ${Math.abs(d)}d**` : `expires in **${d}d**`;
+    return `**WARN** — \`${item.name}\` (${item.type}) ${when} (${expDate}).`;
   }
   if (st === "NO_EXPIRY") {
-    if (r.probeNonExpiring) {
-      return `:grey_question: *Non-expiring credential* — \`${item.name}\` (${item.type}) does not expire (e.g. a classic PAT). Scope it down or migrate to keyless. Owner: ${owner}.${keyless}`;
-    }
-    return `:grey_question: *No expiry recorded* — \`${item.name}\` (${item.type}) is alive but has no known expiry. Backfill \`recorded_expiry\` in the manifest (or let the active probe read it live). Owner: ${owner}.${keyless}`;
+    return r.probeNonExpiring
+      ? `**Non-expiring credential** — \`${item.name}\` (${item.type}) does not expire (e.g. a classic PAT). Scope it down or migrate to keyless.`
+      : `**No expiry recorded** — \`${item.name}\` (${item.type}) is alive but has no known expiry. Backfill \`recorded_expiry\` in the manifest (or let the active probe read it live).`;
   }
   if (st === "PROBE_FAILED") {
-    return `:large_orange_diamond: *Credential probe failed* — \`${item.name}\` (${item.type}) could not be checked (monitoring gap): ${r.probeError ?? "unknown error"}. Owner: ${owner}.`;
+    return `**Probe failed** — \`${item.name}\` (${item.type}) could not be checked (monitoring gap): ${r.probeError ?? "unknown error"}.`;
   }
-  return null; // OK
+  return `\`${item.name}\` is OK.`; // not expected to be used — "open"/"retitle" only fire for alert-worthy statuses
 }
 
-function buildBeacon(results: ItemResult[]): string {
-  const n = results.length;
-  const ok = results.filter((r) => statusOf(r) === "OK").length;
-  const attention = results.filter((r) => statusOf(r) !== "OK").length;
-  const withDays = results.filter((r) => r.classification.daysToExpiry != null);
-  let soonest = "";
-  if (withDays.length > 0) {
-    const min = withDays.reduce((a, b) =>
-      (a.classification.daysToExpiry as number) <= (b.classification.daysToExpiry as number) ? a : b,
-    );
-    soonest = ` Soonest: ${min.item.name} in ${min.classification.daysToExpiry}d.`;
+function credentialIssueBody(r: ItemResult): string {
+  const { item } = r;
+  const owner = item.owner ?? "?";
+  const keyless = item.keyless_alternative ? `\n\nConsider moving to: ${item.keyless_alternative}` : "";
+  return [credentialHeadline(r), "", `Owner: ${owner}${keyless}`, "", "This issue auto-closes (with a comment) when this credential's status returns to OK."].join("\n");
+}
+
+function credentialStatusChangeComment(r: ItemResult, fromStatus: string, toStatus: string): string {
+  return `Status changed: ${fromStatus} → ${toStatus}.\n\n${credentialHeadline(r)}`;
+}
+
+function credentialCloseComment(r: ItemResult): string {
+  return `\`${r.item.name}\` is back to OK — auto-closed by the credential monitor.`;
+}
+
+// ───────────────────────────── issue action plan ─────────────────────────────
+
+type PlannedAction =
+  | { kind: "open"; title: string; body: string }
+  | { kind: "retitle"; num: number; newTitle: string; comment: string }
+  | { kind: "close"; num: number; comment: string };
+
+function describePlanned(p: PlannedAction): string {
+  if (p.kind === "open") return `OPEN ${p.title}`;
+  if (p.kind === "retitle") return `RETITLE #${p.num} → ${p.newTitle}`;
+  return `CLOSE #${p.num}`;
+}
+
+/** Apply the plan via the shared gh-issue helpers. No-op in dry-run (the issue LIST read already happened; nothing here mutates). */
+function applyPlanned(planned: PlannedAction[], dryRun: boolean): void {
+  if (dryRun) return;
+  if (planned.length > 0) ensureLabel(REPO, LABEL, LABEL_DESCRIPTION, "D93F0B");
+  for (const p of planned) {
+    if (p.kind === "open") openIssue(REPO, LABEL, p.title, p.body);
+    if (p.kind === "retitle") {
+      retitleIssue(REPO, p.num, p.newTitle);
+      commentIssue(REPO, p.num, p.comment);
+    }
+    if (p.kind === "close") closeIssue(REPO, p.num, p.comment);
   }
-  const tail = attention > 0 ? `:warning: ${attention} need attention.` : ":white_check_mark: all clear.";
-  return `:closed_lock_with_key: Credential monitor — ${n} checked, ${ok} OK.${soonest} ${tail}`;
-}
-
-function loadAlertState(): Set<string> {
-  if (!existsSync(STATE_FILE)) return new Set();
-  try {
-    const arr = JSON.parse(readFileSync(STATE_FILE, "utf-8")) as unknown;
-    return new Set(Array.isArray(arr) ? (arr as string[]) : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function saveAlertState(keys: Set<string>): void {
-  writeFileSync(STATE_FILE, JSON.stringify([...keys].sort(), null, 2) + "\n");
-}
-
-// ───────────────────────────── Slack ─────────────────────────────
-
-async function postSlack(channel: string, text: string): Promise<void> {
-  const token = requireEnv("STUDIOB_SLACK_BOT_TOKEN");
-  const resp = await fetch("https://slack.com/api/chat.postMessage", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ channel, text }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  const json = (await resp.json()) as { ok: boolean; error?: string };
-  if (!json.ok) throw new Error(`Slack post to ${channel} failed: ${json.error}`);
 }
 
 // ───────────────────────────── main ─────────────────────────────
@@ -248,37 +273,48 @@ async function main(): Promise<void> {
     results.push(await evaluate(item, dryRun));
   }
 
-  const prev = dryRun ? new Set<string>() : loadAlertState();
-  const nowKeys = new Set<string>();
-  const toPost: string[] = [];
-
-  for (const r of results) {
-    const text = alertText(r);
-    if (!text) continue; // OK
-    if (statusOf(r) === "DEAD") {
-      toPost.push(text); // urgent — post every run, no dedup
-      continue;
-    }
-    const key = dedupKey(r);
-    nowKeys.add(key);
-    if (!prev.has(key)) toPost.push(text);
+  // Real issue-list read regardless of --dry-run (needs only the workflow's ambient GITHUB_TOKEN,
+  // not a Kevin-gated secret — see file header) so the preview reflects real open-issue state.
+  // "open" only — this monitor never needs closed-issue history.
+  const issues = listIssuesByLabel(REPO, LABEL, "open");
+  const openIssuesList = issues.filter((i) => i.state === "OPEN");
+  const openByEntity = new Map<string, { issue: IssueRef; status: string }>();
+  for (const i of openIssuesList) {
+    const parsed = parseSeverityTitle(LABEL, i.title);
+    if (parsed) openByEntity.set(parsed.entity, { issue: i, status: parsed.status });
   }
 
-  const beacon = buildBeacon(results);
+  const planned: PlannedAction[] = [];
+  for (const r of results) {
+    const entity = r.item.name;
+    const key = statusOf(r) === "OK" ? "OK" : statusKey(r);
+    const open = openByEntity.get(entity);
+    const action = reconcileSeverity(key, open?.status ?? null);
+    const title = buildSeverityTitle(LABEL, entity, key);
+
+    if (action === "open") planned.push({ kind: "open", title, body: credentialIssueBody(r) });
+    if (action === "retitle" && open) {
+      planned.push({ kind: "retitle", num: open.issue.number, newTitle: title, comment: credentialStatusChangeComment(r, open.status, key) });
+    }
+    if (action === "close" && open) {
+      planned.push({ kind: "close", num: open.issue.number, comment: credentialCloseComment(r) });
+    }
+  }
+
+  const okCount = results.filter((r) => statusOf(r) === "OK").length;
+  const attentionCount = results.length - okCount;
+  const summary = `Credential monitor — ${results.length} checked, ${okCount} OK, ${attentionCount} need attention. Issue actions: ${planned.length}.`;
 
   if (dryRun) {
-    console.log("=== credential-expiry-monitor --dry-run (no secrets, no network, no Slack) ===");
+    console.log("=== credential-expiry-monitor --dry-run (no secrets, no probe network calls; REAL gh issue list, NO issue mutations) ===");
     for (const r of results) console.log(formatLine(r));
-    console.log(`\n[beacon → #agent-notifications] ${beacon}`);
-    console.log(`[would post ${toPost.length} alert(s) → #agent-escalations]`);
-    for (const t of toPost) console.log(`  • ${t}`);
+    console.log(`\n${summary}`);
+    for (const p of planned) console.log(`  • ${describePlanned(p)}`);
     return;
   }
 
-  for (const text of toPost) await postSlack(CH_ESCALATIONS, text);
-  await postSlack(CH_NOTIFICATIONS, beacon);
-  saveAlertState(nowKeys);
-  console.log(`Checked ${results.length} credential(s); posted ${toPost.length} escalation(s) + 1 beacon.`);
+  applyPlanned(planned, dryRun);
+  console.log(summary);
 }
 
 main().catch((err) => {

@@ -4,9 +4,25 @@
  *
  * Origin (2026-07-27, Kevin-authorized): the aesthetik-production `Postgres` service's 500MB
  * Railway volume hit 100% and crash-looped ~10 hours, taking the whole Acumatica gateway down —
- * the volume sat ≥96% for 24h+ with ZERO alerting. This mirrors the existing
- * credential-expiry-monitor.ts pattern (same repo, same alert channels, same dedup-via-state-file
- * idiom) for Railway VOLUME USAGE instead of credential expiry.
+ * the volume sat ≥96% for 24h+ with ZERO alerting.
+ *
+ * v2 (2026-07-31, Kevin directive): **GitHub issues instead of Slack**, mirroring
+ * gateway-token-watch.ts (ops-pipeline#9) — an open issue IS the alert state. One issue per
+ * volume instance (label `volume-monitor`), title
+ * `[volume-monitor] <project>/<environment>/<service>/<volume> [<instanceId>] — WARN|CRITICAL`
+ * (codex review P1, fixed pre-merge: a bare `<project>/<service>/<volume>` key can collapse TWO
+ * distinct volume instances into one issue whenever a project has multiple environments sharing
+ * a service/volume name — `<environment>` + `[<instanceId>]` make the key match Railway's actual
+ * identity, not just its display name); usage recovering below WARN auto-closes it with a
+ * comment. A per-project fetch failure gets its own binary issue (`[volume-monitor] PROBE
+ * FAILED — <project>`), auto-closed on the next successful fetch. If every project's fetch fails
+ * this run, one `MONITOR BLIND` issue is opened in addition to the per-project ones (and the run
+ * still exits 1 — a silently-dead monitor is worse than none, see below). A severity change on an
+ * ALREADY-OPEN volume issue (WARN→CRITICAL, or CRITICAL cooling to WARN) does NOT open a second
+ * issue — it comments + retitles in place (`lib/severity-issue-reconcile.ts`'s
+ * `reconcileSeverity`), because the stale title would otherwise misstate current severity
+ * (Rule #412). This replaces both the Slack posts AND the committed dedup-state file of v1 (an
+ * open issue for an active condition is the dedup, Rules #292/#358 by construction).
  *
  * Every 6h (GH Actions cron): for every project visible to RAILWAY_API_TOKEN — the root
  * `projects()` query UNIONED with railway-projects.manifest.yaml (deduped by id; the manifest is
@@ -15,46 +31,49 @@
  * with `sizeMB > 0`:
  *   usage% = currentSizeMB / sizeMB
  *   OK (<75%) / WARN (≥75%) / CRITICAL (≥90%)
- * Alerts to #agent-escalations ONLY on a STATE TRANSITION (ok→warn, warn→critical, and recovery
- * back down) — never per run (Rules #292/#358: a cron re-firing the same WARN forever trains the
- * reader to ignore the channel). A per-PROJECT fetch failure gets the same transition-deduped
- * treatment via a synthetic `PROBE_FAILED` status (mirrors credential-expiry-monitor.ts's
- * PROBE_FAILED — a monitoring gap is itself alert-worthy, not just a console.warn). Prior state
- * lives in railway-volume-alert-state.json, committed back with `[skip ci]` — same idiom as
- * scripts/credential-alert-state.json.
  *
- * `--dry-run` (or workflow_dispatch `dry_run: true`) still runs the REAL Railway query (this
- * monitor's whole job is reading live usage numbers — there's no meaningful secrets-free
- * classify-only mode the way the credential monitor has one) but skips the Slack posts AND the
- * state-file commit, so it's safe to run against production for a spot-check.
+ * `--dry-run` (or workflow_dispatch `dry_run: true`) still runs the REAL Railway query AND the
+ * REAL `gh issue list` (this monitor's whole job is reading live usage numbers and reconciling
+ * against live issue state — there's no meaningful secrets-free classify-only mode the way the
+ * credential monitor has one) but performs ZERO issue mutations, so it's safe to run against
+ * production for a spot-check.
  *
  * Fail-loud contract (Rule #302 family): RAILWAY_API_TOKEN missing → requireEnv throws → exit 1.
  * RAILWAY_API_TOKEN present but dead/expired/wrong-scoped → defined operationally as "every
  * project's volume fetch failed this run" (see lib/railway-volume-probes.ts file header for why
  * this monitor deliberately does NOT gate on a `me{}` liveness probe — a codex review caught that
  * `me` is account-token-only per Railway's docs, and would false-fail on a Workspace token, which
- * is Railway's OWN recommended type for "Team CI/CD, shared automation") → this script posts a
- * best-effort escalation AND exits 1 (workflow red). A silently-dead monitor is worse than none —
- * this is exactly the failure mode that let the volume run dark for 24h+.
+ * is Railway's OWN recommended type for "Team CI/CD, shared automation") → this script opens/keeps
+ * the MONITOR BLIND issue AND exits 1 (workflow red) regardless of --dry-run (a fail-loud signal
+ * is not a "would post" preview) — this is exactly the failure mode that let the volume run dark
+ * for 24h+.
  *
  * SECURITY (Rule #259/#282/#363): RAILWAY_API_TOKEN is read into a variable and passed to fetch
- * calls; it is never logged, never put in alert text, never written to the state file.
+ * calls; it is never logged, never put in issue text, never written anywhere durable by this
+ * script (GitHub issues ARE the durable state now, by design — Rule #97: credential/token
+ * remediation stays human work, but usage-threshold facts are fine to publish).
  */
 
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { requireEnv } from "./lib/config.js";
-import { classifyUsage, computeTransition, type MonitorStatus } from "./lib/railway-volume-classify.js";
+import { classifyUsage, type VolumeStatus } from "./lib/railway-volume-classify.js";
 import { discoverProjectIds, fetchProjectVolumes, type VolumeRecord, type ProjectRef } from "./lib/railway-volume-probes.js";
+import { reconcileCondition } from "./lib/gateway-token-reconcile.js";
+import { reconcileSeverity, buildSeverityTitle, parseSeverityTitle } from "./lib/severity-issue-reconcile.js";
+import { listIssuesByLabel, ensureLabel, openIssue, closeIssue, commentIssue, retitleIssue, type IssueRef } from "./lib/github-issues.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_FILE = join(HERE, "railway-projects.manifest.yaml");
-const STATE_FILE = join(HERE, "railway-volume-alert-state.json");
 
-const CH_ESCALATIONS = "C0ATMSL2CR2"; // #agent-escalations (studiob-ai workspace — Rule #32/#165)
-const CH_NOTIFICATIONS = "C0B4B3F62H2"; // #agent-notifications (studiob-ai workspace)
+const REPO = "studio-b-ai/ops-pipeline";
+const LABEL = "volume-monitor";
+const LABEL_DESCRIPTION = "railway-volume-monitor alert state (open = usage at/above WARN, or a project probe failing)";
+
+const BLIND_TITLE = "[volume-monitor] MONITOR BLIND — all projects failed to fetch";
+const FIX_HINT = "Railway dashboard → service → volume → Live resize";
 
 // ───────────────────────────── manifest (safety-net project list) ─────────────────────────────
 
@@ -72,34 +91,22 @@ function unionProjects(a: ProjectRef[], b: ProjectRef[]): ProjectRef[] {
   return [...byId.values()];
 }
 
-/** project-probe state-key prefix, namespaced away from volume keys so the two families of MonitorStatus dedup never collide. */
-function projectProbeKey(projectName: string): string {
-  return `project-probe:${projectName}`;
+/** `[volume-monitor] PROBE FAILED — <project>` — a fixed (non-severity-tiered) per-project binary condition. */
+function projectProbeFailedTitle(projectName: string): string {
+  return `[volume-monitor] PROBE FAILED — ${projectName}`;
 }
 
-// ───────────────────────────── alert state (dedup by transition) ─────────────────────────────
-
-type AlertState = Record<string, MonitorStatus>;
-
-/** Stable dedup key: survives a volume being renamed only if renamed AND re-attached; that's fine — worst case is one extra alert. */
-function volumeKey(v: VolumeRecord): string {
-  return `${v.projectName}/${v.serviceName ?? v.environmentName}/${v.volumeName}/${v.volumeInstanceId}`;
-}
-
-function loadAlertState(): AlertState {
-  if (!existsSync(STATE_FILE)) return {};
-  try {
-    const obj = JSON.parse(readFileSync(STATE_FILE, "utf-8")) as unknown;
-    return obj && typeof obj === "object" ? (obj as AlertState) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveAlertState(state: AlertState): void {
-  const sorted: AlertState = {};
-  for (const k of Object.keys(state).sort()) sorted[k] = state[k];
-  writeFileSync(STATE_FILE, JSON.stringify(sorted, null, 2) + "\n");
+/**
+ * Stable per-volume entity key for the severity-title convention. Codex review finding (P1,
+ * fixed here): a bare `<project>/<service>/<volume>` key collapses DISTINCT VolumeRecords into
+ * one issue whenever a project has multiple environments (e.g. production + staging) sharing a
+ * service/volume name — the loop could then schedule a duplicate open, or close one
+ * environment's issue because a DIFFERENT environment's same-named volume recovered. Including
+ * `environmentName` + `volumeInstanceId` makes the key match Railway's actual identity for a
+ * volume instance, not just its display name.
+ */
+function volumeEntityKey(v: VolumeRecord): string {
+  return `${v.projectName}/${v.environmentName}/${v.serviceName ?? "(detached)"}/${v.volumeName} [${v.volumeInstanceId}]`;
 }
 
 // ───────────────────────────── formatting ─────────────────────────────
@@ -108,53 +115,73 @@ function fmtMB(n: number): string {
   return `${Math.round(n).toLocaleString()}MB`;
 }
 
-const FIX_HINT = "Railway dashboard → service → volume → Live resize";
-
-function volumeAlertText(v: VolumeRecord, usagePct: number, status: MonitorStatus, direction: "escalate" | "recover"): string {
-  const where = `${v.projectName} → ${v.serviceName ?? `(detached volume, env ${v.environmentName})`} → ${v.volumeName}`;
-  const pct = usagePct.toFixed(1);
-  const sizes = `${fmtMB(v.currentSizeMB)} / ${fmtMB(v.sizeMB)}`;
-  if (direction === "recover") {
-    return `:large_green_circle: *Volume usage recovered* — \`${where}\` now *${status}* at ${pct}% (${sizes}).`;
-  }
-  if (status === "CRITICAL") {
-    return `:red_circle: *Volume CRITICAL* — \`${where}\` at *${pct}%* (${sizes}). Fix: ${FIX_HINT}.`;
-  }
-  return `:warning: *Volume usage WARN* — \`${where}\` at *${pct}%* (${sizes}). Fix: ${FIX_HINT}.`;
-}
-
-function projectProbeAlertText(projectName: string, direction: "escalate" | "recover", error?: string): string {
-  if (direction === "recover") {
-    return `:large_green_circle: *Railway volume monitor* — project \`${projectName}\` is readable again (was failing to fetch).`;
-  }
-  return `:large_orange_diamond: *Railway volume monitor gap* — project \`${projectName}\` could not be checked this run: ${error ?? "unknown error"}. Its volumes are NOT being monitored until this clears.`;
-}
-
-function formatLine(v: VolumeRecord, usagePct: number, status: MonitorStatus): string {
+function formatLine(v: VolumeRecord, usagePct: number, status: VolumeStatus): string {
   const where = `${v.projectName}/${v.serviceName ?? "(detached)"}/${v.volumeName}`;
   return `  ${where.padEnd(50)} ${status.padEnd(9)} ${usagePct.toFixed(1).padStart(5)}%  ${fmtMB(v.currentSizeMB).padStart(10)} / ${fmtMB(v.sizeMB)}`;
 }
 
-// ───────────────────────────── Slack ─────────────────────────────
+// ───────────────────────────── issue bodies / comments ─────────────────────────────
 
-async function postSlack(channel: string, text: string): Promise<void> {
-  const token = requireEnv("STUDIOB_SLACK_BOT_TOKEN");
-  const resp = await fetch("https://slack.com/api/chat.postMessage", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ channel, text }),
-    signal: AbortSignal.timeout(15_000),
-  });
-  const json = (await resp.json()) as { ok: boolean; error?: string };
-  if (!json.ok) throw new Error(`Slack post to ${channel} failed: ${json.error}`);
+function volumeIssueBody(v: VolumeRecord, usagePct: number, status: VolumeStatus): string {
+  const where = `${v.projectName} → ${v.serviceName ?? `(detached volume, env ${v.environmentName})`} → ${v.volumeName}`;
+  return [
+    `**${status}** — Railway volume usage at **${usagePct.toFixed(1)}%** (${fmtMB(v.currentSizeMB)} / ${fmtMB(v.sizeMB)}).`,
+    "",
+    `Path: \`${where}\``,
+    `Volume instance: \`${v.volumeInstanceId}\``,
+    "",
+    `**Fix:** ${FIX_HINT}.`,
+    "",
+    "This issue auto-closes (with a comment) when usage drops back below the WARN threshold (75%). A severity change while this stays open (WARN↔CRITICAL) updates the title + adds a comment here instead of opening a second issue.",
+  ].join("\n");
 }
 
-/** Best-effort Slack post that never throws — used once state is ALREADY saved, so a Slack outage never blocks dedup durability. */
-async function tryPostSlack(channel: string, text: string): Promise<void> {
-  try {
-    await postSlack(channel, text);
-  } catch (err) {
-    console.error(`railway-volume-monitor: a Slack post failed (state was already saved, so this won't re-fire next run): ${err instanceof Error ? err.message : String(err)}`);
+function volumeRetitleComment(v: VolumeRecord, usagePct: number, fromStatus: string, toStatus: string): string {
+  const rank: Record<string, number> = { OK: 0, WARN: 1, CRITICAL: 2 };
+  const direction = (rank[toStatus] ?? 0) > (rank[fromStatus] ?? 0) ? "escalated" : "cooled";
+  return `Severity ${direction}: ${fromStatus} → ${toStatus}. Usage now **${usagePct.toFixed(1)}%** (${fmtMB(v.currentSizeMB)} / ${fmtMB(v.sizeMB)}).`;
+}
+
+function volumeCloseComment(v: VolumeRecord, usagePct: number): string {
+  return `Usage recovered to **${usagePct.toFixed(1)}%** (${fmtMB(v.currentSizeMB)} / ${fmtMB(v.sizeMB)}) — below the WARN threshold. Auto-closed by the volume monitor.`;
+}
+
+function projectProbeFailedBody(projectName: string, error: string): string {
+  return `Project \`${projectName}\`'s volumes could not be fetched this run: ${error}. Its volumes are NOT being monitored until this clears. Auto-closes on the next successful fetch.`;
+}
+
+function projectProbeRecoveredComment(projectName: string): string {
+  return `Project \`${projectName}\` is readable again (was failing to fetch) — auto-closed by the volume monitor.`;
+}
+
+function blindBody(msg: string): string {
+  return `${msg} Check RAILWAY_API_TOKEN (Rule #302 family). Auto-closes once at least one project's volumes are readable again.`;
+}
+
+// ───────────────────────────── issue action plan ─────────────────────────────
+
+type PlannedAction =
+  | { kind: "open"; title: string; body: string }
+  | { kind: "retitle"; num: number; newTitle: string; comment: string }
+  | { kind: "close"; num: number; comment: string };
+
+function describePlanned(p: PlannedAction): string {
+  if (p.kind === "open") return `OPEN ${p.title}`;
+  if (p.kind === "retitle") return `RETITLE #${p.num} → ${p.newTitle}`;
+  return `CLOSE #${p.num}`;
+}
+
+/** Apply the plan via the shared gh-issue helpers. No-op in dry-run (real query + real issue list already happened — nothing here mutates). */
+function applyPlanned(planned: PlannedAction[], dryRun: boolean): void {
+  if (dryRun) return;
+  if (planned.length > 0) ensureLabel(REPO, LABEL, LABEL_DESCRIPTION, "D93F0B");
+  for (const p of planned) {
+    if (p.kind === "open") openIssue(REPO, LABEL, p.title, p.body);
+    if (p.kind === "retitle") {
+      retitleIssue(REPO, p.num, p.newTitle);
+      commentIssue(REPO, p.num, p.comment);
+    }
+    if (p.kind === "close") closeIssue(REPO, p.num, p.comment);
   }
 }
 
@@ -181,35 +208,46 @@ async function main(): Promise<void> {
     throw new Error("no projects to check: projects() root query failed/empty AND the manifest is empty");
   }
 
-  // 2. Per-project volume fetch — one bad project must not crash the whole run. A fetch failure
-  //    is tracked as a first-class MonitorStatus ("PROBE_FAILED") through the SAME transition-dedup
-  //    state file as volume usage, so a monitoring gap alerts once (not every run) and clears once
-  //    resolved — mirrors credential-expiry-monitor.ts's PROBE_FAILED handling.
-  const prevState = dryRun ? {} : loadAlertState();
-  const nextState: AlertState = { ...prevState }; // carry forward anything this run didn't touch.
+  // 2. Real issue-list read regardless of --dry-run (this IS the alert/dedup state — mirrors
+  //    gateway-token-watch.ts's "--dry-run does the real query + real issue list, zero mutations").
+  //    "open" only — this monitor never needs closed-issue history (unlike gateway-token-watch's
+  //    revocation gate); the extra state.filter below is defense-in-depth, not load-bearing.
+  const issues = listIssuesByLabel(REPO, LABEL, "open");
+  const openIssuesList = issues.filter((i) => i.state === "OPEN");
+  const openByExactTitle = new Map(openIssuesList.map((i) => [i.title, i]));
+  const openVolumeByEntity = new Map<string, { issue: IssueRef; status: string }>();
+  for (const i of openIssuesList) {
+    const parsed = parseSeverityTitle(LABEL, i.title);
+    if (parsed) openVolumeByEntity.set(parsed.entity, { issue: i, status: parsed.status });
+  }
 
+  const planned: PlannedAction[] = [];
+
+  // 3. Per-project volume fetch — one bad project must not crash the whole run. A fetch failure
+  //    opens/keeps a per-project binary issue (mirrors credential-expiry-monitor.ts's
+  //    PROBE_FAILED handling): a monitoring gap is itself alert-worthy, not just a console.warn.
   const allVolumes: VolumeRecord[] = [];
   const projectErrors: Array<{ name: string; error: string }> = [];
-  const probeTransitionAlerts: string[] = [];
   let anyTruncated = false;
 
   for (const p of projects) {
-    const key = projectProbeKey(p.name);
-    const prevProbeStatus = prevState[key] ?? "OK";
+    const failTitle = projectProbeFailedTitle(p.name);
+    const wasOpen = openByExactTitle.has(failTitle);
     const result = await fetchProjectVolumes(token, p.id);
 
     if (!result.ok) {
       projectErrors.push({ name: p.name, error: result.error });
       console.warn(`railway-volume-monitor: failed to fetch volumes for project "${p.name}" (${p.id}): ${result.error}`);
-      nextState[key] = "PROBE_FAILED";
-      const t = computeTransition(prevProbeStatus, "PROBE_FAILED");
-      if (t.changed) probeTransitionAlerts.push(projectProbeAlertText(p.name, "escalate", result.error));
+      if (reconcileCondition(true, wasOpen) === "open") {
+        planned.push({ kind: "open", title: failTitle, body: projectProbeFailedBody(p.name, result.error) });
+      }
       continue;
     }
 
-    nextState[key] = "OK";
-    const t = computeTransition(prevProbeStatus, "OK");
-    if (t.changed) probeTransitionAlerts.push(projectProbeAlertText(p.name, "recover"));
+    if (reconcileCondition(false, wasOpen) === "close") {
+      const openRef = openByExactTitle.get(failTitle)!;
+      planned.push({ kind: "close", num: openRef.number, comment: projectProbeRecoveredComment(p.name) });
+    }
 
     allVolumes.push(...result.volumes);
     if (result.truncated) anyTruncated = true;
@@ -228,16 +266,31 @@ async function main(): Promise<void> {
     // would false-fail on a valid Workspace token). This monitor is as blind as if it weren't running.
     const msg = `ALL ${projects.length} project(s) failed to fetch volumes — the monitor is effectively blind this run.`;
     console.error(`railway-volume-monitor: ${msg}`);
-    if (!dryRun) {
-      saveAlertState(nextState); // durable BEFORE the Slack attempt (see step 4 rationale below).
-      await tryPostSlack(CH_ESCALATIONS, `:red_circle: *Railway volume monitor DOWN* — ${msg} Check RAILWAY_API_TOKEN (Rule #302 family).`);
+    const blindOpen = openByExactTitle.get(BLIND_TITLE);
+    if (reconcileCondition(true, Boolean(blindOpen)) === "open") {
+      planned.push({ kind: "open", title: BLIND_TITLE, body: blindBody(msg) });
     }
-    process.exitCode = 1;
+
+    if (dryRun) {
+      console.log(`=== railway-volume-monitor --dry-run (real query + real issue list, NO mutations; ${source}) ===`);
+      console.log(`  all ${projects.length} project(s) failed: ${projectErrors.map((e) => `${e.name} (${e.error})`).join("; ")}`);
+      console.log(`[would perform ${planned.length} issue action(s)]`);
+      for (const p of planned) console.log(`  • ${describePlanned(p)}`);
+    } else {
+      applyPlanned(planned, dryRun);
+      console.log(`Checked 0 volume instance(s) across ${projects.length} project(s) (all failed); issue actions: ${planned.length}.`);
+    }
+    process.exitCode = 1; // fail-loud regardless of --dry-run — see file header.
     return;
   }
 
-  // 3. Classify + transition-dedup for volume usage.
-  const toPost: string[] = [...probeTransitionAlerts];
+  // At least one project succeeded this run — the blind issue (if any) recovers.
+  const blindOpen = openByExactTitle.get(BLIND_TITLE);
+  if (blindOpen && reconcileCondition(false, true) === "close") {
+    planned.push({ kind: "close", num: blindOpen.number, comment: "At least one project's volumes are readable again this run — monitor no longer blind." });
+  }
+
+  // 4. Classify + per-volume issue reconcile.
   const rows: string[] = [];
   let warnCount = 0;
   let criticalCount = 0;
@@ -248,39 +301,36 @@ async function main(): Promise<void> {
     if (status === "CRITICAL") criticalCount++;
     rows.push(formatLine(v, usagePct, status));
 
-    const key = volumeKey(v);
-    const prevStatus = prevState[key] ?? "OK"; // unseen volume = assume OK baseline (documented in computeTransition's doc comment)
-    nextState[key] = status;
+    const entity = volumeEntityKey(v);
+    const open = openVolumeByEntity.get(entity);
+    const action = reconcileSeverity(status, open?.status ?? null);
+    const title = buildSeverityTitle(LABEL, entity, status);
 
-    const transition = computeTransition(prevStatus, status);
-    if (transition.changed) {
-      toPost.push(volumeAlertText(v, usagePct, status, transition.direction === "escalate" ? "escalate" : "recover"));
+    if (action === "open") planned.push({ kind: "open", title, body: volumeIssueBody(v, usagePct, status) });
+    if (action === "retitle" && open) {
+      planned.push({ kind: "retitle", num: open.issue.number, newTitle: title, comment: volumeRetitleComment(v, usagePct, open.status, status) });
+    }
+    if (action === "close" && open) {
+      planned.push({ kind: "close", num: open.issue.number, comment: volumeCloseComment(v, usagePct) });
     }
   }
 
   const errSuffix =
     projectErrors.length > 0 ? ` ⚠️ ${projectErrors.length} project(s) failed to fetch (${projectErrors.map((e) => e.name).join(", ")}).` : "";
-  const beacon = `:floppy_disk: Railway volume monitor — ${allVolumes.length} volume instance(s) checked across ${projects.length} project(s) (${source}). ${criticalCount} CRITICAL, ${warnCount} WARN.${errSuffix}`;
+  const summary = `Railway volume monitor — ${allVolumes.length} volume instance(s) checked across ${projects.length} project(s) (${source}). ${criticalCount} CRITICAL, ${warnCount} WARN.${errSuffix}`;
 
   if (dryRun) {
-    console.log(`=== railway-volume-monitor --dry-run (real query, NO Slack post, NO state commit; ${source}) ===`);
+    console.log(`=== railway-volume-monitor --dry-run (real query + real issue list, NO mutations; ${source}) ===`);
     console.log(`  ${"volume".padEnd(50)} ${"status".padEnd(9)} ${"usage".padStart(6)}  current / size`);
     for (const r of rows) console.log(r);
-    console.log(`\n[beacon → #agent-notifications] ${beacon}`);
-    console.log(`[would post ${toPost.length} alert(s) → #agent-escalations]`);
-    for (const t of toPost) console.log(`  • ${t}`);
+    console.log(`\n${summary}`);
+    console.log(`[would perform ${planned.length} issue action(s)]`);
+    for (const p of planned) console.log(`  • ${describePlanned(p)}`);
     return;
   }
 
-  // 4. Save state BEFORE posting to Slack (codex review finding): the durable dedup record only
-  //    needs to be correct, not to have been announced — if a Slack post throws (network blip,
-  //    rate limit), the transition is still recorded, so the NEXT run won't re-discover the same
-  //    transition and double-post. Losing a single notification to a Slack outage is the lesser
-  //    failure mode vs. spamming duplicate alerts once Slack recovers.
-  saveAlertState(nextState);
-  for (const text of toPost) await tryPostSlack(CH_ESCALATIONS, text);
-  await tryPostSlack(CH_NOTIFICATIONS, beacon);
-  console.log(`Checked ${allVolumes.length} volume instance(s) across ${projects.length} project(s); posted ${toPost.length} alert(s) + 1 beacon.`);
+  applyPlanned(planned, dryRun);
+  console.log(`${summary} Issue actions: ${planned.length}.`);
 }
 
 main().catch((err) => {

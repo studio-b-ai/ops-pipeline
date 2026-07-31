@@ -14,9 +14,25 @@
  *   2. The `--rotate` CLI flag must be explicitly passed.  Default = DRY-RUN: the script
  *      describes what it would do without touching any live system.
  *
+ * v2 (2026-07-31, Kevin directive): this is a ROTATION JOB, not a continuous watch, so only its
+ * FAILURE/attention Slack posts convert to GitHub issues (label `cred-rotation`) — success posts
+ * become console.log only (no issue, no Slack). Each fatal step (CF token listing failed, token
+ * not found, roll failed, 1P update failed, verification failed) opens its own fixed-title issue
+ * on failure and closes it the next time that SAME step is reached and passes (Rules #292/#358 —
+ * an issue that's already open for an unresolved condition isn't reopened). The non-fatal
+ * per-Railway-consumer failure (step 4) gets its own issue per service, same open/close
+ * treatment. There is no single "close everything on success" sweep — each condition closes at
+ * the point in the control flow where THIS run proves it, which is also correct for a run that
+ * fails at an earlier step (the issues for steps already passed this run get closed; issues for
+ * unreached steps are left alone, since this run says nothing about their current truth). The
+ * monthly dry-run health beacon (success-class, not failure/attention) also becomes console.log
+ * only. (Codex review, fixed pre-merge: step 1's CF API call itself — as opposed to a successful
+ * call returning no matching token — is now also wrapped so an API-level failure there opens its
+ * own issue instead of throwing past all issue bookkeeping.)
+ *
  * SECURITY (Rules #259/#282):
  *   - Credential VALUES are read directly into variables and NEVER logged, never included in
- *     error text, never written to Slack.  Only success/failure status flows out.
+ *     error text, never written to an issue.  Only success/failure status flows out.
  *   - `railway variables --kv | grep` uses EXACT key anchoring per Rule #282.
  *   - The new token value is never echoed (Rule #259).
  *
@@ -28,6 +44,8 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
+import { reconcileCondition } from "./lib/gateway-token-reconcile.js";
+import { listIssuesByLabel, ensureLabel, openIssue, closeIssue, type IssueRef } from "./lib/github-issues.js";
 
 // ── constants ──────────────────────────────────────────────────────────────────────────────────────
 
@@ -57,9 +75,42 @@ const RAILWAY_CF_TOKEN_CONSUMERS: string[] = [
 
 const CF_BASE = "https://api.cloudflare.com/client/v4";
 const PROBE_TIMEOUT_MS = 15_000;
-const SLACK_BOT_TOKEN = process.env.STUDIOB_SLACK_BOT_TOKEN;
-const CH_ESCALATIONS = "C0ATMSL2CR2"; // #agent-escalations (studiob-ai workspace — Rule #165)
-const CH_NOTIFICATIONS = "C0B4B3F62H2"; // #agent-notifications
+
+// ── issue-alert constants (v2, Kevin directive 2026-07-31) ──────────────────────────────────────────
+const REPO = "studio-b-ai/ops-pipeline";
+const LABEL = "cred-rotation";
+const LABEL_DESCRIPTION = "cloudflare-token-rotation alert state (open = a rotation step failed)";
+
+// TITLE_TOKEN_LOOKUP_FAILED (the CF API call itself errored — network/auth/scope) is distinct
+// from TITLE_TOKEN_NOT_FOUND (the call succeeded but returned no token by that name) — codex
+// review finding (P2, fixed pre-merge): the original step 1 only opened an issue for the latter,
+// so a `cfGet` throw (expired/under-scoped management token, CF API error) skipped issue creation
+// entirely, leaving a live-rotation failure invisible to the new issue-based alert state.
+const TITLE_TOKEN_LOOKUP_FAILED = "[cred-rotation] CF token listing failed";
+const TITLE_TOKEN_NOT_FOUND = "[cred-rotation] umbrella token not found";
+const TITLE_ROLL_FAILED = "[cred-rotation] token roll failed";
+const TITLE_1P_UPDATE_FAILED = "[cred-rotation] 1Password update failed (partial rotation — CF rolled, 1P stale)";
+const TITLE_VERIFICATION_FAILED = "[cred-rotation] new token failed verification";
+
+function railwayUpdateFailedTitle(service: string): string {
+  return `[cred-rotation] Railway update failed — ${service}`;
+}
+
+/** Open `title` (with `body`) iff it isn't already open — an already-open issue for an unresolved failure is the dedup (Rules #292/#358). */
+function openFailureIssue(openByTitle: Map<string, IssueRef>, title: string, body: string): void {
+  if (reconcileCondition(true, openByTitle.has(title)) === "open") {
+    ensureLabel(REPO, LABEL, LABEL_DESCRIPTION, "B60205");
+    openIssue(REPO, LABEL, title, body);
+  }
+}
+
+/** Close `title` (with `comment`) iff it's currently open — no-op otherwise. */
+function closeIfOpen(openByTitle: Map<string, IssueRef>, title: string, comment: string): void {
+  const ref = openByTitle.get(title);
+  if (ref && reconcileCondition(false, true) === "close") {
+    closeIssue(REPO, ref.number, comment);
+  }
+}
 
 // ── 1P helpers ────────────────────────────────────────────────────────────────────────────────────
 
@@ -244,30 +295,6 @@ function railwayUpdateToken(service: string, value: string): void {
   });
 }
 
-// ── Slack helpers ─────────────────────────────────────────────────────────────────────────────────
-
-async function postSlack(channel: string, text: string): Promise<void> {
-  if (!SLACK_BOT_TOKEN) {
-    console.log(`[Slack would post to ${channel}]: ${text}`);
-    return;
-  }
-  try {
-    const resp = await fetch("https://slack.com/api/chat.postMessage", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
-        "Content-Type": "application/json; charset=utf-8",
-      },
-      body: JSON.stringify({ channel, text }),
-      signal: AbortSignal.timeout(15_000),
-    });
-    const json = (await resp.json()) as { ok: boolean; error?: string };
-    if (!json.ok) console.error(`Slack post failed: ${json.error}`);
-  } catch (err) {
-    console.error(`Slack post error: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-
 // ── main ──────────────────────────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -307,31 +334,45 @@ async function main(): Promise<void> {
       console.log(`  5. No Railway CF_API_TOKEN consumers configured (1P-only consumer; no Railway update needed)`);
     }
     console.log(`  6. Verify new token via GET ${CF_BASE}/zones?per_page=1 → must return success:true`);
-    console.log(`  7. Post success beacon → #agent-notifications`);
-    console.log(`  (on any failure: post alert → #agent-escalations, exit non-zero)`);
+    console.log(`  7. Log success (console.log only)`);
+    console.log(`  (on any failure: open/update a cred-rotation issue, exit non-zero)`);
 
-    // Post a health beacon so the monthly scheduled dry-run confirms the rotation path is
-    // reachable (Rule #279 — deterministic trigger + #agent-notifications beacon per Rule #165).
-    // Without this, the cron runs silently and produces no observable signal.
-    await postSlack(
-      CH_NOTIFICATIONS,
-      `☁️ *CF token rotation dry-run ✓* — rotation path ready; umbrella token not yet rolled.\n` +
-      `Trigger via workflow_dispatch with \`rotate=true\` when a rotation is needed.`,
+    // Health beacon so the monthly scheduled dry-run confirms the rotation path is reachable
+    // (Rule #279 — deterministic trigger). Success-class → console.log only (v2, Kevin directive
+    // 2026-07-31); this is NOT posted anywhere durable — the workflow's own run log is the record.
+    console.log(
+      `☁️ CF token rotation dry-run ✓ — rotation path ready; umbrella token not yet rolled. ` +
+      `Trigger via workflow_dispatch with rotate=true when a rotation is needed.`,
     );
     return;
   }
 
   // ── LIVE ROTATION ───────────────────────────────────────────────────────────────────────────────
 
+  // Real (read-only) issue-list snapshot for this run's open/close decisions — needs only the
+  // workflow's ambient GITHUB_TOKEN, not a Kevin-gated secret. "open" only — this job never needs
+  // closed-issue history.
+  const openIssuesList = listIssuesByLabel(REPO, LABEL, "open").filter((i) => i.state === "OPEN");
+  const openByTitle = new Map(openIssuesList.map((i) => [i.title, i]));
+
   // Step 1: Find the umbrella token's CF id
   console.log(`Step 1: listing CF tokens to find "${CF_UMBRELLA_TOKEN_NAME}"...`);
-  const tokens = await cfGet<CfTokenListItem[]>("/user/tokens", mgmtToken!);
+  let tokens: CfTokenListItem[];
+  try {
+    tokens = await cfGet<CfTokenListItem[]>("/user/tokens", mgmtToken!);
+  } catch (err) {
+    const msg = `CF token listing failed: ${err instanceof Error ? err.message : String(err)}`;
+    openFailureIssue(openByTitle, TITLE_TOKEN_LOOKUP_FAILED, `${msg}\n\nAuto-closes on the next rotation run whose token listing succeeds.`);
+    throw new Error(msg);
+  }
+  closeIfOpen(openByTitle, TITLE_TOKEN_LOOKUP_FAILED, "CF token listing succeeded — auto-closed by the rotation job.");
   const umbrella = tokens.find((t) => t.name === CF_UMBRELLA_TOKEN_NAME);
   if (!umbrella) {
     const msg = `CF token named "${CF_UMBRELLA_TOKEN_NAME}" not found — check the management token's scope.`;
-    await postSlack(CH_ESCALATIONS, `:red_circle: *CF rotation failed* — ${msg}`);
+    openFailureIssue(openByTitle, TITLE_TOKEN_NOT_FOUND, `${msg}\n\nAuto-closes on the next rotation run that finds the token.`);
     throw new Error(msg);
   }
+  closeIfOpen(openByTitle, TITLE_TOKEN_NOT_FOUND, "Umbrella token found again — auto-closed by the rotation job.");
   console.log(`  Found token id: ${umbrella.id}`);
 
   // Step 2: Roll the token value
@@ -341,9 +382,10 @@ async function main(): Promise<void> {
     newValue = await cfRoll(umbrella.id, mgmtToken!);
   } catch (err) {
     const msg = `CF token roll failed: ${err instanceof Error ? err.message : String(err)}`;
-    await postSlack(CH_ESCALATIONS, `:red_circle: *CF rotation failed at roll step* — ${msg}`);
+    openFailureIssue(openByTitle, TITLE_ROLL_FAILED, `${msg}\n\nAuto-closes on the next rotation run that rolls successfully.`);
     throw new Error(msg);
   }
+  closeIfOpen(openByTitle, TITLE_ROLL_FAILED, "Token roll succeeded — auto-closed by the rotation job.");
   console.log("  Token rolled successfully.");
 
   // Step 3: Atomic store update — 1P first (Rule #99)
@@ -353,21 +395,24 @@ async function main(): Promise<void> {
   } catch (err) {
     // The new token value is live in CF but not yet in 1P — alert immediately.
     const msg = `CF token rolled but 1P update failed: ${err instanceof Error ? err.message : String(err)}. Update manually: op item edit "${CF_UMBRELLA_OP_ITEM}" --vault "${OP_VAULT}" credential=<new-value>`;
-    await postSlack(CH_ESCALATIONS, `:red_circle: *CF rotation PARTIAL — 1P update failed* — ${msg}`);
+    openFailureIssue(openByTitle, TITLE_1P_UPDATE_FAILED, `${msg}\n\nAuto-closes on the next rotation run whose 1Password update succeeds.`);
     throw new Error(msg);
   }
+  closeIfOpen(openByTitle, TITLE_1P_UPDATE_FAILED, "1Password update succeeded — auto-closed by the rotation job.");
   console.log("  1P item updated.");
 
   // Step 4: Railway consumer updates
   if (RAILWAY_CF_TOKEN_CONSUMERS.length > 0) {
     for (const svc of RAILWAY_CF_TOKEN_CONSUMERS) {
       console.log(`Step 4: updating Railway service "${svc}"...`);
+      const title = railwayUpdateFailedTitle(svc);
       try {
         railwayUpdateToken(svc, newValue);
         console.log(`  "${svc}" updated and redeployed.`);
+        closeIfOpen(openByTitle, title, `Railway update for "${svc}" succeeded — auto-closed by the rotation job.`);
       } catch (err) {
         const msg = `Railway update for service "${svc}" failed: ${err instanceof Error ? err.message : String(err)}`;
-        await postSlack(CH_ESCALATIONS, `:warning: *CF rotation partial — Railway update failed for ${svc}* — ${msg}`);
+        openFailureIssue(openByTitle, title, `${msg}\n\nAuto-closes on the next rotation run where this service's update succeeds.`);
         // Non-fatal for the rotation itself; continue and verify.
         console.error(`  Warning: ${msg}`);
       }
@@ -381,18 +426,21 @@ async function main(): Promise<void> {
   const valid = await cfVerifyViaZones(newValue);
   if (!valid) {
     const msg = "New CF token failed /zones verification after rotation — investigate immediately. OLD token may no longer be valid.";
-    await postSlack(CH_ESCALATIONS, `:red_circle: *CF rotation FAILED VERIFICATION* — ${msg}`);
+    openFailureIssue(openByTitle, TITLE_VERIFICATION_FAILED, `${msg}\n\nAuto-closes on the next rotation run that verifies successfully.`);
     process.exit(1);
   }
+  closeIfOpen(openByTitle, TITLE_VERIFICATION_FAILED, "New token verified successfully — auto-closed by the rotation job.");
   console.log("  Verified: /zones returned success:true with the new token.");
 
-  // Step 6: Success beacon
+  // Step 6: success — console.log only (v2, Kevin directive 2026-07-31: success posts are
+  // console.log, not an issue or Slack). Every failure-class issue reachable this run was already
+  // closed above at the point each step passed.
   const beacon =
-    `:white_check_mark: *Cloudflare umbrella token rotated successfully* — ` +
-    `token \`${CF_UMBRELLA_TOKEN_NAME}\` rolled, 1P updated` +
+    `Cloudflare umbrella token rotated successfully — ` +
+    `token "${CF_UMBRELLA_TOKEN_NAME}" rolled, 1P updated` +
     (RAILWAY_CF_TOKEN_CONSUMERS.length > 0 ? `, Railway consumers updated` : "") +
     `, /zones probe: OK.`;
-  await postSlack(CH_NOTIFICATIONS, beacon);
+  console.log(beacon);
   console.log("Rotation complete.");
 }
 

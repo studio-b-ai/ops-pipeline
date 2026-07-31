@@ -33,11 +33,11 @@
  * text. Token NAMES are metadata, not secrets; raw sk_acu_* values never appear anywhere here.
  */
 
-import { execFileSync } from "node:child_process";
 import pg from "pg";
 import { requireEnv } from "./lib/config.js";
 import { classifyLegacyToken, revocationGate } from "./lib/gateway-token-classify.js";
 import { reconcileCondition, reconcileGate } from "./lib/gateway-token-reconcile.js";
+import { ensureLabel as ensureLabelShared, listIssuesByLabel, openIssue as openIssueShared, closeIssue as closeIssueShared, type IssueRef } from "./lib/github-issues.js";
 
 const REPO = "studio-b-ai/ops-pipeline";
 const LABEL = "token-watch";
@@ -74,40 +74,25 @@ function stragglerTitle(t: TokenRow): string {
   return `[token-watch] straggler: ${t.name} (minted ${t.created_at.toISOString().slice(0, 10)})`;
 }
 
-// ───────────────────────────── gh helpers ─────────────────────────────
-
-interface IssueRef {
-  number: number;
-  title: string;
-  state: "OPEN" | "CLOSED";
-}
-
-function gh(args: string[]): string {
-  return execFileSync("gh", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] });
-}
+// ───────────────────────────── gh helpers (shared seam: lib/github-issues.ts) ─────────────────────────────
 
 function listWatchIssues(): IssueRef[] {
-  const out = gh([
-    "issue", "list", "--repo", REPO, "--label", LABEL, "--state", "all",
-    "--limit", "200", "--json", "number,title,state",
-  ]);
-  const parsed = JSON.parse(out) as IssueRef[];
-  return Array.isArray(parsed) ? parsed : []; // #322: [] for none, and jq-"null" style traps don't apply to --json
+  // "all": this monitor's revocation-gate reconcile needs BOTH open issues (openByTitle) AND the
+  // set of EVER-CLOSED gate titles (closedTitles, reconcileGate's `everClosed`) — see
+  // lib/github-issues.ts's listIssuesByLabel doc comment for why every other monitor passes "open".
+  return listIssuesByLabel(REPO, LABEL, "all");
 }
 
 function ensureLabel(): void {
-  // Idempotent (--force updates in place); label ops ride the issues:write permission.
-  gh(["label", "create", LABEL, "--repo", REPO, "--force",
-    "--description", "gateway-token-watch alert state (open = condition active)",
-    "--color", "D93F0B"]);
+  ensureLabelShared(REPO, LABEL, "gateway-token-watch alert state (open = condition active)", "D93F0B");
 }
 
 function openIssue(title: string, body: string): void {
-  gh(["issue", "create", "--repo", REPO, "--label", LABEL, "--title", title, "--body", body]);
+  openIssueShared(REPO, LABEL, title, body);
 }
 
 function closeIssue(num: number, comment: string): void {
-  gh(["issue", "close", String(num), "--repo", REPO, "--comment", comment]);
+  closeIssueShared(REPO, num, comment);
 }
 
 // ───────────────────────────── issue bodies ─────────────────────────────
