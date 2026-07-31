@@ -52,10 +52,10 @@ describe("classifyDiffFile", () => {
 
   // ───── Positives ─────
 
-  it("classifies +1/-1 comment-only .ts (the proven studiob#401 shape) as comment-only", () => {
+  it("fail-closes the +1/-1 JSDoc-INTERIOR .ts shape (the proven studiob#401 diff) to code — post-pass-3 narrowing: interior lines are contextless, so this class now WAITS for a human by design", () => {
     const added = [" *   400  { ok: false, code: \"BODY_INVALID\" | \"QUERY_INVALID\", details: ... }"];
     const removed = [" *   400  { ok: false, code: \"BODY_INVALID\", details: ... }"];
-    expect(classifyDiffFile("packages/api/src/routes/zoom-chat-relay.ts", added, removed)).toBe("comment-only");
+    expect(classifyDiffFile("packages/api/src/routes/zoom-chat-relay.ts", added, removed)).toBe("code");
   });
 
   it("classifies a 3-line .md file as doc regardless of content", () => {
@@ -229,8 +229,12 @@ describe("isRollupClean", () => {
     expect(isRollupClean([])).toBe(false);
   });
 
-  it("is clean with all legacy SUCCESS/EXPECTED states", () => {
-    expect(isRollupClean([{ state: "SUCCESS" }, { state: "EXPECTED" }])).toBe(true);
+  it("is clean with legacy SUCCESS states only", () => {
+    expect(isRollupClean([{ state: "SUCCESS" }])).toBe(true);
+  });
+
+  it("is UNCLEAN with a legacy EXPECTED state — expected is not successful (codex pass-3 P2)", () => {
+    expect(isRollupClean([{ state: "SUCCESS" }, { state: "EXPECTED" }])).toBe(false);
   });
 
   it("is clean with all COMPLETED check runs at SUCCESS/NEUTRAL/SKIPPED", () => {
@@ -314,13 +318,20 @@ describe("isStrictCommentLine via classifyDiffFile (block-comment suffix code, c
   });
 
   // ───── Positives ─────
-  it("accepts pure line, opener, continuation, and closer comment shapes", () => {
+  it("rejects ALL block-interior shapes — continuation/opener/closer are contextless (codex pass-3 P1)", () => {
+    // `* method() {}` (spaced generator) is byte-identical to a JSDoc continuation;
+    // without block context every interior shape is guessing → code, human queue.
+    expect(ts("* method() {}")).toBe("code");
+    expect(ts("* continuation text")).toBe("code");
+    expect(ts("/* open block")).toBe("code");
+    expect(ts("* ends the block */")).toBe("code");
+    expect(ts("*/")).toBe("code");
+    expect(classifyDiffFile("page.html", ["<!-- open comment"], [])).toBe("code");
+  });
+
+  it("accepts only line comments and complete single-line blocks", () => {
     expect(ts("// plain")).toBe("comment-only");
-    expect(ts("/* open block")).toBe("comment-only");
-    expect(ts("* continuation text")).toBe("comment-only");
-    expect(ts("* ends the block */")).toBe("comment-only");
     expect(ts("/* one-line block */")).toBe("comment-only");
-    expect(ts("*/")).toBe("comment-only");
     expect(classifyDiffFile("page.html", ["<!-- pure comment -->"], [])).toBe("comment-only");
   });
 });

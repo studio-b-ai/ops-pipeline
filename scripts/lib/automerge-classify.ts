@@ -165,20 +165,27 @@ function isStrictCommentLine(trimmed: string, markers: string[]): boolean {
   if (markers.includes("#") && trimmed.startsWith("#")) return true;
   if (markers.includes("//")) {
     if (trimmed.startsWith("//")) return true;
-    if (trimmed === "*/") return true;
-    const isContinuation = /^\*($|\s)/.test(trimmed);
-    const isOpener = trimmed.startsWith("/*");
-    if (isContinuation || isOpener) {
-      const closes = countOccurrences(isOpener ? trimmed.slice(2) : trimmed, "*/");
-      return closes === 0 || (closes === 1 && trimmed.endsWith("*/"));
+    // ONLY complete single-line blocks: `/* ... */` with exactly one closer, as the
+    // suffix. Block-comment INTERIOR shapes (`* continuation`, bare `*/`, unclosed
+    // `/* opener`) are deliberately NOT accepted (codex pass-3 P1, 2026-07-31): a
+    // spaced generator method `* method() {}` is byte-identical to a JSDoc
+    // continuation line, and this classifier sees isolated diff lines with no
+    // surrounding block context — ANY interior acceptance is contextless guessing.
+    // Multi-line JSDoc edits therefore queue for a human — including the shape of
+    // the historically-proven squasher PR studiob#401, a deliberate narrowing: that
+    // class now costs one human click instead of any guessing (#412: this comment
+    // states the trade so nobody 'fixes' it back).
+    if (trimmed.startsWith("/*")) {
+      const closes = countOccurrences(trimmed.slice(2), "*/");
+      return closes === 1 && trimmed.endsWith("*/");
     }
     return false;
   }
   if (markers.includes("<!--")) {
-    if (trimmed === "-->") return true;
+    // Same single-complete-line rule as c-like blocks.
     if (trimmed.startsWith("<!--")) {
       const closes = countOccurrences(trimmed.slice(4), "-->");
-      return closes === 0 || (closes === 1 && trimmed.endsWith("-->"));
+      return closes === 1 && trimmed.endsWith("-->");
     }
     return false;
   }
@@ -273,7 +280,10 @@ export interface RollupItem {
 // reaching the "return false" branch. Both are exactly the fail-open shape Rule #4
 // forbids. An allowlist has no such fallthrough: anything not explicitly known-good
 // is unclean.
-const CLEAN_LEGACY_STATES = new Set(["SUCCESS", "EXPECTED"]);
+// SUCCESS only (codex pass-3 P2, 2026-07-31): GitHub's StatusState docs distinguish
+// EXPECTED ("Status is expected") from SUCCESS — an expected-but-never-reported
+// status must not satisfy the CI leg. https://docs.github.com/graphql/reference/enums#statusstate
+const CLEAN_LEGACY_STATES = new Set(["SUCCESS"]);
 const CLEAN_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
 /**
