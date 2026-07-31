@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { classifyDiffFile, gateDecision, isRollupClean, type GateFile, type GateInput } from "../automerge-classify.js";
+import {
+  classifyDiffFile,
+  gateDecision,
+  isRollupClean,
+  reconcileFileClasses,
+  type GateFile,
+  type GateInput,
+  type ParsedDiffFile,
+} from "../automerge-classify.js";
 
 // A baseline "all legs pass" input, so each negative-control test flips exactly one
 // leg to prove that leg alone gates the decision (Rule #322: negative controls first).
@@ -72,6 +80,20 @@ describe("classifyDiffFile", () => {
 
   it("classifies an .html file with only <!-- --> lines as comment-only", () => {
     expect(classifyDiffFile("public/page.html", ["<!-- updated banner -->"], ["<!-- old banner -->"])).toBe("comment-only");
+  });
+
+  // ───── binary-vs-doc-path ordering (codex P2 fix, 2026-07-30) ─────
+
+  it("classifies a binary file under docs/ as code, NOT doc — binary always wins over path", () => {
+    expect(classifyDiffFile("docs/assets/logo.png", [], [], { binary: true })).toBe("code");
+  });
+
+  it("classifies a binary .md file as code, NOT doc — binary always wins over path", () => {
+    expect(classifyDiffFile("docs/notes.md", [], [], { binary: true })).toBe("code");
+  });
+
+  it("classifies a non-binary .md file as doc when opts.binary is explicitly false", () => {
+    expect(classifyDiffFile("docs/notes.md", ["text"], [], { binary: false })).toBe("doc");
   });
 });
 
@@ -179,6 +201,26 @@ describe("isRollupClean", () => {
     expect(isRollupClean([{} as never])).toBe(false);
   });
 
+  it("is unclean with an unrecognized legacy state value (allowlist regression, codex P1 fix)", () => {
+    // Before the allowlist fix, any `state` value OUTSIDE the known-bad denylist
+    // (including a brand-new GitHub value this function has never seen) fell through
+    // to "clean" — the exact fail-open shape Rule #4 forbids.
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    expect(isRollupClean([{ state: "SOME_FUTURE_GITHUB_STATE" }])).toBe(false);
+  });
+
+  it("is unclean with a COMPLETED check run whose conclusion is null (allowlist regression, codex P1 fix)", () => {
+    // Before the fix, `item.conclusion && UNCLEAN_CONCLUSIONS.has(...)` short-circuited
+    // false on a null conclusion, skipping the "return false" branch entirely.
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    expect(isRollupClean([{ status: "COMPLETED", conclusion: null }])).toBe(false);
+  });
+
+  it("is unclean with a COMPLETED check run whose conclusion is missing entirely", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    expect(isRollupClean([{ status: "COMPLETED" }])).toBe(false);
+  });
+
   // ───── Positives ─────
 
   it("is clean with an empty rollup", () => {
@@ -205,5 +247,46 @@ describe("isRollupClean", () => {
   it("is clean with a mix of legacy and check-run shapes, all green", () => {
     // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
     expect(isRollupClean([{ state: "SUCCESS" }, { status: "COMPLETED", conclusion: "SUCCESS" }])).toBe(true);
+  });
+});
+
+describe("reconcileFileClasses", () => {
+  // ───── Negative controls first (Rule #322) ─────
+
+  it("fail-closes an authoritative path with NO parsed diff entry to code (rename/mode-only gap, codex P1 fix)", () => {
+    // A pure rename or mode-only change produces zero content hunks — the diff parser
+    // never emits it. Without reconciliation the gate's every-file leg would vacuously
+    // pass over a file it never inspected.
+    const out = reconcileFileClasses(["src/renamed-file.ts"], []);
+    expect(out).toEqual([{ path: "src/renamed-file.ts", fileClass: "code" }]);
+  });
+
+  it("fail-closes a binary file to code even under docs/ (codex P2 fix)", () => {
+    const out = reconcileFileClasses(["docs/diagram.png"], [{ path: "docs/diagram.png", added: [], removed: [], binary: true }]);
+    expect(out).toEqual([{ path: "docs/diagram.png", fileClass: "code" }]);
+  });
+
+  it("fail-closes when the authoritative list has an extra file beyond the parsed set", () => {
+    const out = reconcileFileClasses(
+      ["README.md", "src/sneaky.ts"],
+      [{ path: "README.md", added: ["hello"], removed: [] }],
+    );
+    expect(out.find((f) => f.path === "src/sneaky.ts")?.fileClass).toBe("code");
+  });
+
+  // ───── Positives ─────
+
+  it("classifies matched entries normally (doc + comment-only)", () => {
+    const out = reconcileFileClasses(
+      ["README.md", "src/lib/thing.ts"],
+      [
+        { path: "README.md", added: ["some text"], removed: [] },
+        { path: "src/lib/thing.ts", added: ["// clarified comment"], removed: ["// old comment"] },
+      ],
+    );
+    expect(out).toEqual([
+      { path: "README.md", fileClass: "doc" },
+      { path: "src/lib/thing.ts", fileClass: "comment-only" },
+    ]);
   });
 });

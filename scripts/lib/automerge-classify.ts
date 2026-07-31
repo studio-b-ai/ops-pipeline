@@ -101,15 +101,29 @@ function extensionOf(path: string): string | undefined {
  * Classify one changed file from its path + the raw content of its added/removed
  * diff lines (WITHOUT the leading +/- marker).
  *
- * - `*.md` or anything under `docs/` → "doc" (path-based, content not inspected —
- *   matches the #279 amendment's "docs/comment-class" language literally).
+ * - `opts.binary === true` → ALWAYS "code", regardless of path — checked FIRST,
+ *   before the doc-path shortcut. A binary diff ("Binary files a/x and b/x differ")
+ *   has no reviewable text content; without this the `.md`/`docs/` path rule would
+ *   wave through a binary asset swap under `docs/` as "doc" (codex P2 finding,
+ *   2026-07-30 review). The unconditional path-based doc rule below is otherwise
+ *   intentional per the #279 amendment's "docs/comment-class" spec — this is the
+ *   one case that must override it.
+ * - `*.md` or anything under `docs/` → "doc" (path-based, content not otherwise
+ *   inspected — matches the #279 amendment's "docs/comment-class" language
+ *   literally).
  * - Otherwise "comment-only" iff every changed line (trimmed; blank lines pass
  *   through as harmless) starts with a comment marker for the file's extension.
  * - Unknown extension, OR zero changed lines to inspect (e.g. a pure rename with no
  *   content diff — nothing to positively classify as safe), OR any line that isn't a
  *   recognized comment prefix → "code". Fail-closed by construction.
  */
-export function classifyDiffFile(path: string, addedLines: string[], removedLines: string[]): DiffFileClass {
+export function classifyDiffFile(
+  path: string,
+  addedLines: string[],
+  removedLines: string[],
+  opts?: { binary?: boolean },
+): DiffFileClass {
+  if (opts?.binary) return "code";
   if (/\.md$/i.test(path) || /^docs\//.test(path)) return "doc";
 
   const ext = extensionOf(path);
@@ -126,6 +140,40 @@ export function classifyDiffFile(path: string, addedLines: string[], removedLine
   });
 
   return allCommentOrBlank ? "comment-only" : "code";
+}
+
+// ───────────────────────────── file-list reconciliation ─────────────────────────────
+
+export interface ParsedDiffFile {
+  path: string;
+  added: string[];
+  removed: string[];
+  binary?: boolean;
+}
+
+/**
+ * Reconciles the AUTHORITATIVE list of changed file paths (the PR's own file list,
+ * e.g. `gh pr view --json files`) against the diff-parsed per-file content, and
+ * classifies each authoritative path.
+ *
+ * Why this exists (codex P1 finding, 2026-07-30 review): a diff-only file list can
+ * OMIT files with no content hunks — a pure rename ("rename from x" / "rename to y",
+ * no `---`/`+++` lines) or a mode-only change (`old mode` / `new mode`, no content
+ * diff) produces zero parsed lines and, without reconciliation, simply never appears
+ * in the classified set. `gateDecision`'s "every file classifies doc|comment-only"
+ * leg can then vacuously pass over a file it never saw. Any authoritative path with
+ * NO matching parsed entry is fail-closed to "code" — Rule #4: doubt never resolves
+ * toward a lower-scrutiny class.
+ */
+export function reconcileFileClasses(authoritativePaths: string[], parsedFiles: ParsedDiffFile[]): GateFile[] {
+  const byPath = new Map(parsedFiles.map((f) => [f.path, f]));
+  return authoritativePaths.map((path) => {
+    const parsed = byPath.get(path);
+    if (!parsed) {
+      return { path, fileClass: "code" as DiffFileClass };
+    }
+    return { path, fileClass: classifyDiffFile(path, parsed.added, parsed.removed, { binary: parsed.binary }) };
+  });
 }
 
 /**
@@ -174,26 +222,35 @@ export interface RollupItem {
   conclusion?: string | null;
 }
 
-const UNCLEAN_LEGACY_STATES = new Set(["FAILURE", "ERROR", "PENDING"]);
-const UNCLEAN_CONCLUSIONS = new Set(["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"]);
+// ALLOWLISTS, not denylists (codex P1 finding, 2026-07-30 review): the original
+// denylist form treated any legacy `state` value OUTSIDE its known-bad set — an
+// unrecognized future GitHub value included — as clean by falling through, and
+// treated a COMPLETED check run with a `null`/missing `conclusion` as clean because
+// `item.conclusion && ...` short-circuits false on falsy conclusions without ever
+// reaching the "return false" branch. Both are exactly the fail-open shape Rule #4
+// forbids. An allowlist has no such fallthrough: anything not explicitly known-good
+// is unclean.
+const CLEAN_LEGACY_STATES = new Set(["SUCCESS", "EXPECTED"]);
+const CLEAN_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
 /**
  * `gh pr view --json statusCheckRollup` mixes two shapes: legacy commit statuses
  * (`state`) and modern check runs (`status`/`conclusion`). Clean means EVERY item is
  * either a legacy SUCCESS/EXPECTED state, or a COMPLETED check run whose conclusion is
- * SUCCESS/NEUTRAL/SKIPPED. Anything still running, anything failed, and any
- * unrecognized shape is unclean — fail-closed (a rollup format this function doesn't
- * recognize must never read as "clean").
+ * SUCCESS/NEUTRAL/SKIPPED. Anything still running, anything failed, any missing or
+ * unrecognized conclusion/state value, and any unrecognized item shape is unclean —
+ * fail-closed (a rollup format or value this function doesn't recognize must never
+ * read as "clean").
  */
 export function isRollupClean(rollup: RollupItem[]): boolean {
   for (const item of rollup) {
     if (item.state !== undefined) {
-      if (UNCLEAN_LEGACY_STATES.has(item.state)) return false;
+      if (!CLEAN_LEGACY_STATES.has(item.state)) return false;
       continue;
     }
     if (item.status !== undefined) {
       if (item.status !== "COMPLETED") return false; // still running/queued
-      if (item.conclusion && UNCLEAN_CONCLUSIONS.has(item.conclusion)) return false;
+      if (!item.conclusion || !CLEAN_CONCLUSIONS.has(item.conclusion)) return false;
       continue;
     }
     // Unrecognized item shape — fail-closed rather than silently treating as clean.

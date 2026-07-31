@@ -44,11 +44,11 @@
 import { execFileSync } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import {
-  classifyDiffFile,
   gateDecision,
   isRollupClean,
-  type DiffFileClass,
+  reconcileFileClasses,
   type GateFile,
+  type ParsedDiffFile,
   type RollupItem,
 } from "./lib/automerge-classify.js";
 
@@ -126,12 +126,6 @@ function commentOnPr(repo: string, pr: number, body: string): void {
 
 // ───────────────────────────── diff parsing ─────────────────────────────
 
-interface ParsedFileDiff {
-  path: string;
-  added: string[];
-  removed: string[];
-}
-
 function stripAbPrefix(p: string): string {
   if (p === "/dev/null") return p;
   return p.replace(/^[ab]\//, "");
@@ -142,30 +136,36 @@ function stripAbPrefix(p: string): string {
  * carrying the raw content of every added/removed line (leading +/- stripped).
  *
  * Binary files ("Binary files a/x and b/x differ" — no +++/--- hunk lines) are
- * captured with a synthetic sentinel content line that cannot match ANY language's
- * comment markers, so `classifyDiffFile` falls through to "code" for them regardless
- * of extension (fail-closed — a binary change must never silently pass as doc/
- * comment-only). This is a deliberate limitation, not an oversight: the SEPARATE
- * independent-review leg also sees the raw diff text and will not call a binary/
- * rename-only change "purely documentation/comment/user-visible-copy" either — the
- * two legs are defense-in-depth for exactly this kind of diff-shape edge case.
+ * captured with `binary: true` and no content lines. `classifyDiffFile` (via
+ * `reconcileFileClasses`) checks that flag FIRST and always returns "code" for it,
+ * regardless of path — a binary diff must never silently pass as doc/comment-only
+ * just because it happens to live under `docs/` (codex P2 finding, 2026-07-30
+ * review).
+ *
+ * This function does NOT itself decide which files "count" — a pure rename or
+ * mode-only change produces zero hunks and is simply absent from the returned list.
+ * `reconcileFileClasses` in the caller closes that gap by reconciling against the
+ * PR's own AUTHORITATIVE file list (`gh pr view --json files`) and fail-closing any
+ * path missing from this parse to "code" (codex P1 finding, 2026-07-30 review).
  */
-function parseUnifiedDiff(diff: string): ParsedFileDiff[] {
-  const files: ParsedFileDiff[] = [];
+function parseUnifiedDiff(diff: string): ParsedDiffFile[] {
+  const files: ParsedDiffFile[] = [];
   let oldPath: string | null = null;
   let newPath: string | null = null;
   let added: string[] = [];
   let removed: string[] = [];
+  let binary = false;
 
   function flush(): void {
     const path = newPath && newPath !== "/dev/null" ? newPath : oldPath;
     if (path && path !== "/dev/null") {
-      files.push({ path, added, removed });
+      files.push({ path, added, removed, binary });
     }
     oldPath = null;
     newPath = null;
     added = [];
     removed = [];
+    binary = false;
   }
 
   for (const line of diff.split("\n")) {
@@ -184,8 +184,7 @@ function parseUnifiedDiff(diff: string): ParsedFileDiff[] {
     const binaryMatch = /^Binary files (.+) and (.+) differ$/.exec(line);
     if (binaryMatch) {
       newPath = stripAbPrefix(binaryMatch[2].trim());
-      added = ["<binary content change — cannot be classified as doc/comment-only>"];
-      removed = [];
+      binary = true;
       continue;
     }
     if (line.startsWith("+")) {
@@ -238,13 +237,14 @@ async function independentReview(diff: string): Promise<{ verdict: ReviewVerdict
 
     const textBlock = response.content.find((b): b is Anthropic.TextBlock => b.type === "text");
     const raw = (textBlock?.text ?? "").trim();
-    const firstLine = raw.split("\n")[0]?.trim() ?? "";
 
-    // Strict parse (per spec): anything other than the EXACT string "CLEAN" on the
-    // first line is FLAG. This includes empty responses, "clean" lowercase, "CLEAN."
-    // with punctuation, or "CLEAN" followed on the SAME line by extra text.
-    if (firstLine === "CLEAN") {
-      return { verdict: "CLEAN", detail: raw || "CLEAN" };
+    // Strict parse (per spec): the ENTIRE trimmed response must be EXACTLY the string
+    // "CLEAN" — not "CLEAN" as a prefix, not "CLEAN" plus trailing reasons on later
+    // lines, not lowercase, not punctuated. Anything else is FLAG (codex P2 finding,
+    // 2026-07-30 review: a prior version only checked the first line, which would
+    // have accepted "CLEAN\n<unsolicited extra text>" as clean).
+    if (raw === "CLEAN") {
+      return { verdict: "CLEAN", detail: "CLEAN" };
     }
     return { verdict: "FLAG", detail: raw || "(empty response from review model)" };
   } catch (err) {
@@ -277,10 +277,12 @@ async function main(): Promise<void> {
   // ── Cheap legs 2-5, computed from already-fetched data — BEFORE any API spend ──
   const diff = fetchDiff(repo, pr);
   const parsed = parseUnifiedDiff(diff);
-  const files: GateFile[] = parsed.map((f) => ({
-    path: f.path,
-    fileClass: classifyDiffFile(f.path, f.added, f.removed) as DiffFileClass,
-  }));
+  // Reconcile against the PR's own AUTHORITATIVE file list (prJson.files), not just
+  // whatever the diff parser happened to find hunks for — a pure rename or mode-only
+  // change has no content hunks and would otherwise silently vanish from `files`
+  // instead of fail-closing to "code" (codex P1 finding, 2026-07-30 review).
+  const authoritativePaths = prJson.files.map((f) => f.path);
+  const files: GateFile[] = reconcileFileClasses(authoritativePaths, parsed);
 
   const cheapCheck = gateDecision({
     files,
