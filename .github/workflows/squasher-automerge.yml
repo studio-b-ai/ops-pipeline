@@ -106,7 +106,16 @@ jobs:
           if [ -n "$GATE_SENSITIVE_PATH_PATTERNS" ]; then
             IFS=',' read -ra patterns <<< "$GATE_SENSITIVE_PATH_PATTERNS"
             for p in "${patterns[@]}"; do
-              args+=(--sensitive-path "$p")
+              # Trim whitespace (codex P2 finding, 2026-08-02 pass 2): a
+              # caller-friendly "a, b" input splits on comma into "a" and " b"
+              # (leading space) — an untrimmed regex source with a leading space
+              # would never match a real path, silently making that exclusion
+              # entry inert. pr-automerge-gate.ts's own parseArgs ALSO trims
+              # (defense-in-depth, single source of truth for correctness), but
+              # trimming here too keeps this workflow's own behavior correct
+              # independent of the script.
+              trimmed="$(echo -n "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+              [ -n "$trimmed" ] && args+=(--sensitive-path "$trimmed")
             done
           fi
           npx tsx pr-automerge-gate.ts "${args[@]}"

@@ -67,6 +67,28 @@ describe("parseArgs", () => {
     expect(args.sensitivePathPatterns).toEqual(["^\\.github/actions/", "\\.sql$"]);
   });
 
+  it("trims whitespace off each --sensitive-path value (codex P2 fix, 2026-08-02 pass 2) — an untrimmed leading-space regex source would never match a real path, silently making the exclusion inert", () => {
+    // Reproduces the exact shape the reusable workflow's un-trimmed bash comma-split
+    // would have produced for a caller-friendly "a, b" input: the SECOND arg arrives
+    // here with a leading space.
+    const args = parseArgs([
+      "--repo",
+      "studio-b-ai/bolt-wms",
+      "--pr",
+      "7",
+      "--sensitive-path",
+      "^\\.github/workflows/",
+      "--sensitive-path",
+      " ^scripts/deploy",
+    ]);
+    expect(args.sensitivePathPatterns).toEqual(["^\\.github/workflows/", "^scripts/deploy"]);
+  });
+
+  it("drops a whitespace-only --sensitive-path entry entirely rather than compiling an empty-string regex (which would match every path)", () => {
+    const args = parseArgs(["--repo", "studio-b-ai/bolt-wms", "--pr", "7", "--sensitive-path", "   "]);
+    expect(args.sensitivePathPatterns).toEqual([]);
+  });
+
   it("parses repo and numeric pr correctly alongside other flags", () => {
     const args = parseArgs(["--enabled-classes", "test-only", "--repo", "studio-b-ai/bolt-wms", "--pr", "123"]);
     expect(args.repo).toBe("studio-b-ai/bolt-wms");

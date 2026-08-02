@@ -34,7 +34,24 @@ export function parseArgs(argv: string[]): Args {
     if (argv[i] === "--repo") repo = argv[++i];
     else if (argv[i] === "--pr") pr = Number(argv[++i]);
     else if (argv[i] === "--enabled-classes") enabledClassesRaw = argv[++i];
-    else if (argv[i] === "--sensitive-path") sensitivePathPatterns.push(argv[++i]);
+    else if (argv[i] === "--sensitive-path") {
+      // Trim before storing (codex P2 finding, 2026-08-02 pass 2): the reusable
+      // workflow's caller-facing input is a single comma-separated string
+      // (`sensitive_path_patterns: "a,b,c"`) that the workflow's bash step splits
+      // on comma WITHOUT trimming — a normal-looking input like "a, b" arrives
+      // here as the literal string " b" (leading space). An untrimmed regex
+      // SOURCE with a leading space would only ever match a path that itself
+      // starts with a literal space character — i.e. never — silently making that
+      // exclusion entry permanently inert. sensitivePathPatterns is a fail-closed
+      // escape hatch (classifyPrDiffClass's `sensitivePathPatterns`), so a
+      // silently-inert entry is a silent SAFETY REGRESSION, not a cosmetic bug.
+      // A whitespace-only entry (e.g. a trailing comma) is dropped entirely
+      // rather than compiled — RegExp("") matches every path, which would
+      // exclude EVERYTHING from classification (safe direction, but almost
+      // certainly not what the caller meant) — cleaner to just ignore it.
+      const trimmed = argv[++i]?.trim();
+      if (trimmed) sensitivePathPatterns.push(trimmed);
+    }
   }
   if (!repo) throw new Error("--repo <org/repo> is required");
   if (!pr || !Number.isFinite(pr) || pr <= 0) throw new Error("--pr <n> is required");
