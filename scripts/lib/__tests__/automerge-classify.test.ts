@@ -548,6 +548,16 @@ describe("gateDecisionForClass", () => {
 
   // ───── Negative controls first ─────
 
+  it("waits when prClass is not a recognized diff class (runtime allowlist guard, codex P2 fix, 2026-08-02) — a JS caller bypassing the TypeScript union must NOT reach merge", () => {
+    // Simulates a value that TypeScript's PrDiffClass union would normally reject at
+    // compile time but JS has no runtime enforcement of (JSON-parsed input, a future
+    // refactor) — every OTHER leg here is green, so this guard is the ONLY thing
+    // standing between an unrecognized class and "merge".
+    const result = gateDecisionForClass(baseInputV2({ prClass: "totally-made-up-class" as unknown as GateInputV2["prClass"] }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("not a recognized diff class"))).toBe(true);
+  });
+
   it("waits when the author is not kbibelhausen", () => {
     const result = gateDecisionForClass(baseInputV2({ author: "someone-else" }));
     expect(result.decision).toBe("wait");

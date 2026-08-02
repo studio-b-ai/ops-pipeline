@@ -312,6 +312,11 @@ const CLEAN_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
 
 export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only";
 
+// The single canonical enumeration of valid classes — both the runner's CLI parsing
+// (--enabled-classes validation) and gateDecisionForClass's own runtime guard import
+// this SAME array, so the two can never drift out of sync with each other.
+export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only"];
+
 const DOCS_COMMENT_LINE_CAP = MAX_CHANGED_LINES; // 10, unchanged
 const CI_INFRA_LINE_CAP = 40;
 const TEST_ONLY_LINE_CAP = 40;
@@ -580,6 +585,16 @@ export interface GateInputV2 {
  */
 export function gateDecisionForClass(input: GateInputV2): GateResult {
   const reasons: string[] = [];
+
+  // Runtime allowlist guard (codex P2 finding, 2026-08-02 review): TypeScript's
+  // `PrDiffClass` union prevents normal in-repo misuse, but this function is
+  // exported and JS has no runtime type erasure protection — a caller passing an
+  // unvalidated string (from JSON, an env var, a future refactor) could otherwise
+  // slip past every OTHER leg here and still reach "merge" if author/label/CI/review
+  // all happen to be green. Fail-closed on anything outside the known-good set.
+  if (!ALL_PR_DIFF_CLASSES.includes(input.prClass)) {
+    reasons.push(`prClass '${input.prClass}' is not a recognized diff class (valid: ${ALL_PR_DIFF_CLASSES.join(", ")})`);
+  }
 
   if (input.author !== BUGSQUASHER_AUTHOR) {
     reasons.push(`author '${input.author}' !== '${BUGSQUASHER_AUTHOR}'`);

@@ -72,60 +72,12 @@ import {
   type PrDiffClass,
   type RollupItem,
 } from "./lib/automerge-classify.js";
+import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 
 const REVIEW_MODEL = "claude-sonnet-5";
 const REVIEW_MAX_TOKENS = 512;
-
-// ───────────────────────────── CLI args ─────────────────────────────
-
-const ALL_PR_DIFF_CLASSES: PrDiffClass[] = ["docs-comment", "ci-infra", "test-only"];
-
-interface Args {
-  repo: string;
-  pr: number;
-  /** Defaults to ["docs-comment"] — a caller that never passes this flag (e.g.
-   *  studiob's existing, unmodified caller workflow) gets EXACTLY the original #279
-   *  gate's scope. Opting into ci-infra/test-only is explicit, per repo. */
-  enabledClasses: PrDiffClass[];
-  /** Forwarded verbatim to classifyPrDiffClass's sensitivePathPatterns — for callers
-   *  whose branch-protection gates aren't independently verifiable from
-   *  statusCheckRollup (see the bolt-wms canary caller). */
-  sensitivePathPatterns: string[];
-}
-
-function parseArgs(argv: string[]): Args {
-  let repo: string | undefined;
-  let pr: number | undefined;
-  let enabledClassesRaw: string | undefined;
-  const sensitivePathPatterns: string[] = [];
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--repo") repo = argv[++i];
-    else if (argv[i] === "--pr") pr = Number(argv[++i]);
-    else if (argv[i] === "--enabled-classes") enabledClassesRaw = argv[++i];
-    else if (argv[i] === "--sensitive-path") sensitivePathPatterns.push(argv[++i]);
-  }
-  if (!repo) throw new Error("--repo <org/repo> is required");
-  if (!pr || !Number.isFinite(pr) || pr <= 0) throw new Error("--pr <n> is required");
-
-  let enabledClasses: PrDiffClass[];
-  if (enabledClassesRaw === undefined || enabledClassesRaw.trim() === "") {
-    enabledClasses = ["docs-comment"];
-  } else {
-    const requested = enabledClassesRaw
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-    const invalid = requested.filter((c) => !ALL_PR_DIFF_CLASSES.includes(c as PrDiffClass));
-    if (invalid.length > 0) {
-      throw new Error(`--enabled-classes contains unknown class(es): ${invalid.join(", ")} (valid: ${ALL_PR_DIFF_CLASSES.join(", ")})`);
-    }
-    enabledClasses = requested as PrDiffClass[];
-  }
-
-  return { repo, pr, enabledClasses, sensitivePathPatterns };
-}
 
 // ───────────────────────────── gh helpers ─────────────────────────────
 
@@ -156,12 +108,21 @@ interface PrJson {
   baseRefName: string;
   statusCheckRollup: RollupItem[];
   files: PrFile[];
+  /** GitHub's own accurate total file-change count — INDEPENDENT of the `files`
+   *  connection's page size. `gh pr view --json files` requests the underlying
+   *  GraphQL `files` connection at its default page size (100, unpaginated) — a PR
+   *  with MORE than that many changed files silently returns only the first page,
+   *  with no truncation flag in the CLI output (codex P1 finding, 2026-08-02
+   *  review). Comparing `files.length` against `changedFiles` is how the caller
+   *  detects that silent truncation and fails closed instead of classifying an
+   *  incomplete file list as safe. */
+  changedFiles: number;
 }
 
 function fetchPr(repo: string, pr: number): PrJson {
   const out = gh([
     "pr", "view", String(pr), "--repo", repo,
-    "--json", "author,labels,state,mergeStateStatus,additions,deletions,headRefOid,baseRefName,statusCheckRollup,files",
+    "--json", "author,labels,state,mergeStateStatus,additions,deletions,headRefOid,baseRefName,statusCheckRollup,files,changedFiles",
   ]);
   return JSON.parse(out) as PrJson;
 }
@@ -333,6 +294,23 @@ async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[],
     console.log(
       formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "ci-rollup", reasons: [detail] }),
     );
+    return;
+  }
+
+  // ── Leg "other" (cheap, no diff fetch, no API spend): authoritative file-list
+  // completeness. `gh pr view --json files` pages the underlying GraphQL `files`
+  // connection at its default size (100, unpaginated) — a PR touching MORE files
+  // than that silently returns only the first page, with nothing in the CLI output
+  // flagging the truncation. `changedFiles` is GitHub's own accurate total count,
+  // independent of that page size — a mismatch means `authoritativePaths` below is
+  // INCOMPLETE, and classifying against an incomplete file list could resolve a
+  // class that should have waited (codex P1 finding, 2026-08-02 review). Fail
+  // closed rather than attempt pagination — a PR needing >100 files touched has no
+  // business auto-merging through this gate regardless.
+  if (prJson.files.length !== prJson.changedFiles) {
+    const detail = `files.length=${prJson.files.length} !== changedFiles=${prJson.changedFiles} (gh pr view's files list is paginated/truncated)`;
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}. No diff fetch, no review call.`);
+    console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "other", reasons: [detail] }));
     return;
   }
 
