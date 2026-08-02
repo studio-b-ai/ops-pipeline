@@ -1,30 +1,43 @@
 #!/usr/bin/env tsx
 /**
- * pr-automerge-gate.ts — CLAUDE.md Rule #279 amendment (Kevin-approved 2026-07-30):
- * the ONE narrow, explicitly-scoped exception to the never-auto-merge law (#97).
+ * pr-automerge-gate.ts — CLAUDE.md Rule #279 amendment (Kevin-approved 2026-07-30),
+ * widened to gate v2 (Kevin-approved 2026-08-02): the ONE narrow, explicitly-scoped
+ * exception to the never-auto-merge law (#97).
  *
  * Auto-merge fires ONLY for bug-squasher CCR pull requests that pass EVERY leg below.
  * ANY doubt anywhere in this pipeline resolves to "wait" — the PR simply waits for a
  * human, which is the normal, unremarkable outcome (never a red CI run for "waiting").
  *
- * Legs (ALL required — scripts/lib/automerge-classify.ts `gateDecision`):
+ * Legs (ALL required):
  *   1. PR is OPEN, `mergeStateStatus === "CLEAN"`, and every CI check is green
  *      (`isRollupClean`) — checked FIRST and cheaply, before any diff fetch or API
  *      spend (Rule #88: probe before committing spend).
- *   2. author === kbibelhausen
- *   3. label `bugsquasher` present
- *   4. every changed file classifies doc|comment-only (`classifyDiffFile` — fail-
- *      closed on unknown extensions, binary files, and zero-content diffs)
- *   5. total changed lines (additions+deletions, GitHub's own count) <= 10
- *   6. independent review: the ENTIRE raw diff is sent to Claude Sonnet 5, which must
- *      return exactly the string `CLEAN` (strict, case-sensitive) or the whole leg is
- *      FLAG. ANY API error (network, auth, rate limit, malformed response) is ALSO
- *      FLAG — fail-closed, never silently treated as clean.
+ *   2. the PR's file set resolves to EXACTLY ONE PR-level diff class
+ *      (`classifyPrDiffClass` — scripts/lib/automerge-classify.ts): docs-comment
+ *      (<=10 lines, every file doc|comment-only, unchanged from the original #279
+ *      gate), ci-infra (<=40 lines, every file a declarative `.github/{workflows,
+ *      actions}/**.y(a)ml` path, no src/**, no dependency/migration files), or
+ *      test-only (<=40 lines, every file a test file/setup, zero src/** RUNTIME
+ *      files, no dependency/migration files). A mixed-shape diff (e.g. a workflow
+ *      file AND a test file together) satisfies no candidate and resolves to `null`
+ *      — never a partial/best-effort merge across classes.
+ *   3. the resolved class is in THIS CALLER's `--enabled-classes` set (defaults to
+ *      `docs-comment` ONLY — a caller that never passes `--enabled-classes` gets
+ *      EXACTLY the original #279 gate's scope, unchanged; opting into ci-infra/
+ *      test-only is an explicit per-repo choice, not a side effect of this file
+ *      changing).
+ *   4. author === kbibelhausen
+ *   5. label `bugsquasher` present
+ *   6. independent review: the ENTIRE raw diff is sent to Claude Sonnet 5, with a
+ *      class-aware system prompt (`reviewSystemPromptFor` — test-only adds an extra
+ *      assertion-weakening question), which must return exactly the string `CLEAN`
+ *      (strict, case-sensitive) or the whole leg is FLAG. ANY API error (network,
+ *      auth, rate limit, malformed response) is ALSO FLAG — fail-closed, never
+ *      silently treated as clean.
  *
- * Cost discipline: legs 2-5 are cheap (already-fetched PR metadata + a diff parse) and
- * are evaluated BEFORE the paid Anthropic API call. If any of them already fail, the
- * decision is "wait" and the review call never fires — there is no point paying for a
- * review of a PR that cannot merge for other reasons.
+ * Cost discipline: legs 2-5 are cheap (already-fetched PR metadata + a diff parse)
+ * and are evaluated BEFORE the paid Anthropic API call. If any of them already fail,
+ * the decision is "wait" and the review call never fires.
  *
  * TOCTOU safety: the merge call is SHA-pinned to the `headRefOid` captured at
  * evaluation time (`gh pr merge --match-head-commit`). If the PR's head moves between
@@ -32,47 +45,39 @@
  * instead of squashing a diff nobody reviewed — that failure is CORRECT behavior, not
  * a bug. The next scheduled/triggered run re-evaluates the new head from scratch.
  *
+ * Telemetry (gate v2): every evaluation emits ONE structured `[gate-receipt]` log
+ * line (`formatGateReceiptLine` — scripts/lib/automerge-telemetry.ts) to stdout —
+ * PR number, resolved class (or "unclassified"), verdict, and on a miss, which leg
+ * failed first. Log-based only: no new storage, no Slack, no issues.
+ *
  * This script NEVER closes, labels, or edits a PR beyond the merge itself and one
  * machine-readable receipt comment on successful merge. It never retries a failed
  * merge attempt in the same run (composes #109/#161: undiagnosed retries are how one
  * failure becomes a compounded one).
  *
  * Usage: tsx pr-automerge-gate.ts --repo <org/repo> --pr <n>
+ *   [--enabled-classes docs-comment,ci-infra,test-only] [--sensitive-path <regex>]...
  * Secrets: GH_TOKEN (gh CLI auth), ANTHROPIC_API_KEY (independent review leg).
  */
 
 import { execFileSync } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import {
-  gateDecision,
+  classifyPrDiffClass,
+  gateDecisionForClass,
   isRollupClean,
   reconcileFileClasses,
   type GateFile,
   type ParsedDiffFile,
+  type PrDiffClass,
   type RollupItem,
 } from "./lib/automerge-classify.js";
+import { parseArgs } from "./lib/automerge-args.js";
+import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
+import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 
 const REVIEW_MODEL = "claude-sonnet-5";
 const REVIEW_MAX_TOKENS = 512;
-
-// ───────────────────────────── CLI args ─────────────────────────────
-
-interface Args {
-  repo: string;
-  pr: number;
-}
-
-function parseArgs(argv: string[]): Args {
-  let repo: string | undefined;
-  let pr: number | undefined;
-  for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--repo") repo = argv[++i];
-    else if (argv[i] === "--pr") pr = Number(argv[++i]);
-  }
-  if (!repo) throw new Error("--repo <org/repo> is required");
-  if (!pr || !Number.isFinite(pr) || pr <= 0) throw new Error("--pr <n> is required");
-  return { repo, pr };
-}
 
 // ───────────────────────────── gh helpers ─────────────────────────────
 
@@ -103,12 +108,21 @@ interface PrJson {
   baseRefName: string;
   statusCheckRollup: RollupItem[];
   files: PrFile[];
+  /** GitHub's own accurate total file-change count — INDEPENDENT of the `files`
+   *  connection's page size. `gh pr view --json files` requests the underlying
+   *  GraphQL `files` connection at its default page size (100, unpaginated) — a PR
+   *  with MORE than that many changed files silently returns only the first page,
+   *  with no truncation flag in the CLI output (codex P1 finding, 2026-08-02
+   *  review). Comparing `files.length` against `changedFiles` is how the caller
+   *  detects that silent truncation and fails closed instead of classifying an
+   *  incomplete file list as safe. */
+  changedFiles: number;
 }
 
 function fetchPr(repo: string, pr: number): PrJson {
   const out = gh([
     "pr", "view", String(pr), "--repo", repo,
-    "--json", "author,labels,state,mergeStateStatus,additions,deletions,headRefOid,baseRefName,statusCheckRollup,files",
+    "--json", "author,labels,state,mergeStateStatus,additions,deletions,headRefOid,baseRefName,statusCheckRollup,files,changedFiles",
   ]);
   return JSON.parse(out) as PrJson;
 }
@@ -228,20 +242,7 @@ function parseUnifiedDiff(diff: string): ParsedDiffFile[] {
 
 type ReviewVerdict = "CLEAN" | "FLAG";
 
-const REVIEW_SYSTEM = [
-  "You are the FINAL automated review gate for a proposed auto-merge. You do not merge anything yourself — you only classify.",
-  "You will be given the complete raw unified diff of a pull request.",
-  "",
-  "Respond with EXACTLY the single word CLEAN on the first line, and NOTHING else, if and ONLY if:",
-  "  - every changed line is purely documentation (.md files, docs/ content), a code COMMENT, or user-visible copy/text, AND",
-  "  - there is ZERO behavioral code change: no logic changes, no control-flow changes, no changed identifiers, function signatures, API/schema/config values, or anything that could change what the program DOES at runtime.",
-  "",
-  "Otherwise respond with FLAG on the first line, followed by one or more brief reasons on subsequent lines naming exactly what is not purely documentation/comment/copy.",
-  "",
-  "Do not merge, do not ask questions, do not add caveats or hedging — output only CLEAN, or FLAG plus reasons.",
-].join("\n");
-
-async function independentReview(diff: string): Promise<{ verdict: ReviewVerdict; detail: string }> {
+async function independentReview(diff: string, systemPrompt: string): Promise<{ verdict: ReviewVerdict; detail: string }> {
   try {
     const client = new Anthropic(); // resolves ANTHROPIC_API_KEY from env
     const response = await client.messages.create({
@@ -249,7 +250,7 @@ async function independentReview(diff: string): Promise<{ verdict: ReviewVerdict
       max_tokens: REVIEW_MAX_TOKENS,
       thinking: { type: "disabled" },
       output_config: { effort: "low" },
-      system: REVIEW_SYSTEM,
+      system: systemPrompt,
       // pg-enum-drift-exempt: this is the Anthropic Messages API request role
       // ("user" | "assistant" per the Claude API), not a Postgres wms_role column.
       messages: [{ role: "user", content: diff }],
@@ -279,26 +280,41 @@ async function independentReview(diff: string): Promise<{ verdict: ReviewVerdict
 
 // ───────────────────────────── main ─────────────────────────────
 
-async function main(): Promise<void> {
-  const { repo, pr } = parseArgs(process.argv.slice(2));
-
+async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[], sensitivePathPatterns: string[]): Promise<void> {
   const prJson = fetchPr(repo, pr);
   const author = prJson.author.login;
   const labels = prJson.labels.map((l) => l.name);
   const totalChangedLines = prJson.additions + prJson.deletions;
   const ciClean = isRollupClean(prJson.statusCheckRollup);
 
-  // ── Leg 1 (cheap, no diff fetch, no API spend): state + CI + merge readiness ──
+  // ── Leg "ci-rollup" (cheap, no diff fetch, no API spend): state + CI + merge readiness ──
   if (prJson.state !== "OPEN" || !ciClean || prJson.mergeStateStatus !== "CLEAN") {
+    const detail = `state=${prJson.state} ciClean=${ciClean} mergeStateStatus=${prJson.mergeStateStatus}`;
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: short-circuit — ${detail}. No diff fetch, no review call.`);
     console.log(
-      `[wait] pr-automerge-gate ${repo}#${pr}: short-circuit — ` +
-        `state=${prJson.state} ciClean=${ciClean} mergeStateStatus=${prJson.mergeStateStatus}. ` +
-        `No diff fetch, no review call.`,
+      formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "ci-rollup", reasons: [detail] }),
     );
     return;
   }
 
-  // ── Cheap legs 2-5, computed from already-fetched data — BEFORE any API spend ──
+  // ── Leg "other" (cheap, no diff fetch, no API spend): authoritative file-list
+  // completeness. `gh pr view --json files` pages the underlying GraphQL `files`
+  // connection at its default size (100, unpaginated) — a PR touching MORE files
+  // than that silently returns only the first page, with nothing in the CLI output
+  // flagging the truncation. `changedFiles` is GitHub's own accurate total count,
+  // independent of that page size — a mismatch means `authoritativePaths` below is
+  // INCOMPLETE, and classifying against an incomplete file list could resolve a
+  // class that should have waited (codex P1 finding, 2026-08-02 review). Fail
+  // closed rather than attempt pagination — a PR needing >100 files touched has no
+  // business auto-merging through this gate regardless.
+  if (prJson.files.length !== prJson.changedFiles) {
+    const detail = `files.length=${prJson.files.length} !== changedFiles=${prJson.changedFiles} (gh pr view's files list is paginated/truncated)`;
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}. No diff fetch, no review call.`);
+    console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "other", reasons: [detail] }));
+    return;
+  }
+
+  // ── Diff fetch + per-file classification (unchanged mechanics) — BEFORE any API spend ──
   const diff = fetchDiffBySha(repo, prJson.baseRefName, prJson.headRefOid);
   const parsed = parseUnifiedDiff(diff);
   // Reconcile against the PR's own AUTHORITATIVE file list (prJson.files), not just
@@ -308,9 +324,30 @@ async function main(): Promise<void> {
   const authoritativePaths = prJson.files.map((f) => f.path);
   const files: GateFile[] = reconcileFileClasses(authoritativePaths, parsed);
 
-  const cheapCheck = gateDecision({
-    files,
-    totalChangedLines,
+  // ── Leg "class-match"/"line-cap": resolve the PR-level diff class ──
+  const classification = classifyPrDiffClass({ files, totalChangedLines, sensitivePathPatterns });
+  if (classification.prClass === null) {
+    const leg: GateReceiptLeg = classification.failureLeg ?? "other";
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: no diff class resolved (${leg}) — ` + classification.reasons.join("; "));
+    console.log(
+      formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg, reasons: classification.reasons }),
+    );
+    return;
+  }
+  const prClass = classification.prClass;
+
+  if (!enabledClasses.includes(prClass)) {
+    const reason = `class '${prClass}' resolved but is not in this caller's --enabled-classes set (${enabledClasses.join(", ")})`;
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${reason}`);
+    console.log(
+      formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "class-match", reasons: [reason] }),
+    );
+    return;
+  }
+
+  // ── Cheap universal legs (author/label) — BEFORE any API spend ──
+  const cheapCheck = gateDecisionForClass({
+    prClass,
     author,
     labels,
     ciClean,
@@ -319,18 +356,17 @@ async function main(): Promise<void> {
 
   if (cheapCheck.decision === "wait") {
     console.log(
-      `[wait] pr-automerge-gate ${repo}#${pr}: cheap legs failed (review NOT invoked — no spend): ` +
-        cheapCheck.reasons.join("; "),
+      `[wait] pr-automerge-gate ${repo}#${pr}: cheap legs failed (review NOT invoked — no spend): ` + cheapCheck.reasons.join("; "),
     );
+    console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "other", reasons: cheapCheck.reasons }));
     return;
   }
 
-  // ── Leg 6 (paid): independent review — every other leg already passes ──
-  const review = await independentReview(diff);
+  // ── Paid leg: independent review — every other leg already passes, class-aware prompt ──
+  const review = await independentReview(diff, reviewSystemPromptFor(prClass));
 
-  const finalCheck = gateDecision({
-    files,
-    totalChangedLines,
+  const finalCheck = gateDecisionForClass({
+    prClass,
     author,
     labels,
     ciClean,
@@ -342,6 +378,7 @@ async function main(): Promise<void> {
       `[wait] pr-automerge-gate ${repo}#${pr}: review verdict ${review.verdict} — ` +
         finalCheck.reasons.join("; ") + ` | review detail: ${review.detail}`,
     );
+    console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "review", reasons: finalCheck.reasons }));
     return;
   }
 
@@ -357,18 +394,21 @@ async function main(): Promise<void> {
         `run (Rules #109/#161) — the next scheduled/triggered run re-evaluates the current head. ` +
         `Underlying error: ${message}`,
     );
+    // No [gate-receipt] line here: the gate itself QUALIFIED (every leg passed) — this
+    // is an operational merge-attempt failure, not a gate miss, and the original
+    // #279 gate never emitted a receipt for it either (no PR comment on this path).
     return;
   }
 
   const receipt = [
-    "**squasher auto-merge gate — MERGED** (Rule #279 amendment, Kevin-approved 2026-07-30)",
+    `**squasher auto-merge gate — MERGED** (class: \`${prClass}\`; gate v2, Kevin-approved 2026-08-02)`,
     "",
     "| Leg | Result |",
     "|---|---|",
+    `| diff class | ✅ \`${prClass}\` |`,
     `| author === kbibelhausen | ✅ (${author}) |`,
     `| label \`bugsquasher\` present | ✅ (${labels.join(", ")}) |`,
-    `| every file doc\\|comment-only | ✅ (${files.map((f) => `${f.path}:${f.fileClass}`).join(", ")}) |`,
-    `| totalChangedLines <= 10 | ✅ (${totalChangedLines}) |`,
+    `| totalChangedLines | ✅ (${totalChangedLines}) |`,
     `| CI clean | ✅ |`,
     `| independent review (Claude Sonnet 5) | ✅ CLEAN |`,
     "",
@@ -376,7 +416,31 @@ async function main(): Promise<void> {
   ].join("\n");
 
   commentOnPr(repo, pr, receipt);
+  console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "qualified" }));
   console.log(`[merged] pr-automerge-gate ${repo}#${pr}: all legs passed, squash-merged at ${prJson.headRefOid}.`);
+}
+
+/**
+ * Fail-closed safety net (gate v2): ANY unexpected error thrown during evaluation
+ * (a malformed --sensitive-path regex slipping past classifyPrDiffClass's own
+ * internal guard, a `gh`/API call throwing, anything unforeseen) emits ONE
+ * `[gate-receipt] ... verdict=missed leg=other` line BEFORE the error propagates and
+ * the process exits non-zero — the telemetry contract holds even on a crash: a
+ * `[gate-receipt]` line NEVER reads `verdict=qualified` unless the gate actually
+ * merged the PR. The loud non-zero exit is preserved (this is a genuine
+ * misconfiguration/bug worth a red CI run), not swallowed into a silent "wait".
+ */
+async function main(): Promise<void> {
+  const { repo, pr, enabledClasses, sensitivePathPatterns } = parseArgs(process.argv.slice(2));
+  try {
+    await evaluate(repo, pr, enabledClasses, sensitivePathPatterns);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.log(
+      formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "other", reasons: [`unexpected error: ${message}`] }),
+    );
+    throw err;
+  }
 }
 
 main().catch((err) => {
