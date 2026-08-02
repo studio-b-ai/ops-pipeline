@@ -1,22 +1,36 @@
 name: Squasher auto-merge gate (reusable)
 
-# CLAUDE.md Rule #279 amendment — Kevin-approved 2026-07-30. The ONE narrow,
+# CLAUDE.md Rule #279 amendment — Kevin-approved 2026-07-30, widened to gate v2
+# (Kevin-approved 2026-08-02: ci-infra + test-only diff classes). The ONE narrow,
 # explicitly-scoped exception to the never-auto-merge law (#97): a bug-squasher CCR
 # pull request auto-merges ONLY when every leg in scripts/lib/automerge-classify.ts
-# `gateDecision` passes. See scripts/pr-automerge-gate.ts for the full leg list and
-# design rationale (fail-closed classification, cost-ordered legs, SHA-pinned merge).
+# passes. See scripts/pr-automerge-gate.ts for the full leg list and design
+# rationale (fail-closed classification, cost-ordered legs, SHA-pinned merge).
 #
 # This is the REUSABLE half — it lives here so every fenced-in caller repo shares one
 # canonical gate implementation. Callers `uses:` this workflow and pass `repo` +
 # `pr_number`; see studio-b-ai/studiob's .github/workflows/squasher-automerge.yml for
-# the caller shape.
+# the original caller shape and studio-b-ai/bolt-wms's for the gate-v2 canary caller.
+#
+# `enabled_classes` DEFAULTS TO "docs-comment" — a caller that never sets this input
+# (studiob's existing, unmodified caller included) gets EXACTLY the original #279
+# gate's scope, unchanged, even though this reusable workflow's implementation now
+# also knows about ci-infra/test-only. Opting into the wider gate-v2 classes is an
+# explicit, per-repo `with:` input (see bolt-wms's canary caller), never a side
+# effect of this file merging. `sensitive_path_patterns` is an escape hatch for
+# callers whose branch-protection gates aren't independently verifiable from
+# `statusCheckRollup` — any matching path is excluded from classification entirely.
 #
 # Pinning note: this workflow checks out studio-b-ai/ops-pipeline at `main` (NOT the
 # repo's `@v1` tag convention used by sync.yml/drift-check.yml) — this is a brand-new,
 # single-repo Rule #169 canary, not yet part of the vetted `@v1` fleet. Graduating it
 # to `@v1` pinning (both for this checkout step AND for how callers reference this
 # workflow's own `uses:` ref) is a follow-up once the pilot proves out — a controller
-# decision, not automated here.
+# decision, not automated here. Because BOTH studiob's and bolt-wms's callers pin
+# `@main`, merging the gate-v2 PR activates the NEW CLASSIFICATION CODE PATH for
+# every caller immediately — but `enabled_classes` defaulting to "docs-comment" is
+# what actually confines the new AUTO-MERGE BEHAVIOR to bolt-wms's opt-in. No tag
+# move is needed for this rollout; see the PR body for the exact activation order.
 #
 # Secrets:
 #   ANTHROPIC_API_KEY   the independent-review leg (Claude Sonnet 5). Forwarded
@@ -37,6 +51,16 @@ on:
         description: "PR number to evaluate"
         required: true
         type: string
+      enabled_classes:
+        description: "Comma-separated diff classes this caller opts into (docs-comment,ci-infra,test-only). Default: docs-comment only — the original #279 gate's scope, unchanged for callers that don't set this."
+        required: false
+        type: string
+        default: "docs-comment"
+      sensitive_path_patterns:
+        description: "Comma-separated regex sources (JS RegExp, matched against each changed file's path) for paths this caller wants excluded from classification entirely — e.g. because a branch-protection gate over those paths can't be independently verified from statusCheckRollup. Default: none."
+        required: false
+        type: string
+        default: ""
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -69,4 +93,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-        run: npx tsx pr-automerge-gate.ts --repo "${{ inputs.repo }}" --pr "${{ inputs.pr_number }}"
+          GATE_REPO: ${{ inputs.repo }}
+          GATE_PR_NUMBER: ${{ inputs.pr_number }}
+          GATE_ENABLED_CLASSES: ${{ inputs.enabled_classes }}
+          GATE_SENSITIVE_PATH_PATTERNS: ${{ inputs.sensitive_path_patterns }}
+        run: |
+          set -euo pipefail
+          args=(--repo "$GATE_REPO" --pr "$GATE_PR_NUMBER")
+          if [ -n "$GATE_ENABLED_CLASSES" ]; then
+            args+=(--enabled-classes "$GATE_ENABLED_CLASSES")
+          fi
+          if [ -n "$GATE_SENSITIVE_PATH_PATTERNS" ]; then
+            IFS=',' read -ra patterns <<< "$GATE_SENSITIVE_PATH_PATTERNS"
+            for p in "${patterns[@]}"; do
+              args+=(--sensitive-path "$p")
+            done
+          fi
+          npx tsx pr-automerge-gate.ts "${args[@]}"
