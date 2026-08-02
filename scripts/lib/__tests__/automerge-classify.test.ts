@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyDiffFile,
+  classifyPrDiffClass,
   gateDecision,
+  gateDecisionForClass,
   isRollupClean,
   reconcileFileClasses,
   type GateFile,
   type GateInput,
+  type GateInputV2,
   type ParsedDiffFile,
 } from "../automerge-classify.js";
 
@@ -342,5 +345,238 @@ describe("isStrictCommentLine via classifyDiffFile (block-comment suffix code, c
     expect(ts("// plain")).toBe("comment-only");
     expect(ts("/* one-line block */")).toBe("comment-only");
     expect(classifyDiffFile("page.html", ["<!-- pure comment -->"], [])).toBe("comment-only");
+  });
+});
+
+// ───────────────────────────── gate v2: PR-level diff classes ─────────────────────────────
+// Kevin-approved 2026-08-02 widening: ci-infra + test-only, alongside the unchanged
+// docs-comment class. Negative controls first throughout (Rule #322).
+
+describe("classifyPrDiffClass", () => {
+  function files(paths: string[], fileClass: GateFile["fileClass"] = "code"): GateFile[] {
+    return paths.map((path) => ({ path, fileClass }));
+  }
+
+  // ───── Negative controls first ─────
+
+  it("resolves null (class-match) for an empty file list", () => {
+    const result = classifyPrDiffClass({ files: [], totalChangedLines: 0 });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("class-match");
+  });
+
+  it("resolves null (class-match) for a mixed diff — a workflow file AND a test file together", () => {
+    const result = classifyPrDiffClass({
+      files: files([".github/workflows/ci.yml", "scripts/lib/__tests__/foo.test.ts"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("class-match");
+  });
+
+  it("resolves null (line-cap) for an otherwise-qualifying ci-infra diff at 41 lines", () => {
+    const result = classifyPrDiffClass({ files: files([".github/workflows/ci.yml"]), totalChangedLines: 41 });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("line-cap");
+    expect(result.reasons.some((r) => r.includes("ci-infra") && r.includes("totalChangedLines"))).toBe(true);
+  });
+
+  it("resolves null (line-cap) for an otherwise-qualifying test-only diff at 41 lines", () => {
+    const result = classifyPrDiffClass({ files: files(["scripts/lib/__tests__/foo.test.ts"]), totalChangedLines: 41 });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("line-cap");
+  });
+
+  it("rejects a ci-infra-shaped diff with one src/** file present", () => {
+    const result = classifyPrDiffClass({
+      files: files([".github/workflows/ci.yml", "src/index.ts"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("src/**"))).toBe(true);
+  });
+
+  it("rejects a test-only-shaped diff with one src/** runtime file present", () => {
+    const result = classifyPrDiffClass({
+      files: files(["scripts/lib/__tests__/foo.test.ts", "src/foo.ts"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("src/** runtime file"))).toBe(true);
+  });
+
+  it("rejects a ci-infra-shaped diff with a package.json change (dependency change)", () => {
+    const result = classifyPrDiffClass({
+      files: files([".github/workflows/ci.yml", "package.json"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("package manifest/lockfile"))).toBe(true);
+  });
+
+  it("rejects a test-only-shaped diff with a lockfile change (dependency change)", () => {
+    const result = classifyPrDiffClass({
+      files: files(["scripts/lib/__tests__/foo.test.ts", "scripts/package-lock.json"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("package manifest/lockfile"))).toBe(true);
+  });
+
+  it("rejects a ci-infra-shaped diff touching a migration file", () => {
+    const result = classifyPrDiffClass({
+      files: files([".github/workflows/ci.yml", "db/migrations/0007_add_col.sql"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("migration"))).toBe(true);
+  });
+
+  it("rejects a test-only-shaped diff touching a migration file", () => {
+    const result = classifyPrDiffClass({
+      files: files(["scripts/lib/__tests__/foo.test.ts", "src/migrations/0007_add_col.ts"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("migration"))).toBe(true);
+  });
+
+  it("rejects a ci-infra path outside the workflows/actions allowlist (e.g. .circleci/config.yml)", () => {
+    const result = classifyPrDiffClass({ files: files([".circleci/config.yml"]), totalChangedLines: 3 });
+    expect(result.prClass).toBeNull();
+  });
+
+  it("rejects a non-yaml file inside .github/actions/ — executable code, not declarative config", () => {
+    const result = classifyPrDiffClass({ files: files([".github/actions/foo/index.js"]), totalChangedLines: 3 });
+    expect(result.prClass).toBeNull();
+  });
+
+  it("excludes any PR touching a caller-supplied sensitive path, regardless of an otherwise-qualifying shape", () => {
+    const result = classifyPrDiffClass({
+      files: files([".github/workflows/ci.yml"]),
+      totalChangedLines: 3,
+      sensitivePathPatterns: ["^\\.github/workflows/"],
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("class-match");
+    expect(result.reasons.some((r) => r.includes("sensitive path"))).toBe(true);
+  });
+
+  // ───── Positives ─────
+
+  it("resolves docs-comment for the unchanged doc|comment-only shape at <=10 lines (regression: byte-identical to the original #279 gate)", () => {
+    const result = classifyPrDiffClass({ files: [{ path: "docs/plans/notes.md", fileClass: "doc" }], totalChangedLines: 3 });
+    expect(result).toEqual({ prClass: "docs-comment", failureLeg: null, reasons: [] });
+  });
+
+  it("resolves ci-infra for an all-workflow/action-yaml diff at exactly 40 lines (cap boundary, inclusive)", () => {
+    const result = classifyPrDiffClass({
+      files: files([".github/workflows/ci.yml", ".github/actions/foo/action.yml"]),
+      totalChangedLines: 40,
+    });
+    expect(result).toEqual({ prClass: "ci-infra", failureLeg: null, reasons: [] });
+  });
+
+  it("resolves test-only for an all-test-file diff at exactly 40 lines (cap boundary, inclusive)", () => {
+    const result = classifyPrDiffClass({
+      files: files(["scripts/lib/__tests__/foo.test.ts", "vitest.config.ts"]),
+      totalChangedLines: 40,
+    });
+    expect(result).toEqual({ prClass: "test-only", failureLeg: null, reasons: [] });
+  });
+
+  it("resolves test-only for a .spec.ts file", () => {
+    const result = classifyPrDiffClass({ files: files(["src/foo.spec.ts"]), totalChangedLines: 5 });
+    expect(result.prClass).toBe("test-only");
+  });
+
+  it("accepts a test-only diff touching src/__tests__/** — test-scoped, NOT a src/** runtime file", () => {
+    const result = classifyPrDiffClass({ files: files(["src/__tests__/foo.test.ts"]), totalChangedLines: 5 });
+    expect(result.prClass).toBe("test-only");
+  });
+
+  it("prefers docs-comment over ci-infra when a comment-only workflow-yaml edit fits both shapes and the (smaller) docs cap", () => {
+    const result = classifyPrDiffClass({
+      files: [{ path: ".github/workflows/ci.yml", fileClass: "comment-only" }],
+      totalChangedLines: 4,
+    });
+    expect(result.prClass).toBe("docs-comment");
+  });
+
+  it("falls through to ci-infra when a comment-only workflow-yaml edit exceeds the docs cap but fits the ci-infra cap", () => {
+    const result = classifyPrDiffClass({
+      files: [{ path: ".github/workflows/ci.yml", fileClass: "comment-only" }],
+      totalChangedLines: 25,
+    });
+    expect(result.prClass).toBe("ci-infra");
+  });
+});
+
+describe("gateDecisionForClass", () => {
+  function baseInputV2(overrides: Partial<GateInputV2> = {}): GateInputV2 {
+    return {
+      prClass: "ci-infra",
+      author: "kbibelhausen",
+      labels: ["bugsquasher"],
+      ciClean: true,
+      reviewVerdict: "CLEAN",
+      ...overrides,
+    };
+  }
+
+  // ───── Negative controls first ─────
+
+  it("waits when the author is not kbibelhausen", () => {
+    const result = gateDecisionForClass(baseInputV2({ author: "someone-else" }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("author"))).toBe(true);
+  });
+
+  it("waits when the bugsquasher label is missing", () => {
+    const result = gateDecisionForClass(baseInputV2({ labels: [] }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("label"))).toBe(true);
+  });
+
+  it("waits when CI is not clean", () => {
+    const result = gateDecisionForClass(baseInputV2({ ciClean: false }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("CI not clean"))).toBe(true);
+  });
+
+  it("waits when the independent review verdict is FLAG", () => {
+    const result = gateDecisionForClass(baseInputV2({ reviewVerdict: "FLAG" }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("review verdict"))).toBe(true);
+  });
+
+  it("waits and reports every failing leg when multiple legs fail simultaneously", () => {
+    const result = gateDecisionForClass(baseInputV2({ author: "someone-else", ciClean: false }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons).toHaveLength(2);
+  });
+
+  // ───── Positives ─────
+
+  it("merges for ci-infra with all universal legs green", () => {
+    expect(gateDecisionForClass(baseInputV2())).toEqual({ decision: "merge", reasons: [] });
+  });
+
+  it("merges for test-only with all universal legs green", () => {
+    expect(gateDecisionForClass(baseInputV2({ prClass: "test-only" }))).toEqual({ decision: "merge", reasons: [] });
+  });
+
+  it("merges for docs-comment with all universal legs green, IDENTICAL to the original gateDecision's result for the equivalent input (equivalence regression check)", () => {
+    const v2 = gateDecisionForClass(baseInputV2({ prClass: "docs-comment" }));
+    const v1 = gateDecision({
+      files: [{ path: "docs/notes.md", fileClass: "doc" }],
+      totalChangedLines: 3,
+      author: "kbibelhausen",
+      labels: ["bugsquasher"],
+      ciClean: true,
+      reviewVerdict: "CLEAN",
+    });
+    expect(v2.decision).toBe(v1.decision);
+    expect(v2.reasons).toEqual(v1.reasons);
   });
 });
