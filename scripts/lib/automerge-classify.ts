@@ -508,7 +508,21 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
   }
 
   if (sensitivePathPatterns && sensitivePathPatterns.length > 0) {
-    const sensitiveRes = sensitivePathPatterns.map((src) => new RegExp(src));
+    // A malformed regex source (caller misconfiguration) must NEVER throw out of this
+    // function and must NEVER be silently ignored (treating a broken pattern as "no
+    // exclusion" would defeat the exact fail-closed guarantee this parameter exists
+    // for) — it fails closed exactly like a real sensitive-path hit: prClass: null.
+    let sensitiveRes: RegExp[];
+    try {
+      sensitiveRes = sensitivePathPatterns.map((src) => new RegExp(src));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return {
+        prClass: null,
+        failureLeg: "class-match",
+        reasons: [`invalid sensitivePathPatterns regex (fail-closed): ${message}`],
+      };
+    }
     const sensitiveFiles = files.filter((f) => sensitiveRes.some((re) => re.test(f.path)));
     if (sensitiveFiles.length > 0) {
       return {

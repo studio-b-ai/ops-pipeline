@@ -462,6 +462,28 @@ describe("classifyPrDiffClass", () => {
     expect(result.reasons.some((r) => r.includes("sensitive path"))).toBe(true);
   });
 
+  it("fail-closes (never throws) on a malformed sensitivePathPatterns regex source", () => {
+    // A caller misconfiguration (an invalid regex source) must NEVER throw out of
+    // this function and must NEVER be silently ignored (treating it as "no
+    // exclusion" would fail OPEN) — it resolves the same as a real sensitive-path
+    // hit: prClass null, failureLeg class-match.
+    expect(() =>
+      classifyPrDiffClass({
+        files: files([".github/workflows/ci.yml"]),
+        totalChangedLines: 3,
+        sensitivePathPatterns: ["(unclosed["],
+      }),
+    ).not.toThrow();
+    const result = classifyPrDiffClass({
+      files: files([".github/workflows/ci.yml"]),
+      totalChangedLines: 3,
+      sensitivePathPatterns: ["(unclosed["],
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("class-match");
+    expect(result.reasons.some((r) => r.includes("invalid sensitivePathPatterns regex"))).toBe(true);
+  });
+
   // ───── Positives ─────
 
   it("resolves docs-comment for the unchanged doc|comment-only shape at <=10 lines (regression: byte-identical to the original #279 gate)", () => {

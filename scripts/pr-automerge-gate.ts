@@ -319,9 +319,7 @@ async function independentReview(diff: string, systemPrompt: string): Promise<{ 
 
 // ───────────────────────────── main ─────────────────────────────
 
-async function main(): Promise<void> {
-  const { repo, pr, enabledClasses, sensitivePathPatterns } = parseArgs(process.argv.slice(2));
-
+async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[], sensitivePathPatterns: string[]): Promise<void> {
   const prJson = fetchPr(repo, pr);
   const author = prJson.author.login;
   const labels = prJson.labels.map((l) => l.name);
@@ -442,6 +440,29 @@ async function main(): Promise<void> {
   commentOnPr(repo, pr, receipt);
   console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "qualified" }));
   console.log(`[merged] pr-automerge-gate ${repo}#${pr}: all legs passed, squash-merged at ${prJson.headRefOid}.`);
+}
+
+/**
+ * Fail-closed safety net (gate v2): ANY unexpected error thrown during evaluation
+ * (a malformed --sensitive-path regex slipping past classifyPrDiffClass's own
+ * internal guard, a `gh`/API call throwing, anything unforeseen) emits ONE
+ * `[gate-receipt] ... verdict=missed leg=other` line BEFORE the error propagates and
+ * the process exits non-zero — the telemetry contract holds even on a crash: a
+ * `[gate-receipt]` line NEVER reads `verdict=qualified` unless the gate actually
+ * merged the PR. The loud non-zero exit is preserved (this is a genuine
+ * misconfiguration/bug worth a red CI run), not swallowed into a silent "wait".
+ */
+async function main(): Promise<void> {
+  const { repo, pr, enabledClasses, sensitivePathPatterns } = parseArgs(process.argv.slice(2));
+  try {
+    await evaluate(repo, pr, enabledClasses, sensitivePathPatterns);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.log(
+      formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "other", reasons: [`unexpected error: ${message}`] }),
+    );
+    throw err;
+  }
 }
 
 main().catch((err) => {
