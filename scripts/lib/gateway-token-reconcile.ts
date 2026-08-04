@@ -19,21 +19,71 @@ export function reconcileCondition(conditionActive: boolean, issueOpen: boolean)
 }
 
 /**
+ * Why the revocation-gate issue closed. The two causes mean OPPOSITE things, so the close
+ * comment must say which (ops-pipeline#32, Rule #412):
+ *
+ *   - `legacy-set-empty` — every legacy token is revoked. The job is DONE; this is the
+ *                          receipt the gate issue exists to produce.
+ *   - `gate-un-greened`  — a straggler was used again. Legacy tokens REMAIN, and revoking
+ *                          them now would break a live consumer.
+ *
+ * Before this discriminant existed, `reconcileGate` returned a bare "close" and the caller
+ * emitted one comment covering both: "a straggler appeared or the legacy set changed". On
+ * 2026-08-04 that disjunction caused a sibling session to read a COMPLETED revocation as a
+ * regression and pull the already-executed command off Kevin's queue.
+ */
+export type GateCloseReason = "legacy-set-empty" | "gate-un-greened";
+
+export interface GateReconcile {
+  action: ReconcileAction;
+  /** Set only when `action === "close"`; `null` otherwise. */
+  reason: GateCloseReason | null;
+}
+
+/**
  * Revocation-gate issue reconcile. Differences from a plain condition:
  * - zero legacy tokens left (all revoked) → the gate is vacuous — never open, close if open;
- * - a PREVIOUSLY CLOSED gate issue is never reopened by "still green" (closing it is the
- *   human's ack; re-opening would nag — the issue only reopens if the gate goes CLOSED and
- *   then GREEN again, which shows up as a fresh open after the straggler episode's close).
- *   The caller passes `everClosed` = a closed gate issue exists.
+ * - a PREVIOUSLY CLOSED gate issue is not reopened by "still green" (closing it is the
+ *   human's ack; re-opening would nag). The caller passes `everClosed` = a closed gate issue
+ *   exists.
+ *
+ * WARNING: `everClosed` is MONOTONIC — a closed issue stays closed forever, so once this gate
+ * has been acked it can never re-open, including after a genuine CLOSED→GREEN cycle. That is
+ * a SEPARATE defect from the one this discriminant fixes; see ops-pipeline#34. Do not write a
+ * close comment promising the issue will reopen — it will not.
  */
 export function reconcileGate(
   gateGreen: boolean,
   legacyCount: number,
   issueOpen: boolean,
   everClosed: boolean,
-): ReconcileAction {
-  if (legacyCount === 0) return issueOpen ? "close" : "none";
-  if (gateGreen && !issueOpen && !everClosed) return "open";
-  if (!gateGreen && issueOpen) return "close";
-  return "none";
+): GateReconcile {
+  if (legacyCount === 0) {
+    return issueOpen
+      ? { action: "close", reason: "legacy-set-empty" }
+      : { action: "none", reason: null };
+  }
+  if (gateGreen && !issueOpen && !everClosed) return { action: "open", reason: null };
+  if (!gateGreen && issueOpen) return { action: "close", reason: "gate-un-greened" };
+  return { action: "none", reason: null };
+}
+
+/**
+ * The close comment. Names the ACTUAL cause and carries the counts, so the receipt travels
+ * WITH the notification instead of living only in a run log nobody opens — the 2026-08-04
+ * misread happened with `0 legacy, 0 straggler(s)` sitting one click away in the run summary.
+ *
+ * Deliberately makes NO claim about reopening (see reconcileGate's warning above).
+ */
+export function gateCloseComment(
+  reason: GateCloseReason,
+  legacyCount: number,
+  stragglerCount: number,
+): string {
+  const counts = `Counts at close: **${legacyCount} legacy**, **${stragglerCount} straggler(s)**.`;
+  const headline =
+    reason === "legacy-set-empty"
+      ? "**Every legacy gateway token is revoked** — the revocation gate is satisfied and there is nothing left to approve. This is the completion receipt, not a regression."
+      : "**A straggler token was used again, so the gate is no longer GREEN.** Legacy tokens REMAIN — revoking them now would break a live consumer. Re-stage only once the gate reads GREEN again.";
+  return `${headline}\n\n${counts}\n\nAuto-closed by the token watch.`;
 }
