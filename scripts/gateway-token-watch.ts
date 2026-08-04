@@ -36,7 +36,7 @@
 import pg from "pg";
 import { requireEnv } from "./lib/config.js";
 import { classifyLegacyToken, revocationGate } from "./lib/gateway-token-classify.js";
-import { reconcileCondition, reconcileGate } from "./lib/gateway-token-reconcile.js";
+import { reconcileCondition, reconcileGate, gateCloseComment } from "./lib/gateway-token-reconcile.js";
 import { ensureLabel as ensureLabelShared, listIssuesByLabel, openIssue as openIssueShared, closeIssue as closeIssueShared, type IssueRef } from "./lib/github-issues.js";
 
 const REPO = "studio-b-ai/ops-pipeline";
@@ -183,9 +183,19 @@ async function main(): Promise<void> {
 
   const gateGreen = revocationGate(stragglers.length, cutover, QUIET_DAYS, new Date()) === "GREEN";
   const gateOpen = openByTitle.get(GATE_TITLE);
-  const gateAction = reconcileGate(gateGreen, legacy.length, Boolean(gateOpen), closedTitles.has(GATE_TITLE));
-  if (gateAction === "open") planned.push({ action: "open", title: GATE_TITLE, body: gateBody(legacy) });
-  if (gateAction === "close" && gateOpen) planned.push({ action: "close", title: GATE_TITLE, num: gateOpen.number, comment: "Gate no longer GREEN (a straggler appeared or the legacy set changed) — auto-closed by the token watch." });
+  const gate = reconcileGate(gateGreen, legacy.length, Boolean(gateOpen), closedTitles.has(GATE_TITLE));
+  if (gate.action === "open") planned.push({ action: "open", title: GATE_TITLE, body: gateBody(legacy) });
+  // The close comment NAMES the cause and carries the counts (ops-pipeline#32). The single
+  // disjunctive comment this replaces covered two opposite meanings — "the revocation is
+  // done" and "something regressed" — and a reader picked the wrong one on 2026-08-04.
+  if (gate.action === "close" && gateOpen && gate.reason) {
+    planned.push({
+      action: "close",
+      title: GATE_TITLE,
+      num: gateOpen.number,
+      comment: gateCloseComment(gate.reason, legacy.length, stragglers.length),
+    });
+  }
 
   if (dryRun) {
     console.log("=== gateway-token-watch --dry-run (real DB + issue list, NO mutations) ===");
