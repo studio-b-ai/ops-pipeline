@@ -310,7 +310,10 @@ async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[],
   if (prJson.files.length !== prJson.changedFiles) {
     const detail = `files.length=${prJson.files.length} !== changedFiles=${prJson.changedFiles} (gh pr view's files list is paginated/truncated)`;
     console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}. No diff fetch, no review call.`);
-    console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "other", reasons: [detail] }));
+    // Leg `truncation`, not `other` (ops-pipeline#24): this is a CORRECT fail-closed
+    // decline on incomplete data, not an unforeseen error. `other` now means only
+    // "the gate threw" so squasher-health monitoring can tell the two apart.
+    console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "truncation", reasons: [detail] }));
     return;
   }
 
@@ -358,7 +361,12 @@ async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[],
     console.log(
       `[wait] pr-automerge-gate ${repo}#${pr}: cheap legs failed (review NOT invoked — no spend): ` + cheapCheck.reasons.join("; "),
     );
-    console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "other", reasons: cheapCheck.reasons }));
+    // Leg `eligibility`, not `other` (ops-pipeline#24). `ci-rollup` and both
+    // classification legs have already passed and `reviewVerdict` above is the
+    // best-case placeholder, so a wait HERE can only mean author or label — i.e.
+    // "this PR is not in the squasher's lane at all", an ordinary expected outcome
+    // that must not share a bucket with a crash.
+    console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "eligibility", reasons: cheapCheck.reasons }));
     return;
   }
 
