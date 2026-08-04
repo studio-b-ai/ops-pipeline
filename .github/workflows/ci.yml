@@ -15,11 +15,25 @@ name: CI
 # the whole fenced fleet immediately, with nothing red anywhere. `main` in this repo IS
 # the fleet's production ref for auto-merge policy.
 #
-# ── What this file does NOT do ────────────────────────────────────────────────────
-# It does not make these checks REQUIRED — `main` is not branch-protected here at all
-# (see #25). Requiring them is a repo-settings change and a separate, deliberate step,
-# and it MUST come after this file exists: a required context that never reports blocks
-# every PR forever (Rules #198/#280).
+# ── Protection state (was "what this file does NOT do") ───────────────────────────
+# When this file landed, `main` was not protected at all and this block said so. Both
+# halves of #25 have since closed, so the note is corrected here rather than left to
+# drift (Rule #235 — the stale line and the fact move together):
+#
+#   - `"Scripts — typecheck + tests"` IS a required status check on `main`.
+#   - `main` requires a PR; force-pushes and deletions are off.
+#   - `enforce_admins: true` (Kevin, 2026-08-04) — admins no longer bypass. That
+#     includes any agent operating on Kevin's account, which is the point.
+#   - `required_approving_review_count: 0`, deliberately: kbibelhausen is the only
+#     collaborator and authors every PR, and GitHub forbids self-approval, so
+#     requiring 1 would deadlock the repo permanently.
+#
+# The ordering constraint that block warned about still holds and is why the required
+# context could only be added after this file existed: a required context that never
+# reports blocks every PR forever (Rules #198/#280). Note `on: pull_request` carries
+# NO `paths:` filter — that is load-bearing now, not incidental. Adding one would make
+# this check silently absent on PRs that touch no `scripts/` file, and a required
+# context that never reports is exactly the permanent block.
 #
 # ── Proven, not assumed (Rules #322/#464) ─────────────────────────────────────────
 # `scripts/tsconfig.json` is new in the same PR and is load-bearing. Without it,
