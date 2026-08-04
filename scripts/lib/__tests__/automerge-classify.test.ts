@@ -195,6 +195,90 @@ describe("isRollupClean", () => {
     expect(isRollupClean([{ status: "COMPLETED", conclusion: "FAILURE" }])).toBe(false);
   });
 
+  // ── Supersession (ops-pipeline#29) ────────────────────────────────────────────
+  // Live shape from bolt-wms#1463: `require-review-label.yml` runs with
+  // `cancel-in-progress: true`, and the PR was created WITH its label, so `opened`
+  // was superseded by `labeled` ~20s later. GitHub reported the PR CLEAN; the gate
+  // reported ciClean=false and declined a perfectly eligible PR — permanently, since
+  // that CANCELLED entry never clears from the head commit.
+  it("is CLEAN when a CANCELLED run is superseded by a newer SUCCESS of the same check (the #1463 shape)", () => {
+    expect(
+      isRollupClean([
+        // pg-enum-drift-exempt: GitHub Actions check-run fields, not a Postgres enum
+        { name: "Require review label", status: "COMPLETED", conclusion: "CANCELLED", completedAt: "2026-08-04T17:00:02Z" },
+        { name: "Require review label", status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-08-04T17:00:23Z" },
+      ]),
+    ).toBe(true);
+  });
+
+  it("is UNCLEAN when a CANCELLED run has no newer sibling (nothing superseded it)", () => {
+    expect(
+      // pg-enum-drift-exempt: GitHub Actions check-run fields, not a Postgres enum
+      isRollupClean([{ name: "Require review label", status: "COMPLETED", conclusion: "CANCELLED", completedAt: "2026-08-04T17:00:02Z" }]),
+    ).toBe(false);
+  });
+
+  // THE test that matters: de-duplication must never let a real failure hide behind
+  // an older success of the same name.
+  it("is UNCLEAN when a newer FAILURE supersedes an older SUCCESS of the same check", () => {
+    expect(
+      isRollupClean([
+        // pg-enum-drift-exempt: GitHub Actions check-run fields, not a Postgres enum
+        { name: "Server — TypeScript + Tests", status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-08-04T17:00:02Z" },
+        { name: "Server — TypeScript + Tests", status: "COMPLETED", conclusion: "FAILURE", completedAt: "2026-08-04T17:00:23Z" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("is UNCLEAN when a re-run is still IN_PROGRESS even though the previous run of that check succeeded", () => {
+    expect(
+      isRollupClean([
+        // pg-enum-drift-exempt: GitHub Actions check-run fields, not a Postgres enum
+        { name: "Server — TypeScript + Tests", status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-08-04T17:00:02Z" },
+        { name: "Server — TypeScript + Tests", status: "IN_PROGRESS", conclusion: null, startedAt: "2026-08-04T17:05:00Z" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("is UNCLEAN when same-name entries TIE on timestamp and disagree (recency cannot arbitrate — fail closed)", () => {
+    expect(
+      isRollupClean([
+        // pg-enum-drift-exempt: GitHub Actions check-run fields, not a Postgres enum
+        { name: "flaky", status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-08-04T17:00:00Z" },
+        { name: "flaky", status: "COMPLETED", conclusion: "FAILURE", completedAt: "2026-08-04T17:00:00Z" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("does NOT let a DIFFERENT check's newer success supersede another check's failure", () => {
+    expect(
+      isRollupClean([
+        // pg-enum-drift-exempt: GitHub Actions check-run fields, not a Postgres enum
+        { name: "lint", status: "COMPLETED", conclusion: "FAILURE", completedAt: "2026-08-04T17:00:02Z" },
+        { name: "tests", status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-08-04T17:00:23Z" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("never groups unnamed entries together — two unkeyed items stay independent and both must be clean", () => {
+    expect(
+      isRollupClean([
+        // pg-enum-drift-exempt: GitHub Actions check-run fields, not a Postgres enum
+        { status: "COMPLETED", conclusion: "FAILURE", completedAt: "2026-08-04T17:00:02Z" },
+        { status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-08-04T17:00:23Z" },
+      ]),
+    ).toBe(false);
+  });
+
+  it("de-duplicates legacy commit statuses by context too", () => {
+    expect(
+      isRollupClean([
+        { context: "ci/legacy", state: "FAILURE", createdAt: "2026-08-04T17:00:02Z" },
+        { context: "ci/legacy", state: "SUCCESS", createdAt: "2026-08-04T17:00:23Z" },
+      ]),
+    ).toBe(true);
+  });
+
   it("is unclean with a COMPLETED check run whose conclusion is CANCELLED", () => {
     // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
     expect(isRollupClean([{ status: "COMPLETED", conclusion: "CANCELLED" }])).toBe(false);

@@ -273,6 +273,16 @@ export interface RollupItem {
   status?: string;
   /** Check-run shape, only meaningful once status is COMPLETED */
   conclusion?: string | null;
+  /** Check-run name. With `context`, the SUPERSESSION KEY — see `isRollupClean`. */
+  name?: string;
+  /** Legacy commit-status context name. */
+  context?: string;
+  /** Check-run completion time (ISO 8601). Recency signal for supersession. */
+  completedAt?: string | null;
+  /** Check-run start time (ISO 8601). Fallback recency signal. */
+  startedAt?: string | null;
+  /** Legacy commit-status creation time (ISO 8601). */
+  createdAt?: string | null;
 }
 
 // ALLOWLISTS, not denylists (codex P1 finding, 2026-07-30 review): the original
@@ -614,24 +624,91 @@ export function gateDecisionForClass(input: GateInputV2): GateResult {
 
 // ───────────────────────────── CI-rollup classification ─────────────────────────────
 
+/** True when a SINGLE rollup entry is terminal (finished, whatever the outcome). */
+function isTerminal(item: RollupItem): boolean {
+  if (item.state !== undefined) return item.state !== "PENDING" && item.state !== "EXPECTED";
+  if (item.status !== undefined) return item.status === "COMPLETED";
+  return false; // unrecognized shape — never terminal, so it can never supersede anything
+}
+
+/** True when a SINGLE rollup entry is clean. Unchanged allowlist semantics. */
+function isItemClean(item: RollupItem): boolean {
+  if (item.state !== undefined) return CLEAN_LEGACY_STATES.has(item.state);
+  if (item.status !== undefined) {
+    if (item.status !== "COMPLETED") return false; // still running/queued
+    return !!item.conclusion && CLEAN_CONCLUSIONS.has(item.conclusion);
+  }
+  // Unrecognized item shape — fail-closed rather than silently treating as clean.
+  return false;
+}
+
+/**
+ * Supersession key: GitHub reports a check-run's identity by `name`, a legacy commit
+ * status by `context`. Entries lacking both get a per-index key so they can NEVER be
+ * grouped with — or superseded by — anything else.
+ */
+function rollupKey(item: RollupItem, index: number): string {
+  const named = item.name ?? item.context;
+  return named !== undefined && named !== "" ? `named:${named}` : `unkeyed:${index}`;
+}
+
+/** Recency for supersession. Missing timestamps sort oldest, so a real one always wins. */
+function rollupTime(item: RollupItem): number {
+  const raw = item.completedAt ?? item.startedAt ?? item.createdAt;
+  if (!raw) return 0;
+  const t = Date.parse(raw);
+  return Number.isNaN(t) ? 0 : t;
+}
+
 export function isRollupClean(rollup: RollupItem[]): boolean {
   // Empty rollup = NOT clean (codex P3 fix, 2026-07-31): "full CI green" requires
   // CI to exist. A caller repo with zero checks — or an unexpectedly-empty rollup
   // response — must queue for a human, not vacuously pass the CI leg. Repos without
   // CI never auto-merge; that is deliberate policy, not a bug.
   if (rollup.length === 0) return false;
-  for (const item of rollup) {
-    if (item.state !== undefined) {
-      if (!CLEAN_LEGACY_STATES.has(item.state)) return false;
-      continue;
-    }
-    if (item.status !== undefined) {
-      if (item.status !== "COMPLETED") return false; // still running/queued
-      if (!item.conclusion || !CLEAN_CONCLUSIONS.has(item.conclusion)) return false;
-      continue;
-    }
-    // Unrecognized item shape — fail-closed rather than silently treating as clean.
-    return false;
+
+  // ── SUPERSESSION (ops-pipeline#29, 2026-08-04) ────────────────────────────────
+  // Previously this iterated EVERY entry and required each to be clean. GitHub does
+  // not work that way: `statusCheckRollup` retains superseded runs, and GitHub's own
+  // `mergeStateStatus` (and `gh pr checks`) de-duplicate by name, keeping the latest.
+  //
+  // Any workflow with `cancel-in-progress: true` leaves a CANCELLED entry behind the
+  // moment a second event supersedes it — e.g. `opened` then `labeled` seconds apart.
+  // CANCELLED ∉ CLEAN_CONCLUSIONS, so the old code declined a PR GitHub itself
+  // reported as CLEAN, permanently: that entry never clears from the head commit.
+  // Because the squasher labels its PRs AT CREATION, essentially every bug-squasher
+  // PR acquired exactly that supersession and could never auto-merge. Live evidence:
+  // bolt-wms#1463 carried CANCELLED@17:00:02 and SUCCESS@17:00:23 for one check —
+  // 30 rollup entries, 29 unique names.
+  //
+  // This is NOT a loosening. A superseded run says nothing about the head commit's
+  // health; a newer run of the same check already answered. Fail-closed is preserved
+  // three ways below.
+  const groups = new Map<string, RollupItem[]>();
+  rollup.forEach((item, index) => {
+    const key = rollupKey(item, index);
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(item);
+    else groups.set(key, [item]);
+  });
+
+  for (const items of groups.values()) {
+    // (1) FAIL-CLOSED on in-flight work: a queued/running entry is current activity,
+    //     not something an older sibling can supersede. A re-run in progress must
+    //     block even when the previous run of that same check succeeded — otherwise
+    //     de-duplication would merge a PR whose CI is still deciding.
+    if (items.some((item) => !isTerminal(item))) return false;
+
+    // (2) Latest terminal entry wins — GitHub's own semantics.
+    const newest = Math.max(...items.map(rollupTime));
+
+    // (3) FAIL-CLOSED on ties: when several entries share the newest timestamp, ALL
+    //     of them must be clean. Recency cannot arbitrate between them, so the gate
+    //     refuses rather than picking one by array order (Rule #318: no
+    //     nondeterministic tie-breaks). This also covers the all-timestamps-missing
+    //     case, where every entry ties at 0 and the old every-entry behavior applies.
+    if (items.some((item) => rollupTime(item) === newest && !isItemClean(item))) return false;
   }
+
   return true;
 }
