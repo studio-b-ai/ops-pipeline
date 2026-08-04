@@ -1,0 +1,71 @@
+name: CI
+
+# ops-pipeline#25 — this repo had NO CI at all until this file.
+#
+# All seven pre-existing workflows are scheduled monitors, a rotation job, or the
+# reusable auto-merge gate invoked BY OTHER REPOS. None ran on `pull_request`. So the
+# 215 tests guarding `pr-automerge-gate.ts` and `automerge-classify.ts` — the logic
+# that decides whether other repos' pull requests merge WITHOUT A HUMAN — were never
+# enforced. Those tests encode the accumulated codex P1/P2 findings from three review
+# passes (the ABA force-push race, binary-file fail-open, header-zone diff parsing,
+# paginated file lists, sensitive-path exclusion). Every one of them was defended by a
+# test that nothing ran.
+#
+# Both callers pin this repo `@main`, so a regression reaching `main` here is live for
+# the whole fenced fleet immediately, with nothing red anywhere. `main` in this repo IS
+# the fleet's production ref for auto-merge policy.
+#
+# ── What this file does NOT do ────────────────────────────────────────────────────
+# It does not make these checks REQUIRED — `main` is not branch-protected here at all
+# (see #25). Requiring them is a repo-settings change and a separate, deliberate step,
+# and it MUST come after this file exists: a required context that never reports blocks
+# every PR forever (Rules #198/#280).
+#
+# ── Proven, not assumed (Rules #322/#464) ─────────────────────────────────────────
+# `scripts/tsconfig.json` is new in the same PR and is load-bearing. Without it,
+# `tsc --noEmit` runs against ZERO inputs, prints usage text, and exits 0 — a check
+# that has never checked anything (Rule #382). That exact false-green is what led to
+# #25 being filed. Before shipping, a deliberate type error was planted and the
+# typecheck returned exit 2; with it removed, exit 0. Both directions.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scripts:
+    name: "Scripts — typecheck + tests"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: scripts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: scripts/package-lock.json
+
+      # `npm ci` deliberately, NOT `npm install`: ci installs the LOCKFILE exactly and
+      # fails loudly on package.json/lock drift, which is the whole point of a
+      # verification job (Rule #289). The reusable gate workflow's `npm ci || npm
+      # install` fallback is for RUNTIME resilience; a check that silently repairs its
+      # own inputs cannot detect that they were broken.
+      - name: Install deps
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
