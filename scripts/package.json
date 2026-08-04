@@ -11,6 +11,7 @@
     "monitor:credentials": "tsx credential-expiry-monitor.ts",
     "monitor:railway-volumes": "tsx railway-volume-monitor.ts",
     "gate:pr-automerge": "tsx pr-automerge-gate.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run"
   },
   "dependencies": {

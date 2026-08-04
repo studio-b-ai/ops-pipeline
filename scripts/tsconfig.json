@@ -1,0 +1,28 @@
+{
+  "//": [
+    "ops-pipeline#25. Before this file existed there was NO tsconfig here, so",
+    "`npx tsc --noEmit` in this directory silently printed usage text and exited 0",
+    "against ZERO inputs — a check that had never checked anything (Rule #382).",
+    "A typecheck job without this file would be theater (Rule #376).",
+    "",
+    "NodeNext is load-bearing, not stylistic: package.json sets \"type\": \"module\"",
+    "and every internal import carries an explicit .js extension (e.g.",
+    "./lib/automerge-classify.js). Any other moduleResolution reports those as",
+    "unresolved and the typecheck goes uniformly red for the wrong reason."
+  ],
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
+}
