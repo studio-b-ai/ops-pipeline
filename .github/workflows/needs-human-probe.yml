@@ -1,0 +1,76 @@
+name: Needs-human diagnostic probe (reusable)
+
+# ops-pipeline#20 (Project 3) — Kevin word 2026-08-04: "dispatch. we need to
+# automate this process." When the bug-squasher escalates an issue with the
+# `needs-human` label, this probe posts ONE read-only findings comment (culprit
+# hypothesis + quoted evidence + fix-layer recommendation + NEEDS-KEVIN flag) so
+# the human arrives pre-briefed. See scripts/needs-human-probe.ts for the full
+# design rationale (read-only by construction, once-per-issue dedup, fail
+# open-silent).
+#
+# This is the REUSABLE half, mirroring squasher-automerge.yml's architecture:
+# callers `uses:` this workflow so the probe logic stays central. bolt-wms is the
+# Rule #169 single-repo canary caller; studiob follows only after the first
+# firing is proven there (#464).
+#
+# Trigger note (the ops-pipeline#23 lesson applied at DESIGN time, not learned
+# again): callers trigger on `issues: labeled`. That event fires when the label
+# is applied by the squasher CCR session or any human — both act with USER
+# tokens, not GITHUB_TOKEN, so GitHub's Actions recursion prevention does NOT
+# suppress it. This probe's own comment IS posted with GITHUB_TOKEN, so it can
+# never re-trigger anything. The self-triggering shape that made the auto-merge
+# gate structurally inert cannot occur here by construction.
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: "owner/repo the escalated issue lives in"
+        required: true
+        type: string
+      issue_number:
+        description: "The escalated issue number"
+        required: true
+        type: string
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+
+# One probe at a time per issue: a label re-add racing a slow first run must not
+# double-comment. The script's marker dedup is the durable guard; this is the
+# in-flight one.
+concurrency:
+  group: needs-human-probe-${{ inputs.repo }}-${{ inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: "Read-only diagnostic probe"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ops-pipeline (probe scripts live here, not in the caller repo)
+        uses: actions/checkout@v4
+        with:
+          repository: studio-b-ai/ops-pipeline
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Run needs-human probe
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PROBE_REPO: ${{ inputs.repo }}
+          PROBE_ISSUE: ${{ inputs.issue_number }}
+        run: npx tsx needs-human-probe.ts
