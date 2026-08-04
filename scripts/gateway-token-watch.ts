@@ -36,7 +36,7 @@
 import pg from "pg";
 import { requireEnv } from "./lib/config.js";
 import { classifyLegacyToken, revocationGate } from "./lib/gateway-token-classify.js";
-import { reconcileCondition, reconcileGate, gateCloseComment } from "./lib/gateway-token-reconcile.js";
+import { reconcileCondition, reconcileGate, gateCloseComment, gateCycleKey, gateTitle, isGateTitle } from "./lib/gateway-token-reconcile.js";
 import { ensureLabel as ensureLabelShared, listIssuesByLabel, openIssue as openIssueShared, closeIssue as closeIssueShared, type IssueRef } from "./lib/github-issues.js";
 
 const REPO = "studio-b-ai/ops-pipeline";
@@ -60,7 +60,8 @@ const EXPECTED_ACTIVE = new Set([
   "deploy-smoke",
 ]);
 
-const GATE_TITLE = "[token-watch] revocation gate GREEN — approve legacy-token revocation";
+// Gate issue titles are PER-CYCLE (ops-pipeline#34): built via gateTitle(gateCycleKey(...))
+// from lib/gateway-token-reconcile.ts, so a human ack suppresses only its own cycle.
 const BLIND_TITLE = "[token-watch] MONITOR BLIND — token table unreadable";
 
 interface TokenRow {
@@ -121,7 +122,7 @@ function gateBody(legacy: TokenRow[]): string {
     "",
     list,
     "",
-    "**Execution is human-gated (Rule #97):** run `gateway-revoke-token.ts` in studio-b-ai/studiob per token, then close this issue as the acknowledgment. Closing without revoking is also fine — the monitor will not nag (it never reopens a human-closed gate issue unless the gate cycles CLOSED→GREEN again).",
+    "**Execution is human-gated (Rule #97):** run `gateway-revoke-token.ts` in studio-b-ai/studiob per token, then close this issue as the acknowledgment. Closing without revoking is also fine — the monitor will not nag: closing acknowledges THIS cycle (the cycle key in the title identifies it). If the legacy set or its usage later changes — a straggler episode, remediation, or a regrown set — a FRESH gate issue opens for the new cycle (ops-pipeline#34).",
   ].join("\n");
 }
 
@@ -182,19 +183,44 @@ async function main(): Promise<void> {
   }
 
   const gateGreen = revocationGate(stragglers.length, cutover, QUIET_DAYS, new Date()) === "GREEN";
-  const gateOpen = openByTitle.get(GATE_TITLE);
-  const gate = reconcileGate(gateGreen, legacy.length, Boolean(gateOpen), closedTitles.has(GATE_TITLE));
-  if (gate.action === "open") planned.push({ action: "open", title: GATE_TITLE, body: gateBody(legacy) });
+
+  // Cycle identity (ops-pipeline#34): the gate issue's title carries a key derived from the
+  // legacy set + usage, so a human ack (closing the issue) suppresses only ITS cycle. When
+  // the set or usage changes, the key changes and the gate can open fresh — before #34 one
+  // immortal title meant a single ack silenced the gate forever.
+  const cycleKey = gateCycleKey(legacy.map((t) => ({ name: t.name, lastUsedIso: t.last_used_at ? t.last_used_at.toISOString() : null })));
+  const currentGateTitle = gateTitle(cycleKey);
+  const openGateIssues = issues.filter((i) => i.state === "OPEN" && isGateTitle(i.title));
+  const currentOpen = openGateIssues.find((i) => i.title === currentGateTitle);
+
+  // Stale-cycle sweep: an open gate issue whose title carries a DIFFERENT key no longer
+  // describes current state. Close as superseded — unless legacy is empty, in which case the
+  // vacuous close below covers every lingering gate issue with the DONE receipt instead.
+  if (legacy.length > 0) {
+    for (const stale of openGateIssues) {
+      if (stale.title === currentGateTitle) continue;
+      planned.push({ action: "close", title: stale.title, num: stale.number, comment: gateCloseComment("cycle-superseded", legacy.length, stragglers.length) });
+    }
+  }
+
+  // Per the reconcileGate caller contract: with legacy tokens present, `issueOpen` asks about
+  // THIS cycle's issue; with none left, it asks whether ANY gate issue lingers (they all get
+  // the legacy-set-empty close, whatever cycle their titles carry).
+  const gate = reconcileGate(
+    gateGreen,
+    legacy.length,
+    legacy.length === 0 ? openGateIssues.length > 0 : Boolean(currentOpen),
+    closedTitles.has(currentGateTitle),
+  );
+  if (gate.action === "open") planned.push({ action: "open", title: currentGateTitle, body: gateBody(legacy) });
   // The close comment NAMES the cause and carries the counts (ops-pipeline#32). The single
-  // disjunctive comment this replaces covered two opposite meanings — "the revocation is
-  // done" and "something regressed" — and a reader picked the wrong one on 2026-08-04.
-  if (gate.action === "close" && gateOpen && gate.reason) {
-    planned.push({
-      action: "close",
-      title: GATE_TITLE,
-      num: gateOpen.number,
-      comment: gateCloseComment(gate.reason, legacy.length, stragglers.length),
-    });
+  // disjunctive comment this replaced covered opposite meanings — "the revocation is done"
+  // and "something regressed" — and a reader picked the wrong one on 2026-08-04.
+  if (gate.action === "close" && gate.reason) {
+    const targets = gate.reason === "legacy-set-empty" ? openGateIssues : currentOpen ? [currentOpen] : [];
+    for (const t of targets) {
+      planned.push({ action: "close", title: t.title, num: t.number, comment: gateCloseComment(gate.reason, legacy.length, stragglers.length) });
+    }
   }
 
   if (dryRun) {
@@ -203,7 +229,7 @@ async function main(): Promise<void> {
       const lastUsed = t.last_used_at ? t.last_used_at.toISOString() : "never";
       console.log(`  ${t.name.padEnd(36)} ${(stragglers.includes(t) ? "STRAGGLER" : "QUIET").padEnd(10)} last_used=${lastUsed}`);
     }
-    console.log(`  gate: ${gateGreen ? "GREEN" : "CLOSED"} | open watch issues: ${openByTitle.size}`);
+    console.log(`  gate: ${gateGreen ? "GREEN" : "CLOSED"} | cycle: ${cycleKey} | open watch issues: ${openByTitle.size}`);
     console.log(`[would perform ${planned.length} issue action(s)]`);
     for (const p of planned) console.log(`  • ${p.action.toUpperCase()} ${p.title}`);
     return;
