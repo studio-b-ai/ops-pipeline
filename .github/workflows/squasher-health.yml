@@ -1,0 +1,68 @@
+name: Squasher health check (reusable)
+
+# Project 2 — the monitor that keeps the 2026-08-04 un-gating from silently
+# rotting. The auto-merge gate spent a month structurally inert (#19 → #23 →
+# #29) with nothing red anywhere; this check makes that state LOUD. Full design
+# rationale in scripts/squasher-health.ts.
+#
+# Reusable half, mirroring the gate + probe architecture: each CALLER repo runs
+# a scheduled thin caller that `uses:` this workflow, reading its OWN runs with
+# its OWN GITHUB_TOKEN — keyless by construction (#302: no PAT minted, no
+# cross-repo credential exists to leak). Machinery issues open in the CALLER
+# repo per the fleet issues law (#165 amendment).
+#
+# SLA honesty (#412/#448): callers run every 2h against a 4h window → a dead
+# sweep surfaces within ~6h worst-case. An inert gate fails SAFE (PRs wait for
+# humans — the pre-gate status quo), which is why hours-scale detection is
+# proportionate. The `sla_hours` input doubles as the #471 planted-control seam:
+# dispatch with a sub-minute value and dead-sweep fires against real data.
+
+on:
+  workflow_call:
+    inputs:
+      sla_hours:
+        description: "Dead-sweep window in hours (default 4). Sub-minute values are the planted-control seam."
+        required: false
+        type: string
+        default: "4"
+      dry_run:
+        description: "Real reads, no issue mutations"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+concurrency:
+  group: squasher-health-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  health:
+    name: "Squasher health check"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ops-pipeline (monitor scripts live here, not in the caller repo)
+        uses: actions/checkout@v4
+        with:
+          repository: studio-b-ai/ops-pipeline
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Run squasher health check
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEALTH_REPO: ${{ github.repository }}
+          HEALTH_SLA_HOURS: ${{ inputs.sla_hours }}
+        run: npx tsx squasher-health.ts ${{ inputs.dry_run && '--dry-run' || '' }}
