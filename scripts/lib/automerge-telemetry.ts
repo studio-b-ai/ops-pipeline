@@ -6,17 +6,50 @@
  * posted to Slack, no issue is opened, no external table is written.
  *
  * The line always carries repo, PR number, resolved class (or "unclassified"), and
- * verdict. On a miss it ALSO carries which leg failed first, from a FIXED five-bucket
- * vocabulary (class-match, line-cap, ci-rollup, review, other) — "other" is the
- * explicit fail-closed default for any leg not named here (e.g. author/label), never
- * a silently-omitted field.
+ * verdict. On a miss it ALSO carries which leg failed first, from a FIXED vocabulary,
+ * never a silently-omitted field.
+ *
+ * ── Leg vocabulary widened 2026-08-04 (ops-pipeline#24) ───────────────────────────
+ * v2 deliberately collapsed author/label and file-list-truncation misses into
+ * "other", documented as "the explicit fail-closed default for any leg not named
+ * here". That was a defensible v2 call, but squasher-health monitoring supersedes it:
+ * "other" was doing double duty as BOTH the routine-miss bucket AND the bucket a
+ * genuine crash lands in (the ops-pipeline#19 permissions crash emitted exactly
+ * `leg=other`). A monitor that cannot separate "the gate correctly declined" from
+ * "the gate blew up" reports confident nonsense.
+ *
+ * Post-change, every EXPECTED decline has a named leg and **"other" means ONLY
+ * "unforeseen — the gate threw"**. It is emitted at exactly one site: the catch-all
+ * in pr-automerge-gate.ts. `leg=other` in a run log is therefore always worth a look.
  */
 
 import type { PrDiffClass } from "./automerge-classify.js";
 
 export type GateReceiptVerdict = "qualified" | "missed";
 
-export type GateReceiptLeg = "class-match" | "line-cap" | "ci-rollup" | "review" | "other";
+/**
+ * Which leg failed FIRST. Ordered here as the gate evaluates them:
+ * - `ci-rollup`    PR state / CI green / merge readiness (the cheap short-circuit).
+ * - `truncation`   `gh pr view --json files` came back paginated, so the file list
+ *                  is INCOMPLETE and classification cannot safely proceed. A correct
+ *                  fail-closed decline, NOT an error.
+ * - `class-match`  the file set resolved to no single diff class, or resolved to one
+ *                  this caller has not enabled.
+ * - `line-cap`     a class's shape matched but the diff exceeded that class's cap.
+ * - `eligibility`  the PR is not in the squasher's lane at all — wrong author, or the
+ *                  `bugsquasher` label is absent.
+ * - `review`       the independent review returned anything other than exactly CLEAN
+ *                  (including any API error — fail-closed).
+ * - `other`        UNFORESEEN ONLY. The gate threw. Investigate.
+ */
+export type GateReceiptLeg =
+  | "ci-rollup"
+  | "truncation"
+  | "class-match"
+  | "line-cap"
+  | "eligibility"
+  | "review"
+  | "other";
 
 export interface GateReceiptInput {
   repo: string;

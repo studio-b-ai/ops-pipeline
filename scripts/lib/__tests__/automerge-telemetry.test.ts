@@ -61,17 +61,33 @@ describe("formatGateReceiptLine", () => {
     expect(line).toContain("leg=review");
   });
 
-  it("emits leg=other with a resolved class on an author/label miss", () => {
+  it("emits leg=eligibility with a resolved class on an author/label miss", () => {
     const line = formatGateReceiptLine({
       repo: "studio-b-ai/bolt-wms",
       pr: 46,
       prClass: "ci-infra",
       verdict: "missed",
-      leg: "other",
+      leg: "eligibility",
       reasons: ["missing 'bugsquasher' label (has: none)"],
     });
     expect(line).toContain("class=ci-infra");
-    expect(line).toContain("leg=other");
+    expect(line).toContain("leg=eligibility");
+    // ops-pipeline#24: an ordinary out-of-lane PR must NOT land in the crash bucket.
+    expect(line).not.toContain("leg=other");
+  });
+
+  it("emits leg=truncation when the PR's file list came back paginated", () => {
+    const line = formatGateReceiptLine({
+      repo: "studio-b-ai/bolt-wms",
+      pr: 49,
+      prClass: "unclassified",
+      verdict: "missed",
+      leg: "truncation",
+      reasons: ["files.length=100 !== changedFiles=137 (gh pr view's files list is paginated/truncated)"],
+    });
+    expect(line).toContain("leg=truncation");
+    // A correct fail-closed decline on incomplete data is not an unforeseen error.
+    expect(line).not.toContain("leg=other");
   });
 
   it("escapes embedded double quotes in reasons so the reasons field stays one token", () => {
