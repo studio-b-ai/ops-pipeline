@@ -132,3 +132,34 @@ export function gateCloseComment(
         : "**The legacy set or its usage changed while this gate issue sat open** — this cycle no longer describes current state. Superseded; a fresh gate issue for the new cycle carries the current token list.";
   return `${headline}\n\n${counts}\n\nAuto-closed by the token watch.`;
 }
+
+// ───────────────────────────── straggler orphan sweep (ops-pipeline#37) ─────────────────────────────
+
+const STRAGGLER_TITLE_RE = /^\[token-watch\] straggler: (.+) \(minted \d{4}-\d{2}-\d{2}\)$/;
+
+/** Token name from a straggler issue title; null for any other watch title (gate/blind). */
+export function parseStragglerTitle(title: string): string | null {
+  const m = STRAGGLER_TITLE_RE.exec(title);
+  return m ? m[1] : null;
+}
+
+/**
+ * Open straggler issues whose token no longer EXISTS in the legacy set — the
+ * remediation paths (revoked → drops from the `revoked_at IS NULL` query;
+ * allowlisted → filtered out of `legacy`) both REMOVE the token, so the
+ * per-token reconcile loop never iterates it and its issue would linger open
+ * forever, a #453-shape lie ("open = condition active" while the condition is
+ * RESOLVED). Name-level and conservative: duplicate token names are real in
+ * this table, so if ANY current legacy token still bears the name, the issue
+ * stays open (that name's condition may still be live).
+ */
+export function orphanedStragglerIssues<T extends { title: string; state: string }>(
+  issues: T[],
+  currentLegacyNames: Set<string>,
+): T[] {
+  return issues.filter((i) => {
+    if (i.state !== "OPEN") return false;
+    const name = parseStragglerTitle(i.title);
+    return name !== null && !currentLegacyNames.has(name);
+  });
+}

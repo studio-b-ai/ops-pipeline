@@ -36,7 +36,7 @@
 import pg from "pg";
 import { requireEnv } from "./lib/config.js";
 import { classifyLegacyToken, revocationGate } from "./lib/gateway-token-classify.js";
-import { reconcileCondition, reconcileGate, gateCloseComment, gateCycleKey, gateTitle, isGateTitle } from "./lib/gateway-token-reconcile.js";
+import { reconcileCondition, reconcileGate, gateCloseComment, gateCycleKey, gateTitle, isGateTitle, orphanedStragglerIssues } from "./lib/gateway-token-reconcile.js";
 import { ensureLabel as ensureLabelShared, listIssuesByLabel, openIssue as openIssueShared, closeIssue as closeIssueShared, type IssueRef } from "./lib/github-issues.js";
 
 const REPO = "studio-b-ai/ops-pipeline";
@@ -180,6 +180,21 @@ async function main(): Promise<void> {
     const action = reconcileCondition(status === "STRAGGLER", Boolean(open));
     if (action === "open") planned.push({ action, title, body: stragglerBody(t) });
     if (action === "close" && open) planned.push({ action, title, num: open.number, comment: `\`${t.name}\` has no use since the cutover boundary — condition cleared, auto-closed by the token watch.` });
+  }
+
+  // Orphan sweep (ops-pipeline#37): a REMEDIATED straggler leaves the query
+  // entirely (revoked → dropped by `revoked_at IS NULL`; allowlisted → filtered
+  // from `legacy`), so the loop above never iterates it and its open issue
+  // would linger forever while the condition is resolved. Close those with the
+  // remediation named — the runbook's own success path must not orphan its alert.
+  const legacyNames = new Set(legacy.map((t) => t.name));
+  for (const orphan of orphanedStragglerIssues(issues, legacyNames)) {
+    planned.push({
+      action: "close",
+      title: orphan.title,
+      num: orphan.number,
+      comment: "This token no longer exists in the legacy set — it was revoked or allowlisted (the runbook's remediation paths both remove it from the watch query). Condition RESOLVED, not merely quiet — auto-closed by the token watch.",
+    });
   }
 
   const gateGreen = revocationGate(stragglers.length, cutover, QUIET_DAYS, new Date()) === "GREEN";
