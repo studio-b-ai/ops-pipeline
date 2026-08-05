@@ -15,7 +15,7 @@ studiob-price-sync · asthetik-trade-theme · aesthetik-portal · ops-pipeline
 |---|---|---|---|
 | 1 | bolt-wms#1475 orders not syncing | Acumatica-LOAD symptom (not #441-class); freeze/orphan/PaceJet decisions pending | **Kevin** + bolt lane |
 | 2 | bolt-wms#1466 wrong tariff amounts on auto-sent invoices | Probe: discrepancy is Acumatica-side (SO vs invoice docs), not bolt code | Operator/Kevin |
-| 3 | **studiob#469 SHIP-TO UMBRELLA** (#431 #444 #467) | **DIRECTION A LOCKED (Kevin 8/06)** — bridge masters Shopify-side create+role+ExtRefNbr, THEN #1453 flips Import; full spec + verification battery + 1b backfill on the umbrella; #1453 sequencing-locked behind Phase 1 | **Portal lane implements**; CTO verifies receipts |
+| 3 | **studiob#469 SHIP-TO UMBRELLA** (#431 #444 #467) | **DIRECTION A LOCKED (Kevin 8/06)** — bridge masters Shopify-side create+role+ExtRefNbr, THEN #1453 flips Import; full spec + verification battery + 1b backfill on the umbrella; #1453 sequencing-locked behind Phase 1 | **COO seat implements** (CoS routing 8/06; #1475 outranks); CTO verifies receipts |
 | 5 | bolt-wms#1486 false back-order badge (moved from price-sync#122) | Probe: filed in wrong repo; trace = wms_inventory sync → connector → badge logic | bolt lane |
 | 6 | price-sync#112 Calista Raffia absent from site + portal | Single-SKU pipeline/config gap (catalog publication or pricing rail), not extension code | Portal lane |
 | 7 | price-sync#123 "conflicting" inventory | Possibly NOT a bug: two surfaces answering different questions (gross-vs-net, #407 family) — labeling fix if confirmed | Portal lane |
