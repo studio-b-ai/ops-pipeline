@@ -6,7 +6,7 @@
 > queue. Refreshed each CTO sitting from live issue state — a stale row is a
 > bug (#355). Diagnoses link to probe pre-briefs on the issues themselves.
 
-**Refreshed:** 2026-08-05 ~23:5xZ (ship-to umbrella) · **Coverage:** bolt-wms · studiob ·
+**Refreshed:** 2026-08-06 (ship-to A locked) · **Coverage:** bolt-wms · studiob ·
 studiob-price-sync · asthetik-trade-theme · aesthetik-portal · ops-pipeline
 
 ## P0 — customer-facing: money or orders wrong/stuck
@@ -15,7 +15,7 @@ studiob-price-sync · asthetik-trade-theme · aesthetik-portal · ops-pipeline
 |---|---|---|---|
 | 1 | bolt-wms#1475 orders not syncing | Acumatica-LOAD symptom (not #441-class); freeze/orphan/PaceJet decisions pending | **Kevin** + bolt lane |
 | 2 | bolt-wms#1466 wrong tariff amounts on auto-sent invoices | Probe: discrepancy is Acumatica-side (SO vs invoice docs), not bolt code | Operator/Kevin |
-| 3 | **studiob#469 SHIP-TO UMBRELLA** (#431 #444 #467) | ROOT-CAUSED 8/05: add-new ship-to is dropdown-visible but order-invisible until the connector round-trips it to Shopify; gap stretched by the load-stall family; **coupled to bolt-wms#1453 — decide together** | **Kevin** (fix direction A/B/C), then portal lane |
+| 3 | **studiob#469 SHIP-TO UMBRELLA** (#431 #444 #467) | **DIRECTION A LOCKED (Kevin 8/06)** — bridge masters Shopify-side create+role+ExtRefNbr, THEN #1453 flips Import; full spec + verification battery + 1b backfill on the umbrella; #1453 sequencing-locked behind Phase 1 | **Portal lane implements**; CTO verifies receipts |
 | 5 | bolt-wms#1486 false back-order badge (moved from price-sync#122) | Probe: filed in wrong repo; trace = wms_inventory sync → connector → badge logic | bolt lane |
 | 6 | price-sync#112 Calista Raffia absent from site + portal | Single-SKU pipeline/config gap (catalog publication or pricing rail), not extension code | Portal lane |
 | 7 | price-sync#123 "conflicting" inventory | Possibly NOT a bug: two surfaces answering different questions (gross-vs-net, #407 family) — labeling fix if confirmed | Portal lane |
