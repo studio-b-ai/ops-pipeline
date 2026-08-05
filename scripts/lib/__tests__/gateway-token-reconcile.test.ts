@@ -7,6 +7,8 @@ import {
   gateTitle,
   isGateTitle,
   GATE_TITLE_BASE,
+  parseStragglerTitle,
+  orphanedStragglerIssues,
 } from "../gateway-token-reconcile.js";
 
 describe("reconcileCondition (straggler issues)", () => {
@@ -195,5 +197,39 @@ describe("gateCloseComment: cycle-superseded", () => {
     expect(c).not.toMatch(/reopen/i);
     expect(c).toContain("**2 legacy**");
     expect(c).toContain("**1 straggler(s)**");
+  });
+});
+
+// ops-pipeline#37: a REMEDIATED straggler leaves the query, so the per-token loop
+// never closes its issue — the runbook's own success path orphaned its alert.
+describe("straggler orphan sweep (#37)", () => {
+  const straggler = (name: string, state = "OPEN") => ({
+    title: `[token-watch] straggler: ${name} (minted 2026-06-10)`,
+    state,
+    number: 99,
+  });
+
+  it("parseStragglerTitle extracts the name — and returns null for every other watch title (negative control)", () => {
+    expect(parseStragglerTitle(straggler("webhook-router-prod").title)).toBe("webhook-router-prod");
+    expect(parseStragglerTitle(GATE_TITLE_BASE)).toBeNull();
+    expect(parseStragglerTitle(gateTitle("a1b2c3d4"))).toBeNull();
+    expect(parseStragglerTitle("[token-watch] MONITOR BLIND — token table unreadable")).toBeNull();
+  });
+
+  it("closes an open straggler issue whose token left the legacy set (revoked/allowlisted)", () => {
+    const orphans = orphanedStragglerIssues([straggler("gone-token")], new Set(["still-here"]));
+    expect(orphans).toHaveLength(1);
+  });
+
+  it("does NOT close while any current legacy token still bears the name (duplicate names are real — conservative)", () => {
+    expect(orphanedStragglerIssues([straggler("dup-name")], new Set(["dup-name"]))).toHaveLength(0);
+  });
+
+  it("ignores closed issues and non-straggler titles (negative controls)", () => {
+    const issues = [
+      straggler("gone", "CLOSED"),
+      { title: gateTitle("deadbeef"), state: "OPEN", number: 1 },
+    ];
+    expect(orphanedStragglerIssues(issues, new Set())).toHaveLength(0);
   });
 });
