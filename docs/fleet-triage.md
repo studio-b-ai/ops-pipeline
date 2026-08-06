@@ -28,13 +28,13 @@ studiob-price-sync · asthetik-trade-theme · aesthetik-portal · ops-pipeline
 | 9 | bolt-wms#1360 integration tests dead on main | #99 split-brain: `ACUMATICA_TEST_PASSWORD` GH secret diverged from live api-bot | **Kevin** (secret re-sync) |
 | 10 | studiob#454 checkout draft-vs-auto audit | Not a defect — audit capability gated on `SHOPIFY_ADMIN_TOKEN_ASTHETIK` mint | **Kevin** (token), then lane |
 | 11 | studiob#434 strip reps from customer contacts | No "sales rep" definition exists; bulk live-data mutation → #97/#375 | **Kevin** (policy), then metered job |
+| 12b | **bolt-wms#1511 — 63% of bolt-wms's Acumatica calls erroring** (NEW 8/06, from the telemetry leg's first data) | bolt-wms = 59% of gateway calls; StockItem 187/217, Shipment 161/185, SalesOrder 11/11; **saturation=0** (not seat refusal). Sampled 500s return in **245-456ms** — too fast for timeout collapse ⇒ population is MIXED, a chunk are fast rejections that likely never reach Acumatica = a standing defect invisible until something measured it. Failed calls hold cores then retry ⇒ demand AMPLIFIER, plausibly the largest lever found. Next: log the 5xx BODY (#127), split fast-vs-slow, find the high-volume workers. ⚠️ in-incident window, NOT a baseline | bolt lane / CTO — **Kevin's call** |
 | 12 | team-action queue (bolt #1442 #1452 #1433 #1434) | Flowing via the team-asks digest (#1476) | Sarah/CS |
 
 ## P2 — data quality / deferred engineering
 
 | rank | issue | one-line state | acts |
 |---|---|---|---|
-| 12b | **bolt-wms#1511 — 63% of bolt-wms's Acumatica calls erroring** (NEW 8/06, from the telemetry leg's first data) | bolt-wms = 59% of gateway calls; StockItem 187/217, Shipment 161/185, SalesOrder 11/11; **saturation=0** (not seat refusal). Sampled 500s return in **245-456ms** — too fast for timeout collapse ⇒ population is MIXED, a chunk are fast rejections that likely never reach Acumatica = a standing defect invisible until something measured it. Failed calls hold cores then retry ⇒ demand AMPLIFIER, plausibly the largest lever found. Next: log the 5xx BODY (#127), split fast-vs-slow, find the high-volume workers. ⚠️ in-incident window, NOT a baseline | bolt lane / CTO — **Kevin's call** |
 | 13 | bolt-wms#1469 non-positive stage durations | Probe falsified "writer inverts": bad SOURCE dates (Acumatica entry + unconfirmed T49 `?? new Date()` fallback) | bolt lane (#304 layer) |
 | 14 | bolt-wms#1480 freshness-monitor hardening | #358 rung + output-oracle watchdog | bolt lane / CTO |
 | 15 | bolt-wms#1455 retire dormant deploy-customization.yml | #366 leg check then strip | CTO, rides #21 |
