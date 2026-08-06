@@ -26,6 +26,26 @@ export interface SweepRun {
   createdAt: string; // ISO
 }
 
+/**
+ * Run conclusions that mean "the workflow never really executed" rather than
+ * "the workflow ran and failed". Born 2026-08-06 from a live misfire: during a
+ * GitHub Actions `major_outage`, sweeps across the fleet were CANCELLED at
+ * `Set up job` with zero failed steps, and this classifier reported them as
+ * `runs-failing` with the prose "the gate is ERRORING… the failure is in the
+ * gate machinery". Both halves were false, and the log it pointed at was empty.
+ *
+ * `timed_out` is deliberately NOT here — a hang is a real machinery symptom.
+ */
+export const INFRASTRUCTURE_CONCLUSIONS = new Set([
+  "cancelled",
+  "startup_failure",
+  "stale",
+]);
+
+export function isInfrastructureConclusion(conclusion: string | null): boolean {
+  return conclusion !== null && INFRASTRUCTURE_CONCLUSIONS.has(conclusion);
+}
+
 export interface Receipt {
   repo: string;
   pr: number;
@@ -46,7 +66,7 @@ export function parseReceipts(logText: string): Receipt[] {
 }
 
 export interface HealthCondition {
-  key: "dead-sweep" | "runs-failing" | "crash-receipts";
+  key: "dead-sweep" | "runs-failing" | "crash-receipts" | "sweep-infrastructure";
   detail: string;
 }
 
@@ -79,10 +99,22 @@ export function classifyHealth(
   // repo can be BOTH dead and failing (each condition is its own issue).
   const latest = completed[0];
   if (latest && latest.conclusion !== "success") {
-    conditions.push({
-      key: "runs-failing",
-      detail: `Latest completed sweep run ${latest.databaseId} (${latest.createdAt}) concluded '${latest.conclusion}'. The gate is ERRORING, not declining — the ops-pipeline#19 class. Read that run's log; the failure is in the gate machinery, not the PRs.`,
-    });
+    if (isInfrastructureConclusion(latest.conclusion)) {
+      // NOT a machinery failure. A cancelled or never-started run tells us
+      // nothing about the gate — the gate did not execute. Saying "the gate is
+      // ERRORING" here is a claim the signal cannot support (#412), and during
+      // the 2026-08-06 GitHub Actions outage it fired on every repo and sent
+      // readers to a log containing nothing.
+      conditions.push({
+        key: "sweep-infrastructure",
+        detail: `Latest completed sweep run ${latest.databaseId} (${latest.createdAt}) concluded '${latest.conclusion}' — the run was killed or never started, so the gate did NOT execute. This is an INFRASTRUCTURE signal, not a gate defect: check https://www.githubstatus.com and the run's job list (an all-cancelled job list with no failed steps is the outage signature). Do not read this as the gate erroring, and do not read it as the gate being healthy either — it is simply unmeasured this cycle.`,
+      });
+    } else {
+      conditions.push({
+        key: "runs-failing",
+        detail: `Latest completed sweep run ${latest.databaseId} (${latest.createdAt}) concluded '${latest.conclusion}'. The gate ran and did not succeed — the ops-pipeline#19 class. Read that run's log: if a step failed, the failure is in the gate machinery, not the PRs. (If the job list shows only cancellations with no failed steps, this is infrastructure instead — see \`sweep-infrastructure\`.)`,
+      });
+    }
   }
 
   const crashes = receipts.filter((r) => r.leg === "other");

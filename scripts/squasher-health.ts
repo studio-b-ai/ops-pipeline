@@ -39,7 +39,12 @@ const LABEL = "squasher-health";
 const SWEEP_WORKFLOW = "squasher-automerge.yml";
 const RUN_LOOKBACK = 12; // runs listed for SLA/conclusion checks
 const LOG_LOOKBACK = 6; // completed runs whose logs are scanned for receipts (logs are the expensive read)
-const ALL_KEYS: HealthCondition["key"][] = ["dead-sweep", "runs-failing", "crash-receipts"];
+const ALL_KEYS: HealthCondition["key"][] = [
+  "dead-sweep",
+  "runs-failing",
+  "crash-receipts",
+  "sweep-infrastructure",
+];
 
 function gh(args: string[]): string {
   return execFileSync("gh", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });

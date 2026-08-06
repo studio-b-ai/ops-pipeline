@@ -87,3 +87,66 @@ describe("conditionTitle (the reconcile identity)", () => {
     expect(conditionTitle("studio-b-ai/bolt-wms", "dead-sweep")).toBe("[squasher-health] studio-b-ai/bolt-wms: dead-sweep");
   });
 });
+
+// ── infrastructure vs machinery (2026-08-06 GitHub Actions major_outage) ──────
+describe("infrastructure conclusions are not machinery failures", () => {
+  const run = (conclusion: string) => ({
+    databaseId: 31124894441,
+    status: "completed",
+    conclusion,
+    // Pinned relative to NOW (#256) — 1h old, comfortably inside the 4h SLA,
+    // so dead-sweep cannot fire and confound these assertions.
+    createdAt: new Date(NOW.getTime() - 60 * 60 * 1000).toISOString(),
+  });
+
+  it("PLANTED CONTROL — the live misfire: a cancelled sweep must NOT report runs-failing", () => {
+    // bolt-wms#1520, 2026-08-06: job=cancelled, zero failed steps, evaluate job
+    // skipped. The old classifier called this "the gate is ERRORING" and sent
+    // the reader to an empty log.
+    const c = classifyHealth([run("cancelled")], [], 4, NOW);
+    const keys = c.map((x) => x.key);
+    expect(keys).not.toContain("runs-failing");
+    expect(keys).toContain("sweep-infrastructure");
+  });
+
+  it("says INFRASTRUCTURE plainly and refuses both false readings", () => {
+    const [cond] = classifyHealth([run("cancelled")], [], 4, NOW)
+      .filter((x) => x.key === "sweep-infrastructure");
+    expect(cond.detail).toMatch(/INFRASTRUCTURE/);
+    expect(cond.detail).toMatch(/githubstatus/);
+    // It must not claim the gate broke, nor that the gate is fine.
+    expect(cond.detail).not.toMatch(/gate is ERRORING/);
+    expect(cond.detail).toMatch(/unmeasured/);
+  });
+
+  it("covers startup_failure and stale — the runner never ran the job", () => {
+    for (const conclusion of ["startup_failure", "stale"]) {
+      const keys = classifyHealth([run(conclusion)], [], 4, NOW)
+        .map((x) => x.key);
+      expect(keys).toContain("sweep-infrastructure");
+      expect(keys).not.toContain("runs-failing");
+    }
+  });
+
+  it("DON'T-LOOSEN GUARD — a real failure still reports runs-failing", () => {
+    // The whole point of the monitor. A genuine gate error must not be
+    // reclassified as somebody else's problem.
+    const keys = classifyHealth([run("failure")], [], 4, NOW)
+      .map((x) => x.key);
+    expect(keys).toContain("runs-failing");
+    expect(keys).not.toContain("sweep-infrastructure");
+  });
+
+  it("timed_out stays MACHINERY — a hang is a real symptom, not infrastructure", () => {
+    const keys = classifyHealth([run("timed_out")], [], 4, NOW)
+      .map((x) => x.key);
+    expect(keys).toContain("runs-failing");
+  });
+
+  it("success raises neither", () => {
+    const keys = classifyHealth([run("success")], [], 4, NOW)
+      .map((x) => x.key);
+    expect(keys).not.toContain("runs-failing");
+    expect(keys).not.toContain("sweep-infrastructure");
+  });
+});
