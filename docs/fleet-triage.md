@@ -6,7 +6,7 @@
 > queue. Refreshed each CTO sitting from live issue state — a stale row is a
 > bug (#355). Diagnoses link to probe pre-briefs on the issues themselves.
 
-**Refreshed:** 2026-08-06 (ship-to A locked) · **Coverage:** bolt-wms · studiob ·
+**Refreshed:** 2026-08-06 (+#47 ranked; #37 closed) · **Coverage:** bolt-wms · studiob ·
 studiob-price-sync · asthetik-trade-theme · aesthetik-portal · ops-pipeline
 
 ## P0 — customer-facing: money or orders wrong/stuck
@@ -37,7 +37,8 @@ studiob-price-sync · asthetik-trade-theme · aesthetik-portal · ops-pipeline
 | 13 | bolt-wms#1469 non-positive stage durations | Probe falsified "writer inverts": bad SOURCE dates (Acumatica entry + unconfirmed T49 `?? new Date()` fallback) | bolt lane (#304 layer) |
 | 14 | bolt-wms#1480 freshness-monitor hardening | #358 rung + output-oracle watchdog | bolt lane / CTO |
 | 15 | bolt-wms#1455 retire dormant deploy-customization.yml | #366 leg check then strip | CTO, rides #21 |
-| 16 | ops-pipeline#37 orphaned straggler issues | Latent, small, pure seam | CTO build queue |
+| 16 | ~~ops-pipeline#37~~ CLOSED 8/05 (orphan sweep shipped, ops#43) | — | done |
+| 16b | ops-pipeline#47 scope the #15 stale-checkout boot injection | Token-efficiency: SessionStart → PreToolUse-on-first-repo-touch; fires fleet-wide per boot today; pairs w/ Friday compression agenda | CTO build queue |
 | 17 | ops-pipeline#21 org consolidation | Data delivered; classification = Kevin's dedicated sitting | **Kevin** sitting |
 | 18 | ops-pipeline#12 wasala volume WARN | Static corpus; disposition rides #21 | rides #21 |
 
