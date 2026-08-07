@@ -46,6 +46,52 @@ export function isInfrastructureConclusion(conclusion: string | null): boolean {
   return conclusion !== null && INFRASTRUCTURE_CONCLUSIONS.has(conclusion);
 }
 
+/**
+ * Job-level evidence for ONE run. Required because the run-level conclusion is not
+ * sufficient (see `isInfrastructureRun`).
+ */
+export interface RunJobEvidence {
+  /** Every job's conclusion, in the run's job order. */
+  jobConclusions: (string | null)[];
+  /** Count of steps across ALL jobs whose conclusion is 'failure'. */
+  failedStepCount: number;
+}
+
+/**
+ * Is this run infrastructure (never really executed) rather than machinery failure?
+ *
+ * Run-level conclusion ALONE is insufficient, and ops-pipeline#54 shipped believing
+ * it was. Its first live firing (studiob 2026-08-06, runs 31121889185 + 31126256596)
+ * falsified that: GitHub reported BOTH runs as run-conclusion **'failure'** while
+ * every job was 'cancelled'/'skipped' with **zero failed steps**. #54's
+ * INFRASTRUCTURE_CONCLUSIONS check keys on the run conclusion, so it did not fire,
+ * and the monitor again told a reader "the gate is ERRORING... the failure is in the
+ * gate machinery" and pointed at a log containing nothing — the exact #412 defect #54
+ * was built to remove, in a shape #54 does not catch.
+ *
+ * The irony worth preserving: #54's own `runs-failing` prose already told a HUMAN to
+ * go look at the job list ("If the job list shows only cancellations with no failed
+ * steps, this is infrastructure instead"). The instruction was right; it just was
+ * never given to the CODE. A guard that knows the correct check and does not perform
+ * it is not a guard.
+ *
+ * Predicate: no job failed, no step failed, and at least one job was cancelled. The
+ * cancelled-job requirement keeps this tight — a run that failed with genuinely zero
+ * failed steps for some OTHER reason stays classified as machinery failure, because
+ * fail-toward-machinery is the safer default for a monitor (a false 'infrastructure'
+ * silences a real defect; a false 'runs-failing' merely over-reports).
+ */
+export function isInfrastructureRun(
+  conclusion: string | null,
+  jobs?: RunJobEvidence,
+): boolean {
+  if (isInfrastructureConclusion(conclusion)) return true;
+  if (!jobs || jobs.jobConclusions.length === 0) return false;
+  const anyJobFailed = jobs.jobConclusions.includes("failure");
+  const anyJobCancelled = jobs.jobConclusions.includes("cancelled");
+  return !anyJobFailed && jobs.failedStepCount === 0 && anyJobCancelled;
+}
+
 export interface Receipt {
   repo: string;
   pr: number;
@@ -79,6 +125,8 @@ export function classifyHealth(
   receipts: Receipt[],
   slaHours: number,
   now: Date,
+  /** Job-level evidence for the LATEST COMPLETED run, when the caller fetched it. */
+  latestRunJobs?: RunJobEvidence,
 ): HealthCondition[] {
   const conditions: HealthCondition[] = [];
 
@@ -99,7 +147,7 @@ export function classifyHealth(
   // repo can be BOTH dead and failing (each condition is its own issue).
   const latest = completed[0];
   if (latest && latest.conclusion !== "success") {
-    if (isInfrastructureConclusion(latest.conclusion)) {
+    if (isInfrastructureRun(latest.conclusion, latestRunJobs)) {
       // NOT a machinery failure. A cancelled or never-started run tells us
       // nothing about the gate — the gate did not execute. Saying "the gate is
       // ERRORING" here is a claim the signal cannot support (#412), and during
@@ -107,7 +155,11 @@ export function classifyHealth(
       // readers to a log containing nothing.
       conditions.push({
         key: "sweep-infrastructure",
-        detail: `Latest completed sweep run ${latest.databaseId} (${latest.createdAt}) concluded '${latest.conclusion}' — the run was killed or never started, so the gate did NOT execute. This is an INFRASTRUCTURE signal, not a gate defect: check https://www.githubstatus.com and the run's job list (an all-cancelled job list with no failed steps is the outage signature). Do not read this as the gate erroring, and do not read it as the gate being healthy either — it is simply unmeasured this cycle.`,
+        detail:
+          `Latest completed sweep run ${latest.databaseId} (${latest.createdAt}) concluded '${latest.conclusion}' — the run was killed or never started, so the gate did NOT execute. This is an INFRASTRUCTURE signal, not a gate defect: check https://www.githubstatus.com. Do not read this as the gate erroring, and do not read it as the gate being healthy either — it is simply unmeasured this cycle.` +
+          (isInfrastructureConclusion(latest.conclusion)
+            ? ""
+            : `\n\nClassified from JOB-LEVEL evidence, not the run conclusion: jobs = [${latestRunJobs?.jobConclusions.map((c) => c ?? "null").join(", ")}] with ${latestRunJobs?.failedStepCount} failed step(s). GitHub reports a run whose jobs were cancelled mid-flight as run-conclusion '${latest.conclusion}', which is why the run conclusion alone cannot be trusted here (ops-pipeline#54's gap, caught by its own first live firing on studiob 2026-08-06).`),
       });
     } else {
       conditions.push({

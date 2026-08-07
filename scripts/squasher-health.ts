@@ -31,7 +31,7 @@
 
 import { execFileSync } from "node:child_process";
 import { requireEnv } from "./lib/config.js";
-import { classifyHealth, conditionTitle, parseReceipts, type HealthCondition, type SweepRun } from "./lib/squasher-health-classify.js";
+import { classifyHealth, conditionTitle, parseReceipts, type HealthCondition, type RunJobEvidence, type SweepRun } from "./lib/squasher-health-classify.js";
 import { reconcileCondition } from "./lib/gateway-token-reconcile.js";
 import { ensureLabel, listIssuesByLabel, openIssue, closeIssue } from "./lib/github-issues.js";
 
@@ -70,6 +70,32 @@ function fetchRunLog(repo: string, id: number): string {
   }
 }
 
+/**
+ * Job conclusions + failed-step count for one run. Returns undefined on any read
+ * failure — absent evidence must degrade to "classify from the run conclusion alone"
+ * (the pre-existing behaviour), never to a silent infrastructure verdict that would
+ * suppress a real machinery failure.
+ */
+function fetchRunJobEvidence(repo: string, id: number): RunJobEvidence | undefined {
+  try {
+    const raw = gh(["run", "view", String(id), "--repo", repo, "--json", "jobs"]);
+    const parsed = JSON.parse(raw) as {
+      jobs?: { conclusion: string | null; steps?: { conclusion: string | null }[] }[];
+    };
+    const jobs = parsed.jobs ?? [];
+    if (jobs.length === 0) return undefined;
+    return {
+      jobConclusions: jobs.map((j) => j.conclusion),
+      failedStepCount: jobs.reduce(
+        (n, j) => n + (j.steps ?? []).filter((s) => s.conclusion === "failure").length,
+        0,
+      ),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 async function main(): Promise<void> {
   const repo = requireEnv("HEALTH_REPO");
   const slaHours = Number(process.env.HEALTH_SLA_HOURS || "4");
@@ -81,7 +107,17 @@ async function main(): Promise<void> {
   const logText = completed.map((r) => fetchRunLog(repo, r.databaseId)).join("\n");
   const receipts = parseReceipts(logText);
 
-  const conditions = classifyHealth(runs, receipts, slaHours, new Date());
+  // Job-level evidence for the latest completed run, fetched ONLY when that run did
+  // not succeed (one extra API call, and only on the unhappy path). The run-level
+  // conclusion cannot distinguish "cancelled mid-flight" from "the gate errored" —
+  // GitHub reports both as 'failure'. See isInfrastructureRun.
+  const latestCompleted = runs.find((r) => r.status === "completed");
+  let latestRunJobs: RunJobEvidence | undefined;
+  if (latestCompleted && latestCompleted.conclusion !== "success") {
+    latestRunJobs = fetchRunJobEvidence(repo, latestCompleted.databaseId);
+  }
+
+  const conditions = classifyHealth(runs, receipts, slaHours, new Date(), latestRunJobs);
   const activeKeys = new Set(conditions.map((c) => c.key));
 
   const open = listIssuesByLabel(repo, LABEL, "open");
