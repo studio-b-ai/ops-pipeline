@@ -150,3 +150,87 @@ describe("infrastructure conclusions are not machinery failures", () => {
     expect(keys).not.toContain("sweep-infrastructure");
   });
 });
+
+describe("job-level evidence — run conclusion ALONE is insufficient (#54's own gap)", () => {
+  // ops-pipeline#54 shipped believing INFRASTRUCTURE_CONCLUSIONS on the RUN was the
+  // whole fix. Its first live firing falsified that: studiob runs 31121889185 and
+  // 31126256596 (2026-08-06) both reported run-conclusion 'failure' while every job
+  // was cancelled/skipped with ZERO failed steps. #54 did not fire, and the monitor
+  // again claimed "the gate is ERRORING" over a log containing nothing.
+  const run = (conclusion: string) => ({
+    databaseId: 31126256596,
+    status: "completed",
+    conclusion,
+    createdAt: new Date(NOW.getTime() - 60 * 60 * 1000).toISOString(),
+  });
+
+  // Verbatim shape of the live studiob runs.
+  const cancelledMidFlight = {
+    jobConclusions: ["cancelled", "skipped"],
+    failedStepCount: 0,
+  };
+
+  it("PLANTED CONTROL — run='failure' + all-cancelled jobs + 0 failed steps → infrastructure", () => {
+    const keys = classifyHealth([run("failure")], [], 4, NOW, cancelledMidFlight)
+      .map((x) => x.key);
+    expect(keys).toContain("sweep-infrastructure");
+    expect(keys).not.toContain("runs-failing");
+  });
+
+  it("names the job-level evidence it used, so the prose matches the signal (#412)", () => {
+    const [cond] = classifyHealth([run("failure")], [], 4, NOW, cancelledMidFlight)
+      .filter((x) => x.key === "sweep-infrastructure");
+    expect(cond.detail).toMatch(/JOB-LEVEL evidence/);
+    expect(cond.detail).toMatch(/cancelled, skipped/);
+    expect(cond.detail).toMatch(/0 failed step/);
+  });
+
+  it("DON'T-LOOSEN GUARD — a genuinely failed JOB still reports runs-failing", () => {
+    const keys = classifyHealth([run("failure")], [], 4, NOW, {
+      jobConclusions: ["failure", "skipped"],
+      failedStepCount: 1,
+    }).map((x) => x.key);
+    expect(keys).toContain("runs-failing");
+    expect(keys).not.toContain("sweep-infrastructure");
+  });
+
+  it("a failed STEP inside a cancelled job stays machinery — the gate did execute", () => {
+    const keys = classifyHealth([run("failure")], [], 4, NOW, {
+      jobConclusions: ["cancelled", "skipped"],
+      failedStepCount: 1,
+    }).map((x) => x.key);
+    expect(keys).toContain("runs-failing");
+    expect(keys).not.toContain("sweep-infrastructure");
+  });
+
+  it("no cancelled job at all → machinery (fail TOWARD the louder verdict)", () => {
+    const keys = classifyHealth([run("failure")], [], 4, NOW, {
+      jobConclusions: ["skipped", "skipped"],
+      failedStepCount: 0,
+    }).map((x) => x.key);
+    expect(keys).toContain("runs-failing");
+  });
+
+  it("ABSENT evidence degrades to the run conclusion, never to a silent pass", () => {
+    // A failed `gh run view --json jobs` must not become an infrastructure verdict —
+    // that would suppress real machinery failures behind an API hiccup.
+    const keys = classifyHealth([run("failure")], [], 4, NOW, undefined)
+      .map((x) => x.key);
+    expect(keys).toContain("runs-failing");
+    expect(keys).not.toContain("sweep-infrastructure");
+  });
+
+  it("empty job list is treated as absent evidence", () => {
+    const keys = classifyHealth([run("failure")], [], 4, NOW, {
+      jobConclusions: [],
+      failedStepCount: 0,
+    }).map((x) => x.key);
+    expect(keys).toContain("runs-failing");
+  });
+
+  it("run-level 'cancelled' still short-circuits without any job evidence (#54 intact)", () => {
+    const keys = classifyHealth([run("cancelled")], [], 4, NOW)
+      .map((x) => x.key);
+    expect(keys).toContain("sweep-infrastructure");
+  });
+});
