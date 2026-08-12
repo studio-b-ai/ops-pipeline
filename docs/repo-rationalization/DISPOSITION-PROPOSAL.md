@@ -155,29 +155,76 @@ Railway map + traffic receipts decide).
 5. Batch 5 folds
 6. Batch 7 scheduled as its own sitting
 
-## Rebuilt Repo Map (draft for CLAUDE.md — CoS stewards placement; #160 pointers-not-mirrors)
+## Remaining — staged for Kevin's per-item word (NOT executed)
 
-> Repo Map (verified against live Railway + surface probes 2026-08-12).
-> Authoritative full inventory + dispositions:
-> `ops-pipeline/docs/repo-rationalization/`.
+- **Org spelling split (the one rename candidate on this list):**
+  `aesthetik-portal` (ae) vs `asthetik-trade-theme` (a) coexist. Recommend
+  converging on **`asthetik-`** (matches the domain, asthetik.com) —
+  i.e. rename `aesthetik-portal` → `asthetik-portal`. Per the naming
+  convention below this is a SPELLING fix, not a lane rename. Each rename
+  needs its own Kevin word and carries the #70-class sweep checklist:
+  Railway repo connection · workflows (`uses:`/checkout refs) · secrets ·
+  package refs · hardcoded-names grep across the fleet. Per-item words,
+  never a batch cosmetic pass. (GitHub redirects old repo URLs after rename,
+  but Railway repo connections and pinned workflow refs do NOT follow —
+  hence the checklist.) Adjacent-but-separate: the Railway project named
+  `aesthetik-production` — Railway project names are display-layer; ride
+  only if Kevin words it.
+- **wasala transfer** (Kevin-manual, ~30s) — after it lands, verify Railway's
+  wasala-backtester repo link still resolves (next CTO sitting).
+- **Batch 7 acu* pass** → ops#61 (instrument-first, own sitting).
 
-| Repo | Serves | Purpose |
-|---|---|---|
-| `studiob` | Studio B platform | Monorepo: studiob-api (L1 gateway; orderhub.b.studio, api.switchboard.b.studio) + acudev, business-dashboard, cos-brief-worker, auto-remediate + packages/csuite |
-| `bolt-wms` | Bolt product + Ästhetik/HF | WMS; deploys aesthetik-production (wms.asthetik.com) + bolt-roth tenant (roth.bolt.b.studio) |
-| `webhook-router` | Ästhetik/HF | Slack intake, sync pipeline, intranet (internal.asthetik.com) |
-| `acuops-pipeline` | AcuOps product (VAR) | Acumatica CI/CD engine; clients pin `@v1` |
-| `client-asthetik` | Ästhetik/HF | HF Acumatica instance (customization + config + tests) |
-| `studiob-price-sync` | Ästhetik/HF | Pricing sync + Shopify B2B catalogs |
-| `asthetik-trade-theme` | Ästhetik | Live Shopify theme |
-| `aesthetik-portal` | Ästhetik | Trade portal |
-| `amplify` | Amplify product | 4 Railway services (engine, workers, linkedin-engine, luminary) |
-| `switchboard-app` | Switchboard product | HubSpot calling; dual-deployed (platform + aesthetik tenants) |
-| `shuttle` | Ästhetik internal | Product-dev OS — **PRESERVE** (CD ruling); shuttle.asthetik.com |
-| `quarterbook` | Ästhetik internal | Board decks (board.asthetik.com) |
-| `ops-pipeline` | Studio B fleet | Fleet machinery: squasher, merge gates, health monitors, triage board, repo inventory (authoritative) |
-| `brain` | Studio B | The vault |
-| public sites | — | b.studio (#341-firewalled 8/11) · bolt.b.studio · docs.b.studio · amplify.b.studio · lmmi.b.studio · acuops.com (Pages) · markdown.b.studio |
+## Repo Map — FINAL (reconciled 2026-08-12; CoS stewards CLAUDE.md placement; #160 pointers-not-mirrors)
+
+> Shape per Kevin's word (8/12 via CoS): **Repo | Lane(s) | Serves | Purpose** +
+> an activity-evidence column (dated, so staleness is honest). **Lane(s)** =
+> LANES rule-9 owning-repo declarations as of 2026-08-12 — the reverse index;
+> multi-lane repos list ALL declaring lanes (many-to-many is the point, never
+> forced 1:1). `—` = no lane has declared it (not "unowned" — seats cover the
+> fleet). Reconciles the night-shift draft
+> (`brain library/reference/night-shift/2026-08-12/repo-map-draft.md`) INTO the
+> 8/12 proposal table (base). Authoritative full inventory + dispositions:
+> this directory.
+
+| Repo | Lane(s) | Serves | Purpose | Activity (8/12) |
+|---|---|---|---|---|
+| `bolt-wms` | COO · Procurement Hub · Pricing · Product Master · Zoom Capture | Bolt product + Ästhetik/HF | WMS; deploys aesthetik-production (wms.asthetik.com) + bolt-roth tenant (roth.bolt.b.studio) | 8/12 · 70i/8p |
+| `brain` | CoS (protocol steward) · Corporate · CMO · Image Studio | Studio B | The vault | 8/12 · 21i/2p |
+| `asthetik-trade-theme` | Website · Image Studio (asset PRs) | Ästhetik | Live Shopify theme (asthetik.com) | 8/12 · 30i/2p |
+| `ops-pipeline` | CTO | Studio B fleet | Fleet machinery: squasher, merge gates, health monitors, triage board, repo inventory (authoritative) | 8/12 · 9i/0p |
+| `b-studio-website` | Corporate (site arcs) | Studio B corporate | b.studio (#341-firewalled 8/11) | 8/11 · 2i/0p |
+| `studiob` | — | Studio B platform | Monorepo: studiob-api (L1 gateway; orderhub.b.studio, api.switchboard.b.studio) + acudev, business-dashboard, cos-brief-worker, auto-remediate + packages/csuite | 8/12 · 15i/16p |
+| `webhook-router` | — | Ästhetik/HF | Slack intake, sync pipeline, intranet (internal.asthetik.com); hosts the CoS envelope worker | 8/12 · 11i/17p |
+| `client-asthetik` | — | Ästhetik/HF | HF Acumatica instance (customization + config + tests) | 8/12 · 6i/1p |
+| `studiob-price-sync` | — | Ästhetik/HF | Pricing sync + Shopify B2B catalogs + customer-account extensions | 8/10 · 10i/1p |
+| `aesthetik-portal` | — | Ästhetik | Trade portal (spelling-split rename staged — see Remaining) | 8/05 · 1i/0p |
+| `acuops-pipeline` | — | AcuOps product (VAR) | Acumatica CI/CD engine; clients pin `@v1` | 7/11 · 0/0 |
+| `clients` | — | Studio B fleet | Shared typed TS clients (Acumatica/HubSpot/Railway/Slack/Zoom/M365/GoDaddy), consumed by AcuOps + Bolt | 8/03 · 2i/0p |
+| `amplify` | — | Amplify product | 4 Railway services (engine, workers, linkedin-engine, luminary) | 5/16 push (services live) |
+| `switchboard-app` | — | Switchboard product | HubSpot calling; dual-deployed (platform + aesthetik tenants) | 6/11 · 0/0 |
+| `shuttle` | — | Ästhetik internal | Product-dev OS — **PRESERVE** (CD ruling); shuttle.asthetik.com | 6/10 · 0/0 |
+| `quarterbook` | — | Ästhetik internal | Board decks (board.asthetik.com; anon API 401s — gated) | 6/08 · 0/0 |
+| `wasala` | — | Capital/LMMI | Direct-lending data engine + backtester — **TRANSFER PENDING** (kbibelhausen → studio-b-ai, Kevin-manual; listed at destination per ruling) | — |
+| public sites | — | — | bolt.b.studio · docs.b.studio · amplify.b.studio · lmmi.b.studio · acuops.com (Pages, repo `acuops-website`) · markdown.b.studio | — |
+
+**Active supporting repos** (rows deliberately compact — full detail in this
+directory's inventory): `ui-test-suite` (Playwright QA, #357 history) ·
+`ots-puller` (HF freight ETAs) · `asthetik-redirect` · `support-agent` ·
+`enhancement-executor` · `enhancement-portal` · `gi-lint`/`acumatica-lint`
+(public linter pair) · `acuops-cli`.
+
+**Naming convention (Kevin-worded 8/12, future charters inherit):** repos are
+named for their ARTIFACT, never their lane — artifacts survive reorgs. A lane
+adopting a repo never renames it to the lane; the Lane(s) column carries that
+relationship instead.
+
+**Night-shift draft reconciliation notes:** quarterbook "needs manual look" →
+already resolved this arc (live gated Internal Tooling). rpx-designer (in the
+OLD CLAUDE.md map) is dropped — >4 months stale, covered by the inventory.
+amplify push-staleness is honest in the Activity column (deployed services stay
+live). acudev-the-repo rides the inventory; the studiob monorepo app of the
+same name is the active surface. Draft's batched-GraphQL-over-REST-loop lesson
+noted for future fleet sweeps.
 
 *Retired from the old map: godaddy-mcp/microsoft-mcp/zoom-mcp rows (archived,
 already marked) and the standalone acumatica-ci-cd row. The old map's missing-repos
