@@ -10,8 +10,21 @@ Standing constraints: **deletion is Kevin-only and is not proposed for any repo*
 (archive = reversible, is the strongest action here) · **`shuttle` = PRESERVE**
 (Creative Director ruling — and the probe confirms it live: deploy timestamp
 matches the repo's last push to the minute) · live-surface changes need Kevin's
-explicit word (#97) · every disposition below is a **proposal awaiting Kevin's
-word** — nothing in this document has been executed.
+explicit word (#97).
+
+> **EXECUTION RECORD 2026-08-12 (same day):** Kevin's words — *"defaults on
+> everything. keep omo. we can shutter signatures"* — landed and were executed:
+> invest.b.studio DARK (Pages deleted, live-404 verified) · 16 repos archived
+> (Batches 1+2+5, API-verified) + Pages disabled ×8 · qa-runner inlined to
+> webhook-router (#563, live receipt = its own QA jobs on the local yml) ·
+> 7 Railway retirements deleted + fresh-query receipted (4 services incl.
+> bolt-zoom-app; 3 projects: relay, context-engine, aesthetik-staging) ·
+> **mcp-amplify REPRIEVED** (reference check found it live in the amplify
+> monorepo — the Batch 4 row's caveat fired) · OMO kept deliberately ·
+> quarterbook auth-gate verified (anon API 401) · Batch 7 → ops-pipeline#61 ·
+> business-dashboard list → bd#18 · markdown/lmmi link treatment →
+> b-studio-website#39. Remaining: wasala transfer (Kevin-manual — classifier
+> holds personal-property transfers) and the standing IP-curation defaults.
 
 ## What the probe changed (deltas vs the classification sweep)
 
