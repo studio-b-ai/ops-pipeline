@@ -7,7 +7,7 @@
 > bug (#355). Diagnoses link to probe pre-briefs on the issues themselves.
 
 **Refreshed:** 2026-08-12 (repo-arc synthesis sitting) · **Coverage:** bolt-wms · studiob ·
-studiob-price-sync · asthetik-trade-theme · aesthetik-portal · ops-pipeline
+studiob-price-sync · asthetik-trade-theme · asthetik-portal · ops-pipeline
 
 ## P0 — customer-facing: money or orders wrong/stuck
 

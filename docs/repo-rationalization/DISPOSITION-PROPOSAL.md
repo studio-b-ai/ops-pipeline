@@ -157,7 +157,8 @@ Railway map + traffic receipts decide).
 
 ## Remaining — staged for Kevin's per-item word (NOT executed)
 
-- **Org spelling split (the one rename candidate on this list):**
+- **Org spelling split — EXECUTED 8/12 same eve (Kevin verbatim via CoS: "asthetik is correct"; ops#68 closed with receipts):**
+  ~~staged text below preserved for the record~~
   `aesthetik-portal` (ae) vs `asthetik-trade-theme` (a) coexist. Recommend
   converging on **`asthetik-`** (matches the domain, asthetik.com) —
   i.e. rename `aesthetik-portal` → `asthetik-portal`. Per the naming
@@ -197,7 +198,7 @@ Railway map + traffic receipts decide).
 | `webhook-router` | — | Ästhetik/HF | Slack intake, sync pipeline, intranet (internal.asthetik.com); hosts the CoS envelope worker | 8/12 · 11i/17p |
 | `client-asthetik` | — | Ästhetik/HF | HF Acumatica instance (customization + config + tests) | 8/12 · 6i/1p |
 | `studiob-price-sync` | — | Ästhetik/HF | Pricing sync + Shopify B2B catalogs + customer-account extensions | 8/10 · 10i/1p |
-| `aesthetik-portal` | — | Ästhetik | Trade portal (spelling-split rename staged — see Remaining) | 8/05 · 1i/0p |
+| `asthetik-portal` | — | Ästhetik | Trade portal (renamed from `aesthetik-portal` 8/12, Kevin word) | 8/05 · 1i/0p |
 | `acuops-pipeline` | — | AcuOps product (VAR) | Acumatica CI/CD engine; clients pin `@v1` | 7/11 · 0/0 |
 | `clients` | — | Studio B fleet | Shared typed TS clients (Acumatica/HubSpot/Railway/Slack/Zoom/M365/GoDaddy), consumed by AcuOps + Bolt | 8/03 · 2i/0p |
 | `amplify` | — | Amplify product | 4 Railway services (engine, workers, linkedin-engine, luminary) | 5/16 push (services live) |
