@@ -6,14 +6,14 @@
 > queue. Refreshed each CTO sitting from live issue state — a stale row is a
 > bug (#355). Diagnoses link to probe pre-briefs on the issues themselves.
 
-**Refreshed:** 2026-08-06 (hook-precision pass: #47+#49) · **Coverage:** bolt-wms · studiob ·
+**Refreshed:** 2026-08-12 (repo-arc synthesis sitting) · **Coverage:** bolt-wms · studiob ·
 studiob-price-sync · asthetik-trade-theme · aesthetik-portal · ops-pipeline
 
 ## P0 — customer-facing: money or orders wrong/stuck
 
 | rank | issue | one-line state | acts |
 |---|---|---|---|
-| 1 | bolt-wms#1475 orders not syncing | Acumatica-LOAD symptom (not #441-class); freeze/orphan/PaceJet decisions pending | **Kevin** + bolt lane |
+| 1 | bolt-wms#1475 orders not syncing | Acumatica-LOAD symptom (not #441-class); 8/12: rescue import mid-drain of the 85 stranded orders — the inventory is finally consuming; freeze/orphan decisions still pending | **Kevin** + bolt lane |
 | 2 | bolt-wms#1466 wrong tariff amounts on auto-sent invoices | Probe: discrepancy is Acumatica-side (SO vs invoice docs), not bolt code | Operator/Kevin |
 | 3 | **studiob#469 SHIP-TO UMBRELLA** (#431 #444 #467) | **DIRECTION A LOCKED (Kevin 8/06)** — bridge masters Shopify-side create+role+ExtRefNbr, THEN #1453 flips Import; full spec + verification battery + 1b backfill on the umbrella; #1453 sequencing-locked behind Phase 1 | **COO seat implements** (CoS routing 8/06; #1475 outranks); CTO verifies receipts |
 | 5 | bolt-wms#1486 false back-order badge (moved from price-sync#122) | Probe: filed in wrong repo; trace = wms_inventory sync → connector → badge logic | bolt lane |
@@ -29,6 +29,7 @@ studiob-price-sync · asthetik-trade-theme · aesthetik-portal · ops-pipeline
 | 10 | studiob#454 checkout draft-vs-auto audit | Not a defect — audit capability gated on `SHOPIFY_ADMIN_TOKEN_ASTHETIK` mint | **Kevin** (token), then lane |
 | 11 | studiob#434 strip reps from customer contacts | No "sales rep" definition exists; bulk live-data mutation → #97/#375 | **Kevin** (policy), then metered job |
 | 12b | **bolt-wms#1511 — 63% of bolt-wms's Acumatica calls erroring** (NEW 8/06, from the telemetry leg's first data) | bolt-wms = 59% of gateway calls; StockItem 187/217, Shipment 161/185, SalesOrder 11/11; **saturation=0** (not seat refusal). Sampled 500s return in **245-456ms** — too fast for timeout collapse ⇒ population is MIXED, a chunk are fast rejections that likely never reach Acumatica = a standing defect invisible until something measured it. Failed calls hold cores then retry ⇒ demand AMPLIFIER, plausibly the largest lever found. Next: log the 5xx BODY (#127), split fast-vs-slow, find the high-volume workers. ⚠️ in-incident window, NOT a baseline | bolt lane / CTO — **Kevin's call** |
+| 12c | **bolt-wms#1590 storefront-vs-ItemStatus drift detector** (NEW 8/12, CoS routing from COO wrap) | Rescue import surfaced Shopify actively selling an Acumatica-Inactive item (paid order #3217, 9X9 AMHERST:TAN). #420/#453 family: the storefront can silently sell what the ERP killed. Shape: new leg on the existing drift-detector worker — live-verify each hit (#453) + auto-reconciled issue (#165), same consumed channel (#60). Ranked below #1511 (bigger lever) — instance handled, this is the recurrence guard | bolt lane |
 | 12 | team-action queue (bolt #1442 #1452 #1433 #1434) | Flowing via the team-asks digest (#1476) | Sarah/CS |
 
 ## P2 — data quality / deferred engineering
@@ -41,7 +42,7 @@ studiob-price-sync · asthetik-trade-theme · aesthetik-portal · ops-pipeline
 | 16 | ~~ops-pipeline#37~~ CLOSED 8/05 (orphan sweep shipped, ops#43) | — | done |
 | 16b | ~~Hook-precision pass: ops#47 + ops#49~~ **CLOSED 8/06** | Both shipped (hooks `699d4a9`, `6d33698`), each live-fired both directions. #49 audit found a bigger collision than reported: `PAT` matched inside **`$PATH`**, so every path echo was blocked fleet-wide, silently. #47's WARN path proven against a **planted** stale checkout (#464) — the four natural probes only ever returned the default verdict | done |
 | 16c | **ops-pipeline#51 settings.json unversioned** | Near-miss while shipping #47: an entry-level filter deleted 4 sibling SessionStart hooks (vault-review #278, Qdrant preload, brain-push backstop, OneDrive guard) — valid JSON, silent, recoverable only by an ad-hoc backup. 68 hook registrations with no history. Fix pair = git root up + a registration-integrity assertion | CTO build queue |
-| 17 | ops-pipeline#21 org consolidation | Data delivered; classification = Kevin's dedicated sitting. ⚠️ Zombie classifier has a precision defect — `shuttle` mis-classed dormant (merges 6/10, active thru 8/05); every zombie hit re-reads against last-merge recency, and shuttle's Railway disposition parks on the Creative-Director ruling | **Kevin** sitting |
+| 17 | ops-pipeline#21 org consolidation | 8/12: evidence sweep (ops#58) + live-surface probe + **disposition proposal (ops#59)** delivered — 7 decision batches await Kevin's words; zombie claims re-verified live (nzt/shuttle/gi-lint refuted, relay confirmed); shuttle PRESERVE stands | **Kevin** words |
 | 18 | ops-pipeline#12 wasala volume WARN | Static corpus; disposition rides #21 | rides #21 |
 
 ## Parked (deliberate, with resume runbooks)
