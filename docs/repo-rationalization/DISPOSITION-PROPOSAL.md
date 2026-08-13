@@ -171,8 +171,9 @@ Railway map + traffic receipts decide).
   hence the checklist.) Adjacent-but-separate: the Railway project named
   `aesthetik-production` — Railway project names are display-layer; ride
   only if Kevin words it.
-- **wasala transfer** (Kevin-manual, ~30s) — after it lands, verify Railway's
-  wasala-backtester repo link still resolves (next CTO sitting).
+- ~~wasala transfer~~ **DONE 8/12 (Kevin's hand, `gh api .../transfer`)** —
+  old URL redirects (API + git ls-remote); Railway wasala-backtester repoTrigger
+  live-reads `studio-b-ai/wasala`; deploy live-fire rides the next organic push.
 - **Batch 7 acu* pass** → ops#61 (instrument-first, own sitting).
 
 ## Repo Map — FINAL (reconciled 2026-08-12; CoS stewards CLAUDE.md placement; #160 pointers-not-mirrors)
@@ -205,7 +206,7 @@ Railway map + traffic receipts decide).
 | `switchboard-app` | — | Switchboard product | HubSpot calling; dual-deployed (platform + aesthetik tenants) | 6/11 · 0/0 |
 | `shuttle` | — | Ästhetik internal | Product-dev OS — **PRESERVE** (CD ruling); shuttle.asthetik.com | 6/10 · 0/0 |
 | `quarterbook` | — | Ästhetik internal | Board decks (board.asthetik.com; anon API 401s — gated) | 6/08 · 0/0 |
-| `wasala` | — | Capital/LMMI | Direct-lending data engine + backtester — **TRANSFER PENDING** (kbibelhausen → studio-b-ai, Kevin-manual; listed at destination per ruling) | — |
+| `wasala` | — | Capital/LMMI | Direct-lending data engine + backtester (transferred kbibelhausen → studio-b-ai 8/12; Railway trigger follows, live-verified) | — |
 | public sites | — | — | bolt.b.studio · docs.b.studio · amplify.b.studio · lmmi.b.studio · acuops.com (Pages, repo `acuops-website`) · markdown.b.studio | — |
 
 **Active supporting repos** (rows deliberately compact — full detail in this
