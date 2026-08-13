@@ -64,6 +64,21 @@ import { discoverProjectIds, fetchProjectVolumes, type VolumeRecord, type Projec
 import { reconcileCondition } from "./lib/gateway-token-reconcile.js";
 import { reconcileSeverity, buildSeverityTitle, parseSeverityTitle } from "./lib/severity-issue-reconcile.js";
 import { listIssuesByLabel, ensureLabel, openIssue, closeIssue, commentIssue, retitleIssue, type IssueRef } from "./lib/github-issues.js";
+import {
+  sweepAbsentEntityIssues,
+  VOLUME_MONITOR_BLIND_TITLE as BLIND_TITLE,
+  PROBE_FAILED_PREFIX,
+  type SweepContext,
+} from "./lib/railway-volume-reconcile.js";
+import {
+  buildAcceptanceMap,
+  evaluateAcceptance,
+  effectiveStatus,
+  findDanglingAcceptances,
+  type ManifestProjectEntry,
+  type AcceptedVolume,
+  type AcceptanceDefect,
+} from "./lib/railway-volume-accept.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_FILE = join(HERE, "railway-projects.manifest.yaml");
@@ -72,14 +87,15 @@ const REPO = "studio-b-ai/ops-pipeline";
 const LABEL = "volume-monitor";
 const LABEL_DESCRIPTION = "railway-volume-monitor alert state (open = usage at/above WARN, or a project probe failing)";
 
-const BLIND_TITLE = "[volume-monitor] MONITOR BLIND — all projects failed to fetch";
 const FIX_HINT = "Railway dashboard → service → volume → Live resize";
+/** `[volume-monitor] ACCEPTED-STATE INVALID — <id>` — ops#71 Leg 2's manifest-defect binary condition, mirroring PROBE FAILED's shape. */
+const ACCEPTED_STATE_INVALID_PREFIX = "[volume-monitor] ACCEPTED-STATE INVALID — ";
 
 // ───────────────────────────── manifest (safety-net project list) ─────────────────────────────
 
-function loadManifestProjects(): ProjectRef[] {
+function loadManifestProjects(): ManifestProjectEntry[] {
   if (!existsSync(MANIFEST_FILE)) return [];
-  const doc = parseYaml(readFileSync(MANIFEST_FILE, "utf-8")) as { projects?: ProjectRef[] };
+  const doc = parseYaml(readFileSync(MANIFEST_FILE, "utf-8")) as { projects?: ManifestProjectEntry[] };
   return doc.projects ?? [];
 }
 
@@ -91,9 +107,19 @@ function unionProjects(a: ProjectRef[], b: ProjectRef[]): ProjectRef[] {
   return [...byId.values()];
 }
 
-/** `[volume-monitor] PROBE FAILED — <project>` — a fixed (non-severity-tiered) per-project binary condition. */
+/**
+ * `[volume-monitor] PROBE FAILED — <project>` — a fixed (non-severity-tiered) per-project binary
+ * condition. Built from the SAME `PROBE_FAILED_PREFIX` constant `lib/railway-volume-reconcile.ts`
+ * uses to recognize this shape (ops#71) — the two must never drift apart, or the absent-entity
+ * sweep silently stops recognizing this monitor's own titles.
+ */
 function projectProbeFailedTitle(projectName: string): string {
-  return `[volume-monitor] PROBE FAILED — ${projectName}`;
+  return `${PROBE_FAILED_PREFIX}${projectName}`;
+}
+
+/** `<project>/<environment>/<service>/<volume>` — the entity's location, WITHOUT the instance-id suffix. Also what ops#71 Leg 2's manifest `path:` field is cross-checked against. */
+function volumePath(v: VolumeRecord): string {
+  return `${v.projectName}/${v.environmentName}/${v.serviceName ?? "(detached)"}/${v.volumeName}`;
 }
 
 /**
@@ -106,7 +132,7 @@ function projectProbeFailedTitle(projectName: string): string {
  * volume instance, not just its display name.
  */
 function volumeEntityKey(v: VolumeRecord): string {
-  return `${v.projectName}/${v.environmentName}/${v.serviceName ?? "(detached)"}/${v.volumeName} [${v.volumeInstanceId}]`;
+  return `${volumePath(v)} [${v.volumeInstanceId}]`;
 }
 
 // ───────────────────────────── formatting ─────────────────────────────
@@ -115,9 +141,22 @@ function fmtMB(n: number): string {
   return `${Math.round(n).toLocaleString()}MB`;
 }
 
-function formatLine(v: VolumeRecord, usagePct: number, status: VolumeStatus): string {
+/**
+ * `rawStatus` + `acceptedOverride` are only used when this row is an ACCEPTED volume (`effStatus
+ * === "OK"` but the volume actually computed WARN/CRITICAL) — ops#71 Leg 2's design review calls
+ * for the display to carry `ACCEPTED (was WARN, 79.3% < 85%, review by 2026-11-30)`. The padded
+ * status column stays a plain "ACCEPTED" (fits the existing column width); the parenthetical
+ * detail trails the row so every OTHER row's alignment is untouched.
+ */
+function formatLine(v: VolumeRecord, usagePct: number, effStatus: VolumeStatus, rawStatus?: VolumeStatus, acceptedOverride?: AcceptedVolume): string {
   const where = `${v.projectName}/${v.serviceName ?? "(detached)"}/${v.volumeName}`;
-  return `  ${where.padEnd(50)} ${status.padEnd(9)} ${usagePct.toFixed(1).padStart(5)}%  ${fmtMB(v.currentSizeMB).padStart(10)} / ${fmtMB(v.sizeMB)}`;
+  const accepted = acceptedOverride !== undefined && rawStatus !== undefined && effStatus === "OK" && rawStatus !== "OK";
+  const statusLabel = accepted ? "ACCEPTED" : effStatus;
+  const base = `  ${where.padEnd(50)} ${statusLabel.padEnd(9)} ${usagePct.toFixed(1).padStart(5)}%  ${fmtMB(v.currentSizeMB).padStart(10)} / ${fmtMB(v.sizeMB)}`;
+  if (accepted && acceptedOverride && rawStatus) {
+    return `${base}  (was ${rawStatus}, ${usagePct.toFixed(1)}% < ${acceptedOverride.acceptedBelowPct}%, review by ${acceptedOverride.reviewBy})`;
+  }
+  return base;
 }
 
 // ───────────────────────────── issue bodies / comments ─────────────────────────────
@@ -146,6 +185,17 @@ function volumeCloseComment(v: VolumeRecord, usagePct: number): string {
   return `Usage recovered to **${usagePct.toFixed(1)}%** (${fmtMB(v.currentSizeMB)} / ${fmtMB(v.sizeMB)}) — below the WARN threshold. Auto-closed by the volume monitor.`;
 }
 
+/** ops#71 Leg 2 — closes an already-open volume issue because an acceptance override now applies, NOT because usage actually recovered (Rule #412: the comment must say which). */
+function volumeAcceptedCloseComment(v: VolumeRecord, usagePct: number, rawStatus: VolumeStatus, override: AcceptedVolume): string {
+  return [
+    `**ACCEPTED** (was ${rawStatus}, ${usagePct.toFixed(1)}% < ${override.acceptedBelowPct}%, review by ${override.reviewBy}) — usage did NOT drop; a manifest acceptance override now applies instead.`,
+    "",
+    `Reason: ${override.reason}`,
+    "",
+    `Auto-closed by the volume monitor. Re-fires automatically if usage reaches ${override.acceptedBelowPct}%, the review date (${override.reviewBy}) passes, or the manifest \`path\` no longer matches this volume's live location.`,
+  ].join("\n");
+}
+
 function projectProbeFailedBody(projectName: string, error: string): string {
   return `Project \`${projectName}\`'s volumes could not be fetched this run: ${error}. Its volumes are NOT being monitored until this clears. Auto-closes on the next successful fetch.`;
 }
@@ -156,6 +206,36 @@ function projectProbeRecoveredComment(projectName: string): string {
 
 function blindBody(msg: string): string {
   return `${msg} Check RAILWAY_API_TOKEN (Rule #302 family). Auto-closes once at least one project's volumes are readable again.`;
+}
+
+/** ops#71 Leg 1 — the absent-entity sweep's close comment. Per the design review, NEVER the word "resolved" (that implies usage recovered, which is not what happened here). */
+function sweepCloseComment(disposition: "close-absent" | "close-unprobed", projectSetSize: number, source: string): string {
+  const headline =
+    disposition === "close-unprobed"
+      ? "No longer probed — removed from Railway/manifest."
+      : "No longer present in the monitored set (deleted, detached, or no longer reporting a configured size).";
+  return `${headline}\n\nProject set this run: **${projectSetSize}** project(s) (${source}).\n\nAuto-closed by the volume monitor's absent-entity sweep.`;
+}
+
+/** ops#71 Leg 2 — `[volume-monitor] ACCEPTED-STATE INVALID — <id>` title. `id` is `volume_instance_id`, or the literal `"unspecified"` when that field itself is the thing missing (nothing else to key the flag issue on). */
+function acceptedStateInvalidTitle(id: string): string {
+  return `${ACCEPTED_STATE_INVALID_PREFIX}${id}`;
+}
+
+function acceptedStateInvalidBody(defects: AcceptanceDefect[]): string {
+  return [
+    "**Acceptance override ignored** — one or more `accepted_volumes` entries in `railway-projects.manifest.yaml` are invalid and are NOT being applied:",
+    "",
+    defects.map((d) => `- ${d.reason}`).join("\n"),
+    "",
+    "The underlying volume's own WARN/CRITICAL alerting continues unaffected — only the ACCEPTANCE is ignored, not the volume itself.",
+    "",
+    "Fix (or remove) the manifest entry and this issue auto-closes on the next run where it no longer recurs.",
+  ].join("\n");
+}
+
+function acceptedStateInvalidRecoveredComment(id: string): string {
+  return `Acceptance override \`${id}\` no longer has an open defect this run (fixed, removed, or the volume it referenced is gone) — auto-closed by the volume monitor.`;
 }
 
 // ───────────────────────────── issue action plan ─────────────────────────────
@@ -207,6 +287,14 @@ async function main(): Promise<void> {
   if (projects.length === 0) {
     throw new Error("no projects to check: projects() root query failed/empty AND the manifest is empty");
   }
+
+  // 1b. ops#71 Leg 2 — build the acceptance map DIRECTLY from `manifestProjects` (the raw parse),
+  //     never from `projects` (the union above) — see lib/railway-volume-accept.ts's
+  //     `buildAcceptanceMap` doc comment for why. Structural defects (bad manifest entries) start
+  //     the run's defect list; dangling + path-mismatch defects append later, once live data exists.
+  const { map: acceptanceMap, defects: acceptanceStructuralDefects } = buildAcceptanceMap(manifestProjects);
+  const acceptanceDefects: AcceptanceDefect[] = [...acceptanceStructuralDefects];
+  const todayIso = new Date().toISOString().slice(0, 10);
 
   // 2. Real issue-list read regardless of --dry-run (this IS the alert/dedup state — mirrors
   //    gateway-token-watch.ts's "--dry-run does the real query + real issue list, zero mutations").
@@ -260,6 +348,13 @@ async function main(): Promise<void> {
     );
   }
 
+  // ops#71 Leg 1 + Leg 2 — derived sets shared by the absent-entity sweep (below, after the
+  // per-volume reconcile loop) and the dangling-acceptance scoping check. Pure derivations from
+  // data that's already complete at this point; harmless to compute even on the all-failed path.
+  const failedProjectNames = new Set(projectErrors.map((e) => e.name));
+  const probedOkProjectNames = new Set(projects.filter((p) => !failedProjectNames.has(p.name)).map((p) => p.name));
+  const seenEntities = new Set(allVolumes.map(volumeEntityKey));
+
   if (allVolumes.length === 0 && projectErrors.length === projects.length) {
     // Every project failed — operationally indistinguishable from a dead/expired/wrong-scope
     // token (see file header: this replaces a `me{}` liveness gate, which a codex review found
@@ -290,34 +385,101 @@ async function main(): Promise<void> {
     planned.push({ kind: "close", num: blindOpen.number, comment: "At least one project's volumes are readable again this run — monitor no longer blind." });
   }
 
-  // 4. Classify + per-volume issue reconcile.
+  // 4. Classify + per-volume issue reconcile. ops#71 Leg 2: each volume's acceptance override
+  //    (if any) is evaluated BEFORE the reconcile — an accepted volume feeds `reconcileSeverity`
+  //    the literal "OK" (`effStatus`), closing its already-open issue rather than merely
+  //    suppressing future opens. `status` (the raw computed severity) is kept separately for
+  //    display/comment text, which must say what ACTUALLY happened (Rule #412).
   const rows: string[] = [];
   let warnCount = 0;
   let criticalCount = 0;
+  let acceptedCount = 0;
 
   for (const v of allVolumes) {
     const { usagePct, status } = classifyUsage(v.currentSizeMB, v.sizeMB);
-    if (status === "WARN") warnCount++;
-    if (status === "CRITICAL") criticalCount++;
-    rows.push(formatLine(v, usagePct, status));
+    const override = acceptanceMap.get(v.volumeInstanceId);
+    const liveEntityPath = volumePath(v);
+    const acceptance = evaluateAcceptance({ override, liveEntityPath, usagePct, todayIso });
+    if (acceptance.rejectReason === "path-mismatch" && override) {
+      acceptanceDefects.push({
+        volumeInstanceId: v.volumeInstanceId,
+        reason: `path mismatch: manifest declares path "${override.path}" but this volume's live path this run is "${liveEntityPath}" — acceptance NOT applied.`,
+      });
+    }
+    const effStatus = effectiveStatus(acceptance.accepted, status);
+    if (acceptance.accepted) acceptedCount++;
+    if (effStatus === "WARN") warnCount++;
+    if (effStatus === "CRITICAL") criticalCount++;
+    rows.push(formatLine(v, usagePct, effStatus, status, acceptance.accepted ? override : undefined));
 
     const entity = volumeEntityKey(v);
     const open = openVolumeByEntity.get(entity);
-    const action = reconcileSeverity(status, open?.status ?? null);
-    const title = buildSeverityTitle(LABEL, entity, status);
+    const action = reconcileSeverity(effStatus, open?.status ?? null);
+    const title = buildSeverityTitle(LABEL, entity, effStatus);
 
-    if (action === "open") planned.push({ kind: "open", title, body: volumeIssueBody(v, usagePct, status) });
+    if (action === "open") planned.push({ kind: "open", title, body: volumeIssueBody(v, usagePct, effStatus) });
     if (action === "retitle" && open) {
-      planned.push({ kind: "retitle", num: open.issue.number, newTitle: title, comment: volumeRetitleComment(v, usagePct, open.status, status) });
+      planned.push({ kind: "retitle", num: open.issue.number, newTitle: title, comment: volumeRetitleComment(v, usagePct, open.status, effStatus) });
     }
     if (action === "close" && open) {
-      planned.push({ kind: "close", num: open.issue.number, comment: volumeCloseComment(v, usagePct) });
+      const comment = acceptance.accepted && override ? volumeAcceptedCloseComment(v, usagePct, status, override) : volumeCloseComment(v, usagePct);
+      planned.push({ kind: "close", num: open.issue.number, comment });
     }
+  }
+
+  // ops#71 Leg 2 (continued) — dangling acceptances: an override whose volume_instance_id matches
+  // no live volume THIS run, scoped to projects that actually probed OK (mirrors Leg 1's "never
+  // act on absence-evidence from a blind project" — an override whose project merely failed to
+  // fetch this run is not dangling, it's just unprobed; deriving project name from `path`'s first
+  // segment is a scoping heuristic only, not an identity claim).
+  const liveVolumeInstanceIds = new Set(allVolumes.map((v) => v.volumeInstanceId));
+  const scopedAcceptanceMap = new Map([...acceptanceMap].filter(([, av]) => probedOkProjectNames.has(av.path.split("/")[0])));
+  acceptanceDefects.push(...findDanglingAcceptances(scopedAcceptanceMap, liveVolumeInstanceIds));
+
+  // Reconcile `[volume-monitor] ACCEPTED-STATE INVALID — <id>` issues BOTH directions — grouped
+  // by id first so two structurally-invalid entries that both lack `volume_instance_id` (both
+  // falling back to the shared "unspecified" id) open exactly ONE issue, not two.
+  const defectsById = new Map<string, AcceptanceDefect[]>();
+  for (const d of acceptanceDefects) {
+    const id = d.volumeInstanceId ?? "unspecified";
+    const list = defectsById.get(id) ?? [];
+    list.push(d);
+    defectsById.set(id, list);
+  }
+  for (const [id, ds] of defectsById) {
+    const title = acceptedStateInvalidTitle(id);
+    if (reconcileCondition(true, openByExactTitle.has(title)) === "open") {
+      planned.push({ kind: "open", title, body: acceptedStateInvalidBody(ds) });
+    }
+  }
+  for (const issue of openIssuesList) {
+    if (!issue.title.startsWith(ACCEPTED_STATE_INVALID_PREFIX)) continue;
+    const id = issue.title.slice(ACCEPTED_STATE_INVALID_PREFIX.length);
+    if (!defectsById.has(id)) {
+      planned.push({ kind: "close", num: issue.number, comment: acceptedStateInvalidRecoveredComment(id) });
+    }
+  }
+
+  // ops#71 Leg 1 — absent-entity sweep: runs AFTER the project loop AND the per-volume reconcile
+  // loop above (design review Q4). Structurally disjoint from that loop's issue targets — the
+  // sweep only ever selects an entity NOT in `seenEntities` (or unresolvable to any current
+  // project), while the loop above only ever acts on entities THAT ARE in `seenEntities` (it
+  // iterates exactly `allVolumes`, which is what populates `seenEntities`) — so there is no
+  // ordering hazard despite both pushing into the same `planned` list (proven in
+  // railway-volume-reconcile.test.ts's disjoint-targeting invariant test).
+  const sweepCtx: SweepContext = { probedOkProjects: probedOkProjectNames, failedProjects: failedProjectNames, seenEntities, projectSet: projects };
+  const sweep = sweepAbsentEntityIssues(openIssuesList, sweepCtx);
+  for (const w of sweep.warnings) console.warn(`railway-volume-monitor: ${w}`);
+  for (const action of sweep.actions) {
+    planned.push({ kind: "close", num: action.number, comment: sweepCloseComment(action.disposition, projects.length, source) });
   }
 
   const errSuffix =
     projectErrors.length > 0 ? ` ⚠️ ${projectErrors.length} project(s) failed to fetch (${projectErrors.map((e) => e.name).join(", ")}).` : "";
-  const summary = `Railway volume monitor — ${allVolumes.length} volume instance(s) checked across ${projects.length} project(s) (${source}). ${criticalCount} CRITICAL, ${warnCount} WARN.${errSuffix}`;
+  const summary =
+    `Railway volume monitor — ${allVolumes.length} volume instance(s) checked across ${projects.length} project(s) (${source}). ` +
+    `${criticalCount} CRITICAL, ${warnCount} WARN, ${acceptedCount} ACCEPTED.${errSuffix} ` +
+    `Absent-entity sweep: ${sweep.actions.length} orphan(s) closed, ${sweep.keptBlindCount} kept (project probe failed).`;
 
   if (dryRun) {
     console.log(`=== railway-volume-monitor --dry-run (real query + real issue list, NO mutations; ${source}) ===`);

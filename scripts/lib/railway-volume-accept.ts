@@ -236,10 +236,14 @@ export function evaluateAcceptance(input: AcceptancePredicateInput): AcceptanceP
 /**
  * `effectiveStatus` feeds `reconcileSeverity` — an accepted volume closes its already-open issue
  * (the literal `"OK"`) rather than merely suppressing FUTURE opens, per the design review. There
- * is deliberately no third `"ACCEPTED"` status string: `reconcileSeverity` only special-cases the
- * literal `"OK"` as clear, so inventing a new clear-status string would require touching
- * `severity-issue-reconcile.ts` (out of scope, untouched — see this PR's grep checks) and would
- * silently stop closing anything.
+ * is deliberately no third clear-status string spelling out the word ACCEPTED as a status value:
+ * `reconcileSeverity` only special-cases the literal `"OK"` as clear, so inventing a new
+ * clear-status string would require touching `severity-issue-reconcile.ts` (out of scope,
+ * untouched — see this PR's grep checks) and would silently stop closing anything. The word
+ * ACCEPTED (no quotes — never a code-level status literal) is still used, deliberately, as purely
+ * PRESENTATIONAL text — the padded status column and the close-comment headline in
+ * railway-volume-monitor.ts — never as a value flowing through
+ * `reconcileSeverity`/`buildSeverityTitle`.
  */
 export function effectiveStatus(accepted: boolean, computedStatus: VolumeStatus): VolumeStatus {
   return accepted ? "OK" : computedStatus;
