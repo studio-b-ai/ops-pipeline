@@ -377,6 +377,31 @@ async function main(): Promise<void> {
       planned.push({ kind: "open", title: BLIND_TITLE, body: blindBody(msg) });
     }
 
+    // ops#71 Leg 2 (codex review finding, P2, fixed here): STRUCTURAL manifest defects
+    // (buildAcceptanceMap's output at step 1b) do NOT depend on live volume data at all — they're
+    // fully known before the per-project fetch loop even runs. Without this, a malformed
+    // accepted_volumes entry would stay completely unflagged for the ENTIRE duration of a Railway
+    // outage/bad-token period (this branch returns before the full dangling+ACCEPTED-STATE
+    // INVALID reconcile further down, which correctly DOES need live data and correctly stays
+    // gated to the normal path). OPEN-only, deliberately: unlike opening (safe on certain
+    // information), CLOSING here would risk a false-close — this branch has no visibility into
+    // dangling/path-mismatch defects (those genuinely need this run's live data), so closing
+    // based on the structural-only view could incorrectly close an issue that's still open for a
+    // reason this branch can't see.
+    const structuralDefectsById = new Map<string, AcceptanceDefect[]>();
+    for (const d of acceptanceStructuralDefects) {
+      const id = d.volumeInstanceId ?? "unspecified";
+      const list = structuralDefectsById.get(id) ?? [];
+      list.push(d);
+      structuralDefectsById.set(id, list);
+    }
+    for (const [id, ds] of structuralDefectsById) {
+      const title = acceptedStateInvalidTitle(id);
+      if (reconcileCondition(true, openByExactTitle.has(title)) === "open") {
+        planned.push({ kind: "open", title, body: acceptedStateInvalidBody(ds) });
+      }
+    }
+
     if (dryRun) {
       console.log(`=== railway-volume-monitor --dry-run (real query + real issue list, NO mutations; ${source}) ===`);
       console.log(`  all ${projects.length} project(s) failed: ${projectErrors.map((e) => `${e.name} (${e.error})`).join("; ")}`);

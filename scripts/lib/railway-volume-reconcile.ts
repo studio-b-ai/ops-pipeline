@@ -105,16 +105,20 @@ export interface SweepContext {
  *   2. Title shape B (`PROBE FAILED — <project>` prefix) → project still in `projectSet` → keep
  *      (its own per-project reconcile owns it); otherwise → close-unprobed.
  *   3. Title shape A (`parseSeverityTitle` matches AND entity ends with ` [<uuid>]`):
+ *        - entity string is IN `seenEntities` (fetched live THIS run) → keep, unconditionally,
+ *          checked BEFORE any project-name resolution (codex review finding, P1: `projectSet`'s
+ *          name can lag Railway's live name for the same project id when discovery is unavailable
+ *          — e.g. after a Railway rename the manifest hasn't caught up — and resolving by the
+ *          STALE name first would misclassify a volume just confirmed active as gone)
  *        - no project prefix matches at all → close-unprobed (the project itself is gone)
  *        - project FAILED to fetch OR was TRUNCATED this run → keep-blind (never close on
  *          absence-evidence we can't trust — this is DISTINCT from plain "keep" so the caller can
  *          report "kept (project probe failed): M" in the run summary per the design review,
  *          rather than folding a "we genuinely can't tell if this is absent" case into the same
  *          bucket as "confirmed still there")
- *        - project probed OK, NOT truncated + entity in `seenEntities` → keep (still there)
- *        - project probed OK, NOT truncated + entity NOT in `seenEntities` → close-absent
- *          (project's fine, fully fetched, this volume specifically is gone — deleted, detached,
- *          or resized to 0)
+ *        - anything else at this point (project probed OK, not truncated, entity confirmed NOT
+ *          in `seenEntities` by the first check above) → close-absent (project's fine, fully
+ *          fetched, this volume specifically is gone — deleted, detached, or resized to 0)
  *   4. Any other title (doesn't even match the generic `[label] entity — status` shape, or matches
  *      but lacks the UUID suffix) → keep.
  */
@@ -133,14 +137,28 @@ export function classifySweepDisposition(title: string, ctx: SweepContext): Swee
   const parsed = parseSeverityTitle(VOLUME_MONITOR_LABEL, title);
   if (!parsed || !hasUuidSuffix(parsed.entity)) return "keep"; // 4. anything else → keep.
 
+  // codex review finding (P1, fixed here): check `seenEntities` FIRST, before attempting to
+  // resolve an owning project by name-prefix at all. If the EXACT entity string was fetched live
+  // THIS run, it unambiguously still exists — full stop — regardless of what `projectSet`'s
+  // (possibly manifest-stale) name-prefix resolution would conclude. This matters when project
+  // discovery is unavailable (a REAL, documented degradation path — see
+  // railway-projects.manifest.yaml's header): `projectSet` then falls back to the raw manifest
+  // list, whose cached project NAME can lag Railway's actual current name for that same project
+  // id after a rename. The fetch still succeeds (Railway keys by id, not name), so `allVolumes`
+  // — and therefore `seenEntities` — carries the NEW live name, while `projectSet` still carries
+  // the OLD manifest name. The old prefix-first logic would then find no match for the old-name
+  // prefix against the new-name entity and misclassify a volume the per-volume loop just
+  // confirmed is active as `close-unprobed` — a real false-close.
+  if (ctx.seenEntities.has(parsed.entity)) return "keep";
+
   const project = resolveProjectByPrefix(parsed.entity, ctx.projectSet);
   if (!project) return "close-unprobed"; // no project prefix matches at all
-  // codex review finding (P1, fixed here): a TRUNCATED project's seenEntities is exactly as
-  // untrustworthy for absence-detection as a FAILED one — both mean "we cannot confirm this
-  // volume is actually gone," so both take the keep-blind path, never close-absent.
+  // A TRUNCATED project's seenEntities is exactly as untrustworthy for absence-detection as a
+  // FAILED one — both mean "we cannot confirm this volume is actually gone," so both take the
+  // keep-blind path, never close-absent.
   if (ctx.failedProjects.has(project.name) || ctx.truncatedProjects.has(project.name)) return "keep-blind";
   if (!ctx.probedOkProjects.has(project.name)) return "keep"; // conservative: not recorded as OK either — leave alone
-  return ctx.seenEntities.has(parsed.entity) ? "keep" : "close-absent";
+  return "close-absent"; // seenEntities was already checked above and was false, or we wouldn't be here
 }
 
 export interface SweepIssue {

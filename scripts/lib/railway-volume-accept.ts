@@ -169,8 +169,8 @@ function validateAcceptedVolume(raw: RawAcceptedVolume): ValidationResult {
  * time.
  */
 export function buildAcceptanceMap(manifestProjects: ManifestProjectEntry[]): AcceptanceMapResult {
-  const map = new Map<string, AcceptedVolume>();
   const defects: AcceptanceDefect[] = [];
+  const byId = new Map<string, AcceptedVolume[]>();
 
   for (const project of manifestProjects) {
     const rawList = project.accepted_volumes;
@@ -186,12 +186,32 @@ export function buildAcceptanceMap(manifestProjects: ManifestProjectEntry[]): Ac
     }
     for (const raw of rawList) {
       const result = validateAcceptedVolume(raw);
-      if (result.ok) {
-        map.set(result.value.volumeInstanceId, result.value);
-      } else {
+      if (!result.ok) {
         defects.push(result.defect);
+        continue;
       }
+      const list = byId.get(result.value.volumeInstanceId) ?? [];
+      list.push(result.value);
+      byId.set(result.value.volumeInstanceId, list);
     }
+  }
+
+  // codex review finding (P1, fixed here): two structurally-valid entries sharing the same
+  // volume_instance_id used to let the LAST one processed silently overwrite the first via a bare
+  // `map.set` — a manifest copy/paste duplicate with a DIFFERENT accepted_below_pct or review_by
+  // could silently loosen (or tighten) the effective acceptance with zero trace of the collision.
+  // Every id with more than one occurrence is flagged and NEITHER copy is applied, forcing a
+  // human to deduplicate to exactly one entry before it takes effect again.
+  const map = new Map<string, AcceptedVolume>();
+  for (const [id, entries] of byId) {
+    if (entries.length > 1) {
+      defects.push({
+        volumeInstanceId: id,
+        reason: `volume_instance_id "${id}" appears ${entries.length} times in accepted_volumes across the manifest — no copy is applied until deduplicated to exactly one entry`,
+      });
+      continue;
+    }
+    map.set(id, entries[0]);
   }
 
   return { map, defects };

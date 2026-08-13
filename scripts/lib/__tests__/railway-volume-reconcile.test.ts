@@ -152,6 +152,25 @@ describe("classifySweepDisposition", () => {
     });
     expect(classifySweepDisposition(title, ctx)).toBe("close-unprobed");
   });
+
+  // codex review finding (P1): the INVERSE rename scenario — discovery is unavailable this run
+  // (a REAL, documented degradation path), so `projectSet` falls back to the raw manifest list,
+  // whose cached project NAME lags Railway's current name for that same project id after a
+  // rename. The fetch still succeeds by id, so the entity string this monitor itself builds (and
+  // any issue it opens) carries the NEW live name — but `projectSet`'s prefix-resolution only
+  // knows the OLD manifest name. Before the fix, `resolveProjectByPrefix` would find no match for
+  // the old-name prefix against the new-name entity and this would false-close a volume the
+  // per-volume loop, in this exact same run, just confirmed is still active.
+  it("does NOT false-close when projectSet carries a STALE (manifest-lagging) name but the entity was fetched live THIS run under its NEW name", () => {
+    const title = buildSeverityTitle("volume-monitor", `new-name/production/Postgres/pg-data [${UUID}]`, "WARN");
+    const ctx = okCtx({
+      projectSet: [proj("old-stale-manifest-name", "same-project-id")], // manifest hasn't caught up to the Railway rename
+      probedOkProjects: new Set(["old-stale-manifest-name"]), // the loop uses projectSet's (stale) name as the key
+      failedProjects: new Set(),
+      seenEntities: new Set([`new-name/production/Postgres/pg-data [${UUID}]`]), // built from the LIVE fetch this run
+    });
+    expect(classifySweepDisposition(title, ctx)).toBe("keep");
+  });
 });
 
 // ───────────────────────────── sweepAbsentEntityIssues ─────────────────────────────

@@ -185,6 +185,33 @@ describe("buildAcceptanceMap", () => {
     expect(map.size).toBe(2);
   });
 
+  // codex review finding (P1): two entries sharing the same volume_instance_id used to let the
+  // LAST one silently overwrite the first via a bare map.set — a config-drop path with zero trace.
+  it("a DUPLICATE volume_instance_id is flagged and NEITHER copy is applied (never silently picks a winner)", () => {
+    const dup1 = validEntry({ accepted_below_pct: 80 });
+    const dup2 = validEntry({ accepted_below_pct: 88, reason: "a different, looser copy-paste" }); // same id, LOOSER ceiling
+    const { map, defects } = buildAcceptanceMap([project([dup1, dup2])]);
+    expect(map.has("a622cddb-8faf-4364-9dc2-75ba1b063967")).toBe(false); // NEITHER applied — not the looser one, not the first one
+    expect(defects).toHaveLength(1);
+    expect(defects[0].volumeInstanceId).toBe("a622cddb-8faf-4364-9dc2-75ba1b063967");
+    expect(defects[0].reason).toMatch(/appears 2 times/);
+  });
+  it("a duplicate id spanning TWO DIFFERENT projects is caught too (not just within one project's list)", () => {
+    const p2 = { id: "y", name: "other-project", accepted_volumes: [validEntry()] }; // SAME id as project()'s default
+    const { map, defects } = buildAcceptanceMap([project([validEntry()]), p2]);
+    expect(map.has("a622cddb-8faf-4364-9dc2-75ba1b063967")).toBe(false);
+    expect(defects).toHaveLength(1);
+  });
+  it("a duplicate id does NOT block a DIFFERENT, non-duplicated id in the same run", () => {
+    const dup1 = validEntry();
+    const dup2 = validEntry({ accepted_below_pct: 88 });
+    const unique = validEntry({ volume_instance_id: "11111111-1111-1111-1111-111111111111", path: "wasala-platform/production/Redis/cache" });
+    const { map, defects } = buildAcceptanceMap([project([dup1, dup2, unique])]);
+    expect(map.has("a622cddb-8faf-4364-9dc2-75ba1b063967")).toBe(false);
+    expect(map.get("11111111-1111-1111-1111-111111111111")).toBeDefined();
+    expect(defects).toHaveLength(1);
+  });
+
   // #27 (this PR's chip prompt): the acceptance map is built DIRECTLY from the parsed manifest,
   // never from unionProjects(...)'s output. Proven structurally, not just asserted in prose:
   // buildAcceptanceMap's only parameter is the manifest project list itself — there is no
