@@ -105,10 +105,10 @@ describe("classifySweepDisposition", () => {
     const title = buildSeverityTitle("volume-monitor", `wasala-platform/production/Postgres/postgres-volume [${UUID}]`, "WARN");
     expect(classifySweepDisposition(title, okCtx())).toBe("keep");
   });
-  it("shape A: project FAILED to fetch this run → keep even though the entity is absent from seenEntities (never close on a blind project)", () => {
+  it("shape A: project FAILED to fetch this run → keep-blind even though the entity is absent from seenEntities (never close on a blind project — distinct from plain 'keep' so the run summary can count it)", () => {
     const title = buildSeverityTitle("volume-monitor", `wasala-platform/production/Postgres/postgres-volume [${UUID}]`, "WARN");
     const ctx = okCtx({ probedOkProjects: new Set(), failedProjects: new Set(["wasala-platform"]), seenEntities: new Set() });
-    expect(classifySweepDisposition(title, ctx)).toBe("keep");
+    expect(classifySweepDisposition(title, ctx)).toBe("keep-blind");
   });
   it("a title that parses the generic [label] entity — status shape but lacks the UUID suffix → keep (shape B/C's coincidental-parse defense)", () => {
     // parseSeverityTitle("volume-monitor", "[volume-monitor] PROBE FAILED — context-engine") DOES parse
@@ -197,6 +197,32 @@ describe("sweepAbsentEntityIssues", () => {
     expect(out.actions).toHaveLength(2);
     expect(out.actions.find((a) => a.number === 10)?.disposition).toBe("close-unprobed");
     expect(out.actions.find((a) => a.number === 11)?.disposition).toBe("close-absent");
+    expect(out.keptBlindCount).toBe(0);
+  });
+
+  it("counts keep-blind issues separately from actions — a run-summary receipt distinct from 'orphans closed'", () => {
+    const ctx: SweepContext = {
+      probedOkProjects: new Set(["wasala-platform"]),
+      failedProjects: new Set(["shuttle"]), // a SECOND project, blind this run
+      seenEntities: new Set(),
+      projectSet: [proj("wasala-platform"), proj("shuttle")],
+    };
+    const blindOne: SweepIssue = {
+      number: 20,
+      title: buildSeverityTitle("volume-monitor", `shuttle/production/Postgres/data [${UUID}]`, "WARN"),
+      state: "OPEN",
+    };
+    const blindTwo: SweepIssue = {
+      number: 21,
+      title: buildSeverityTitle("volume-monitor", `shuttle/production/Redis/cache [11111111-1111-1111-1111-111111111111]`, "CRITICAL"),
+      state: "OPEN",
+    };
+    const closable: SweepIssue = { number: 22, title: `${PROBE_FAILED_PREFIX}context-engine`, state: "OPEN" };
+    const out = sweepAbsentEntityIssues([blindOne, blindTwo, closable], ctx);
+    expect(out.keptBlindCount).toBe(2);
+    // Neither blind-project issue appears in actions — only the genuinely-closable one does.
+    expect(out.actions).toHaveLength(1);
+    expect(out.actions[0].number).toBe(22);
   });
 
   // The #29 invariant (design Q4 — ordering hazard between the sweep and the per-volume

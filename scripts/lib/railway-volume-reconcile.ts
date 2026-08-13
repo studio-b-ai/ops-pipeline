@@ -23,7 +23,7 @@
 import type { ProjectRef } from "./railway-volume-probes.js";
 import { parseSeverityTitle } from "./severity-issue-reconcile.js";
 
-export type SweepDisposition = "keep" | "close-absent" | "close-unprobed";
+export type SweepDisposition = "keep" | "keep-blind" | "close-absent" | "close-unprobed";
 
 /** `[volume-monitor] MONITOR BLIND — all projects failed to fetch` — title shape C, exact match, NEVER swept. */
 export const VOLUME_MONITOR_BLIND_TITLE = "[volume-monitor] MONITOR BLIND — all projects failed to fetch";
@@ -96,7 +96,10 @@ export interface SweepContext {
  *      (its own per-project reconcile owns it); otherwise → close-unprobed.
  *   3. Title shape A (`parseSeverityTitle` matches AND entity ends with ` [<uuid>]`):
  *        - no project prefix matches at all → close-unprobed (the project itself is gone)
- *        - project FAILED to fetch this run → keep (never close on a blind project)
+ *        - project FAILED to fetch this run → keep-blind (never close on a blind project — this
+ *          is DISTINCT from plain "keep" so the caller can report "kept (project probe failed):
+ *          M" in the run summary per the design review, rather than folding a "we genuinely
+ *          can't tell if this is absent" case into the same bucket as "confirmed still there")
  *        - project probed OK + entity in `seenEntities` → keep (still there)
  *        - project probed OK + entity NOT in `seenEntities` → close-absent (project's fine, this
  *          volume specifically is gone — deleted, detached, or resized to 0)
@@ -120,7 +123,7 @@ export function classifySweepDisposition(title: string, ctx: SweepContext): Swee
 
   const project = resolveProjectByPrefix(parsed.entity, ctx.projectSet);
   if (!project) return "close-unprobed"; // no project prefix matches at all
-  if (ctx.failedProjects.has(project.name)) return "keep"; // never close on a blind project
+  if (ctx.failedProjects.has(project.name)) return "keep-blind"; // never close on a blind project
   if (!ctx.probedOkProjects.has(project.name)) return "keep"; // conservative: not recorded as OK either — leave alone
   return ctx.seenEntities.has(parsed.entity) ? "keep" : "close-absent";
 }
@@ -141,6 +144,13 @@ export interface SweepOutcome {
   actions: SweepAction[];
   /** Loud, caller-logged warnings (e.g. duplicate project names) — this module does no I/O itself. */
   warnings: string[];
+  /**
+   * Count of OPEN issues that resolved to "keep-blind" — a volume-entity issue whose owning
+   * project failed to fetch this run, so absence could not be confirmed either way. Surfaced
+   * separately from the (silent) ordinary "keep" count so the run summary can report "kept
+   * (project probe failed): M" per the design review, distinct from "orphans closed: N".
+   */
+  keptBlindCount: number;
 }
 
 /**
@@ -161,7 +171,7 @@ export function sweepAbsentEntityIssues(issues: SweepIssue[], ctx: SweepContext)
   const warnings: string[] = [];
 
   if (ctx.probedOkProjects.size === 0) {
-    return { actions: [], warnings };
+    return { actions: [], warnings, keptBlindCount: 0 };
   }
 
   const dupNames = findDuplicateProjectNames(ctx.projectSet);
@@ -169,16 +179,19 @@ export function sweepAbsentEntityIssues(issues: SweepIssue[], ctx: SweepContext)
     warnings.push(
       `railway-volume-monitor: duplicate project name(s) in this run's project set (${dupNames.join(", ")}) — absent-entity sweep skipped entirely this run (ambiguous longest-prefix resolution).`,
     );
-    return { actions: [], warnings };
+    return { actions: [], warnings, keptBlindCount: 0 };
   }
 
   const actions: SweepAction[] = [];
+  let keptBlindCount = 0;
   for (const issue of issues) {
     if (issue.state !== "OPEN") continue;
     const disposition = classifySweepDisposition(issue.title, ctx);
-    if (disposition !== "keep") {
+    if (disposition === "close-absent" || disposition === "close-unprobed") {
       actions.push({ number: issue.number, title: issue.title, disposition });
+    } else if (disposition === "keep-blind") {
+      keptBlindCount++;
     }
   }
-  return { actions, warnings };
+  return { actions, warnings, keptBlindCount };
 }
