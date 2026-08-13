@@ -103,7 +103,11 @@ export interface SweepContext {
  *
  *   1. Title shape C (MONITOR BLIND, exact match) → keep, never swept.
  *   2. Title shape B (`PROBE FAILED — <project>` prefix) → project still in `projectSet` → keep
- *      (its own per-project reconcile owns it); otherwise → close-unprobed.
+ *      (its own per-project reconcile owns it); otherwise → close-unprobed UNLESS at least one
+ *      project failed/was truncated this run, in which case → keep-blind (codex review finding,
+ *      P1: shape B's title is keyed purely by NAME with no id embedded, built from whatever
+ *      `p.name` was live when it opened — the identical stale-manifest-name-after-a-rename risk
+ *      that affects shape A affects this shape too, so it gets the identical conservative guard).
  *   3. Title shape A (`parseSeverityTitle` matches AND entity ends with ` [<uuid>]`):
  *        - entity string is IN `seenEntities` (fetched live THIS run) → keep, unconditionally,
  *          checked BEFORE any project-name resolution (codex review finding, P1: `projectSet`'s
@@ -138,8 +142,17 @@ export function classifySweepDisposition(title: string, ctx: SweepContext): Swee
   // 2. Shape B — fixed prefix, entity is the remainder (the project name verbatim).
   if (title.startsWith(PROBE_FAILED_PREFIX)) {
     const projectName = title.slice(PROBE_FAILED_PREFIX.length);
-    const stillInProjectSet = ctx.projectSet.some((p) => p.name === projectName);
-    return stillInProjectSet ? "keep" : "close-unprobed";
+    if (ctx.projectSet.some((p) => p.name === projectName)) return "keep";
+    // codex review finding (P1, fixed here): the SAME stale-manifest-name-after-a-rename root
+    // cause that affects shape A affects shape B too — a PROBE FAILED issue's title is keyed
+    // PURELY by name (no id embedded), built from whatever `p.name` was live when it was opened.
+    // If a later run has discovery unavailable and the manifest's cached name for that same
+    // project id has since gone stale, `projectName` (from the still-open issue's title) will
+    // never match `ctx.projectSet`'s current (stale) name — even though the project is still
+    // very much being probed under that id, and may STILL be actively failing. "Not in
+    // projectSet" is only trustworthy as "genuinely gone" when every project this run resolved
+    // cleanly; mirrors the identical guard on shape A below.
+    return ctx.failedProjects.size > 0 || ctx.truncatedProjects.size > 0 ? "keep-blind" : "close-unprobed";
   }
 
   // 3. Shape A — must match the generic severity shape AND carry the UUID suffix.

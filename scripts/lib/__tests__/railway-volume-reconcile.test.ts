@@ -252,7 +252,13 @@ describe("sweepAbsentEntityIssues", () => {
     expect(out.keptBlindCount).toBe(0);
   });
 
-  it("counts keep-blind issues separately from actions — a run-summary receipt distinct from 'orphans closed' (both failed AND truncated projects count)", () => {
+  // codex pass-4 finding applied here: once ANY project failed/was truncated this run, EVERY
+  // "not resolvable" disposition (shape A's no-prefix-match AND shape B's not-in-projectSet)
+  // defers to keep-blind — including the shape-B `context-engine` example that an earlier
+  // version of this test expected to close-unprobed. The ONE thing that still closes in a
+  // partially-blind run is close-absent (a volume-gone issue resolved to a SPECIFIC, confirmed
+  // probed-OK, non-blind project) — its correctness doesn't depend on any OTHER project's status.
+  it("counts keep-blind issues separately from actions — a run-summary receipt distinct from 'orphans closed' (failed, truncated, AND unresolvable-during-partial-failure all count)", () => {
     const ctx: SweepContext = {
       probedOkProjects: new Set(["wasala-platform"]),
       failedProjects: new Set(["shuttle"]), // a SECOND project, blind this run
@@ -275,12 +281,43 @@ describe("sweepAbsentEntityIssues", () => {
       title: buildSeverityTitle("volume-monitor", `gi-lint/production/Postgres/data [22222222-2222-2222-2222-222222222222]`, "WARN"),
       state: "OPEN",
     };
-    const closable: SweepIssue = { number: 22, title: `${PROBE_FAILED_PREFIX}context-engine`, state: "OPEN" };
-    const out = sweepAbsentEntityIssues([blindOne, blindTwo, truncatedOne, closable], ctx);
-    expect(out.keptBlindCount).toBe(3);
-    // None of the blind/truncated-project issues appear in actions — only the genuinely-closable one does.
+    // Shape B, name not in projectSet — with failedProjects/truncatedProjects non-empty this run,
+    // this now correctly defers to keep-blind too (the pass-4 fix), not close-unprobed.
+    const unresolvableProbeFailed: SweepIssue = { number: 22, title: `${PROBE_FAILED_PREFIX}context-engine`, state: "OPEN" };
+    // The one thing that STILL closes: a volume confirmed gone from wasala-platform specifically
+    // (probed OK, not truncated, not in seenEntities) — unaffected by shuttle/gi-lint's blindness.
+    const genuinelyGoneVolume: SweepIssue = {
+      number: 24,
+      title: buildSeverityTitle("volume-monitor", `wasala-platform/production/Postgres/deleted-vol [33333333-3333-3333-3333-333333333333]`, "WARN"),
+      state: "OPEN",
+    };
+    const out = sweepAbsentEntityIssues([blindOne, blindTwo, truncatedOne, unresolvableProbeFailed, genuinelyGoneVolume], ctx);
+    expect(out.keptBlindCount).toBe(4);
     expect(out.actions).toHaveLength(1);
-    expect(out.actions[0].number).toBe(22);
+    expect(out.actions[0]).toMatchObject({ number: 24, disposition: "close-absent" });
+  });
+
+  // Dedicated, minimal test for the pass-4 fix in isolation (shape B specifically), mirroring the
+  // shape-A dedicated tests above.
+  it("shape B: a PROBE FAILED issue for a name not in projectSet defers to keep-blind (not close-unprobed) when anything else failed/was truncated this run", () => {
+    const ctx: SweepContext = {
+      probedOkProjects: new Set(),
+      failedProjects: new Set(["wasala-platform"]), // the ONLY project this run — and it's blind
+      truncatedProjects: new Set(),
+      seenEntities: new Set(),
+      projectSet: [proj("wasala-platform")],
+    };
+    expect(classifySweepDisposition(`${PROBE_FAILED_PREFIX}context-engine`, ctx)).toBe("keep-blind");
+  });
+  it("shape B negative control: still correctly close-unprobes when the run is otherwise completely clean", () => {
+    const ctx: SweepContext = {
+      probedOkProjects: new Set(["wasala-platform"]),
+      failedProjects: new Set(),
+      truncatedProjects: new Set(),
+      seenEntities: new Set(),
+      projectSet: [proj("wasala-platform")],
+    };
+    expect(classifySweepDisposition(`${PROBE_FAILED_PREFIX}context-engine`, ctx)).toBe("close-unprobed");
   });
 
   // codex review finding (P1): a truncated project's seenEntities is known-incomplete — a real
