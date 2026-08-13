@@ -129,6 +129,37 @@ describe("buildAcceptanceMap", () => {
     expect(defects).toHaveLength(0);
   });
 
+  // codex review finding (P1): malformed YAML must never THROW — one bad manifest line must not
+  // abort the entire monitor run before a single real volume gets checked.
+  it("NEVER THROWS on a null entry (e.g. a YAML `- null` line) — flags a defect instead", () => {
+    expect(() => buildAcceptanceMap([project([null])])).not.toThrow();
+    const { map, defects } = buildAcceptanceMap([project([null])]);
+    expect(map.size).toBe(0);
+    expect(defects).toHaveLength(1);
+    expect(defects[0].volumeInstanceId).toBeNull();
+  });
+  it("NEVER THROWS on a scalar/array entry where an object was expected", () => {
+    expect(() => buildAcceptanceMap([project(["a bare string", 42, ["nested", "array"]])])).not.toThrow();
+    const { map, defects } = buildAcceptanceMap([project(["a bare string", 42, ["nested", "array"]])]);
+    expect(map.size).toBe(0);
+    expect(defects).toHaveLength(3);
+  });
+  it("NEVER THROWS and flags a defect when accepted_volumes itself is not a list (a mapping or bare scalar)", () => {
+    const badProject = { id: "x", name: "typo-project", accepted_volumes: { not: "a list" } } as unknown as ManifestProjectEntry;
+    expect(() => buildAcceptanceMap([badProject])).not.toThrow();
+    const { map, defects } = buildAcceptanceMap([badProject]);
+    expect(map.size).toBe(0);
+    expect(defects).toHaveLength(1);
+    expect(defects[0].reason).toMatch(/not a list/);
+    expect(defects[0].reason).toMatch(/typo-project/);
+  });
+  it("one malformed entry does not prevent a DIFFERENT valid entry (in the same or a different project) from landing in the map", () => {
+    const { map, defects } = buildAcceptanceMap([project([null, validEntry()])]);
+    expect(defects).toHaveLength(1);
+    expect(map.size).toBe(1);
+    expect(map.get("a622cddb-8faf-4364-9dc2-75ba1b063967")).toBeDefined();
+  });
+
   it("accepts a pct just inside each boundary", () => {
     expect(buildAcceptanceMap([project([validEntry({ accepted_below_pct: 75.01 })])]).map.size).toBe(1);
     expect(buildAcceptanceMap([project([validEntry({ accepted_below_pct: 89.99 })])]).map.size).toBe(1);

@@ -84,6 +84,7 @@ describe("classifySweepDisposition", () => {
   const okCtx = (over: Partial<SweepContext> = {}): SweepContext => ({
     probedOkProjects: new Set(["wasala-platform"]),
     failedProjects: new Set(),
+    truncatedProjects: new Set(),
     seenEntities: new Set([`wasala-platform/production/Postgres/postgres-volume [${UUID}]`]),
     projectSet: [proj("wasala-platform", "ad6f97b7-5b83-4104-b857-3550cebffff0")],
     ...over,
@@ -159,6 +160,7 @@ describe("sweepAbsentEntityIssues", () => {
   const baseCtx: SweepContext = {
     probedOkProjects: new Set(["wasala-platform"]),
     failedProjects: new Set(),
+    truncatedProjects: new Set(),
     seenEntities: new Set(),
     projectSet: [proj("wasala-platform")],
   };
@@ -200,12 +202,13 @@ describe("sweepAbsentEntityIssues", () => {
     expect(out.keptBlindCount).toBe(0);
   });
 
-  it("counts keep-blind issues separately from actions — a run-summary receipt distinct from 'orphans closed'", () => {
+  it("counts keep-blind issues separately from actions — a run-summary receipt distinct from 'orphans closed' (both failed AND truncated projects count)", () => {
     const ctx: SweepContext = {
       probedOkProjects: new Set(["wasala-platform"]),
       failedProjects: new Set(["shuttle"]), // a SECOND project, blind this run
+      truncatedProjects: new Set(["gi-lint"]), // a THIRD project, fetched OK but paginated-truncated
       seenEntities: new Set(),
-      projectSet: [proj("wasala-platform"), proj("shuttle")],
+      projectSet: [proj("wasala-platform"), proj("shuttle"), proj("gi-lint")],
     };
     const blindOne: SweepIssue = {
       number: 20,
@@ -217,12 +220,34 @@ describe("sweepAbsentEntityIssues", () => {
       title: buildSeverityTitle("volume-monitor", `shuttle/production/Redis/cache [11111111-1111-1111-1111-111111111111]`, "CRITICAL"),
       state: "OPEN",
     };
+    const truncatedOne: SweepIssue = {
+      number: 23,
+      title: buildSeverityTitle("volume-monitor", `gi-lint/production/Postgres/data [22222222-2222-2222-2222-222222222222]`, "WARN"),
+      state: "OPEN",
+    };
     const closable: SweepIssue = { number: 22, title: `${PROBE_FAILED_PREFIX}context-engine`, state: "OPEN" };
-    const out = sweepAbsentEntityIssues([blindOne, blindTwo, closable], ctx);
-    expect(out.keptBlindCount).toBe(2);
-    // Neither blind-project issue appears in actions — only the genuinely-closable one does.
+    const out = sweepAbsentEntityIssues([blindOne, blindTwo, truncatedOne, closable], ctx);
+    expect(out.keptBlindCount).toBe(3);
+    // None of the blind/truncated-project issues appear in actions — only the genuinely-closable one does.
     expect(out.actions).toHaveLength(1);
     expect(out.actions[0].number).toBe(22);
+  });
+
+  // codex review finding (P1): a truncated project's seenEntities is known-incomplete — a real
+  // still-open WARN/CRITICAL volume can be sitting past the fetched page. This must NEVER close.
+  it("a truncated (but not failed) project's volume-entity issue never closes, even though the entity is absent from seenEntities", () => {
+    const title = buildSeverityTitle("volume-monitor", `wasala-platform/production/Postgres/postgres-volume [${UUID}]`, "WARN");
+    const ctx: SweepContext = {
+      probedOkProjects: new Set(["wasala-platform"]),
+      failedProjects: new Set(),
+      truncatedProjects: new Set(["wasala-platform"]),
+      seenEntities: new Set(), // KNOWN INCOMPLETE — the real volume may just be past the page cap
+      projectSet: [proj("wasala-platform")],
+    };
+    expect(classifySweepDisposition(title, ctx)).toBe("keep-blind");
+    const out = sweepAbsentEntityIssues([{ number: 30, title, state: "OPEN" }], ctx);
+    expect(out.actions).toEqual([]);
+    expect(out.keptBlindCount).toBe(1);
   });
 
   // The #29 invariant (design Q4 — ordering hazard between the sweep and the per-volume

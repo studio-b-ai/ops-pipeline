@@ -115,8 +115,18 @@ type ValidationResult = { ok: true; value: AcceptedVolume } | { ok: false; defec
  * Validate ONE raw `accepted_volumes` entry. Fails fast on the FIRST bad field (mirrors
  * `classifyUsage`'s throw-on-first-bad-precondition style elsewhere in this monitor) — "that ONE
  * override ignored" per the design review, not an exhaustive multi-reason report.
+ *
+ * MUST NEVER THROW (codex review finding, P1, fixed here): `raw` comes straight from parsed YAML
+ * with zero shape guarantee — a manifest typo like `- null`, a bare scalar, or an array where an
+ * object was expected would otherwise throw a TypeError reading `raw.volume_instance_id`,
+ * propagating uncaught out of `main()` and aborting the ENTIRE monitor run before a single real
+ * volume gets checked. One malformed manifest line must degrade to a flagged defect, never take
+ * down alerting for the whole fleet.
  */
 function validateAcceptedVolume(raw: RawAcceptedVolume): ValidationResult {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, defect: { volumeInstanceId: null, reason: `accepted_volumes entry is not an object (got ${JSON.stringify(raw)})` } };
+  }
   const id = typeof raw.volume_instance_id === "string" && raw.volume_instance_id.trim() !== "" ? raw.volume_instance_id : null;
   if (!id) {
     return { ok: false, defect: { volumeInstanceId: null, reason: `volume_instance_id missing or not a non-empty string (got ${JSON.stringify(raw.volume_instance_id)})` } };
@@ -163,7 +173,18 @@ export function buildAcceptanceMap(manifestProjects: ManifestProjectEntry[]): Ac
   const defects: AcceptanceDefect[] = [];
 
   for (const project of manifestProjects) {
-    for (const raw of project.accepted_volumes ?? []) {
+    const rawList = project.accepted_volumes;
+    if (rawList === undefined) continue; // no accepted_volumes at all — nothing to do, not a defect
+    // codex review finding (P1, fixed here): a manifest typo (`accepted_volumes: {}` or a bare
+    // scalar instead of a list) must flag as a defect, not throw on the `for...of` below.
+    if (!Array.isArray(rawList)) {
+      defects.push({
+        volumeInstanceId: null,
+        reason: `project "${project.name}"'s accepted_volumes is not a list (got ${typeof rawList}) — the entire block is ignored`,
+      });
+      continue;
+    }
+    for (const raw of rawList) {
       const result = validateAcceptedVolume(raw);
       if (result.ok) {
         map.set(result.value.volumeInstanceId, result.value);

@@ -81,6 +81,16 @@ export interface SweepContext {
   probedOkProjects: Set<string>;
   /** Names of projects that failed to fetch THIS run — never close on a blind project. */
   failedProjects: Set<string>;
+  /**
+   * Names of projects whose fetch SUCCEEDED but hit a pagination cap this run (any of
+   * services/environments/volumeInstances reported `hasNextPage: true` — see
+   * `lib/railway-volume-probes.ts`'s `ParsedProjectVolumes.truncated`). codex review finding (P1,
+   * fixed here): a truncated project's `seenEntities` is KNOWN INCOMPLETE — a real, still-existing
+   * WARN/CRITICAL volume can simply be sitting past the fetched page, and treating its absence
+   * from `seenEntities` as "gone" would falsely close a genuinely-active alert. Absence evidence
+   * from a truncated project is exactly as untrustworthy as absence evidence from a failed one.
+   */
+  truncatedProjects: Set<string>;
   /** Full `volumeEntityKey(...)` strings actually seen (i.e. still exist) THIS run, across every successfully-probed project. */
   seenEntities: Set<string>;
   /** This run's full project set (probedOkProjects ∪ failedProjects, by name). */
@@ -96,13 +106,15 @@ export interface SweepContext {
  *      (its own per-project reconcile owns it); otherwise → close-unprobed.
  *   3. Title shape A (`parseSeverityTitle` matches AND entity ends with ` [<uuid>]`):
  *        - no project prefix matches at all → close-unprobed (the project itself is gone)
- *        - project FAILED to fetch this run → keep-blind (never close on a blind project — this
- *          is DISTINCT from plain "keep" so the caller can report "kept (project probe failed):
- *          M" in the run summary per the design review, rather than folding a "we genuinely
- *          can't tell if this is absent" case into the same bucket as "confirmed still there")
- *        - project probed OK + entity in `seenEntities` → keep (still there)
- *        - project probed OK + entity NOT in `seenEntities` → close-absent (project's fine, this
- *          volume specifically is gone — deleted, detached, or resized to 0)
+ *        - project FAILED to fetch OR was TRUNCATED this run → keep-blind (never close on
+ *          absence-evidence we can't trust — this is DISTINCT from plain "keep" so the caller can
+ *          report "kept (project probe failed): M" in the run summary per the design review,
+ *          rather than folding a "we genuinely can't tell if this is absent" case into the same
+ *          bucket as "confirmed still there")
+ *        - project probed OK, NOT truncated + entity in `seenEntities` → keep (still there)
+ *        - project probed OK, NOT truncated + entity NOT in `seenEntities` → close-absent
+ *          (project's fine, fully fetched, this volume specifically is gone — deleted, detached,
+ *          or resized to 0)
  *   4. Any other title (doesn't even match the generic `[label] entity — status` shape, or matches
  *      but lacks the UUID suffix) → keep.
  */
@@ -123,7 +135,10 @@ export function classifySweepDisposition(title: string, ctx: SweepContext): Swee
 
   const project = resolveProjectByPrefix(parsed.entity, ctx.projectSet);
   if (!project) return "close-unprobed"; // no project prefix matches at all
-  if (ctx.failedProjects.has(project.name)) return "keep-blind"; // never close on a blind project
+  // codex review finding (P1, fixed here): a TRUNCATED project's seenEntities is exactly as
+  // untrustworthy for absence-detection as a FAILED one — both mean "we cannot confirm this
+  // volume is actually gone," so both take the keep-blind path, never close-absent.
+  if (ctx.failedProjects.has(project.name) || ctx.truncatedProjects.has(project.name)) return "keep-blind";
   if (!ctx.probedOkProjects.has(project.name)) return "keep"; // conservative: not recorded as OK either — leave alone
   return ctx.seenEntities.has(parsed.entity) ? "keep" : "close-absent";
 }
@@ -146,9 +161,10 @@ export interface SweepOutcome {
   warnings: string[];
   /**
    * Count of OPEN issues that resolved to "keep-blind" — a volume-entity issue whose owning
-   * project failed to fetch this run, so absence could not be confirmed either way. Surfaced
-   * separately from the (silent) ordinary "keep" count so the run summary can report "kept
-   * (project probe failed): M" per the design review, distinct from "orphans closed: N".
+   * project either failed to fetch OR was truncated (pagination cap hit) this run, so absence
+   * could not be confirmed either way. Surfaced separately from the (silent) ordinary "keep"
+   * count so the run summary can report "kept (project probe failed): M" per the design review,
+   * distinct from "orphans closed: N".
    */
   keptBlindCount: number;
 }

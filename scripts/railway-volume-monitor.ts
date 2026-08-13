@@ -317,6 +317,14 @@ async function main(): Promise<void> {
   const allVolumes: VolumeRecord[] = [];
   const projectErrors: Array<{ name: string; error: string }> = [];
   let anyTruncated = false;
+  /**
+   * ops#71 — names of projects whose fetch succeeded but hit a pagination cap this run. codex
+   * review finding (P1, fixed here): the old bare `anyTruncated` boolean gave the absent-entity
+   * sweep no way to know WHICH project's seenEntities was incomplete, so it would falsely
+   * close-absent a still-active volume sitting past the fetched page. Per-project granularity is
+   * required to scope that trust decision correctly.
+   */
+  const truncatedProjectNames = new Set<string>();
 
   for (const p of projects) {
     const failTitle = projectProbeFailedTitle(p.name);
@@ -338,7 +346,10 @@ async function main(): Promise<void> {
     }
 
     allVolumes.push(...result.volumes);
-    if (result.truncated) anyTruncated = true;
+    if (result.truncated) {
+      anyTruncated = true;
+      truncatedProjectNames.add(p.name);
+    }
   }
 
   if (anyTruncated) {
@@ -428,12 +439,25 @@ async function main(): Promise<void> {
   }
 
   // ops#71 Leg 2 (continued) — dangling acceptances: an override whose volume_instance_id matches
-  // no live volume THIS run, scoped to projects that actually probed OK (mirrors Leg 1's "never
-  // act on absence-evidence from a blind project" — an override whose project merely failed to
-  // fetch this run is not dangling, it's just unprobed; deriving project name from `path`'s first
-  // segment is a scoping heuristic only, not an identity claim).
+  // no live volume THIS run is flagged, UNLESS its owning project is a KNOWN project that failed
+  // to fetch or was truncated this run (mirrors Leg 1's "never act on absence-evidence from a
+  // blind project" — an override whose project merely failed to fetch is not dangling, it's just
+  // unprobed). Deriving "owning project" from `path`'s first segment is a scoping heuristic only.
+  //
+  // codex review finding (P2, fixed here): the ORIGINAL filter was an ALLOWLIST
+  // (`probedOkProjectNames.has(...)`), which silently excluded from the dangling check ANY
+  // override whose path's project segment didn't match a probed-ok project name for ANY reason —
+  // including a typo'd/stale project-name segment that never matched a REAL project at all. Since
+  // such an override's volume_instance_id also never matches a live volume (nothing points at
+  // it), it would NEVER be flagged by ANY path: not structurally invalid (path is just a string),
+  // never evaluated in the per-volume loop above (its id matches no live v.volumeInstanceId), and
+  // now excluded here too — a garbage entry sits in the manifest forever with zero visibility.
+  // The fix inverts to a DENYLIST: exclude ONLY entries whose derived name is a project we can
+  // POSITIVELY confirm is blind/truncated this run; anything else (including a bogus name
+  // matching no known project) proceeds to the dangling check and gets flagged if unmatched.
   const liveVolumeInstanceIds = new Set(allVolumes.map((v) => v.volumeInstanceId));
-  const scopedAcceptanceMap = new Map([...acceptanceMap].filter(([, av]) => probedOkProjectNames.has(av.path.split("/")[0])));
+  const blindOrTruncatedProjectNames = new Set([...failedProjectNames, ...truncatedProjectNames]);
+  const scopedAcceptanceMap = new Map([...acceptanceMap].filter(([, av]) => !blindOrTruncatedProjectNames.has(av.path.split("/")[0])));
   acceptanceDefects.push(...findDanglingAcceptances(scopedAcceptanceMap, liveVolumeInstanceIds));
 
   // Reconcile `[volume-monitor] ACCEPTED-STATE INVALID — <id>` issues BOTH directions — grouped
@@ -467,7 +491,13 @@ async function main(): Promise<void> {
   // iterates exactly `allVolumes`, which is what populates `seenEntities`) — so there is no
   // ordering hazard despite both pushing into the same `planned` list (proven in
   // railway-volume-reconcile.test.ts's disjoint-targeting invariant test).
-  const sweepCtx: SweepContext = { probedOkProjects: probedOkProjectNames, failedProjects: failedProjectNames, seenEntities, projectSet: projects };
+  const sweepCtx: SweepContext = {
+    probedOkProjects: probedOkProjectNames,
+    failedProjects: failedProjectNames,
+    truncatedProjects: truncatedProjectNames,
+    seenEntities,
+    projectSet: projects,
+  };
   const sweep = sweepAbsentEntityIssues(openIssuesList, sweepCtx);
   for (const w of sweep.warnings) console.warn(`railway-volume-monitor: ${w}`);
   for (const action of sweep.actions) {
