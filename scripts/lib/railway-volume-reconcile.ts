@@ -110,7 +110,16 @@ export interface SweepContext {
  *          name can lag Railway's live name for the same project id when discovery is unavailable
  *          — e.g. after a Railway rename the manifest hasn't caught up — and resolving by the
  *          STALE name first would misclassify a volume just confirmed active as gone)
- *        - no project prefix matches at all → close-unprobed (the project itself is gone)
+ *        - no project prefix matches AND no project in this run's set failed/was truncated →
+ *          close-unprobed (the project itself is genuinely gone — trustworthy ONLY when every
+ *          project this run resolved cleanly; see the codex P1 note below)
+ *        - no project prefix matches BUT at least one project failed/was truncated this run →
+ *          keep-blind (codex review finding, P1: the seenEntities-first check above only protects
+ *          a stale-manifest-name project that SUCCEEDED this run — it never fires when that same
+ *          project instead FAILS to fetch, since a failed fetch populates neither seenEntities nor
+ *          a resolvable projectSet entry under the entity's live name; we cannot rule out the
+ *          unresolvable entity belongs to one of THIS run's blind projects under a name we don't
+ *          currently trust, so stay conservative rather than risk a false-close)
  *        - project FAILED to fetch OR was TRUNCATED this run → keep-blind (never close on
  *          absence-evidence we can't trust — this is DISTINCT from plain "keep" so the caller can
  *          report "kept (project probe failed): M" in the run summary per the design review,
@@ -152,7 +161,22 @@ export function classifySweepDisposition(title: string, ctx: SweepContext): Swee
   if (ctx.seenEntities.has(parsed.entity)) return "keep";
 
   const project = resolveProjectByPrefix(parsed.entity, ctx.projectSet);
-  if (!project) return "close-unprobed"; // no project prefix matches at all
+  if (!project) {
+    // codex review finding (P1, fixed here): "no project prefix matches" is only a TRUSTWORTHY
+    // "this project is truly gone" signal when EVERY project in this run's set was cleanly
+    // resolved (no failures, no truncations). The seenEntities-first check above only protects
+    // the case where the stale-named project SUCCEEDED this run; it does nothing when that same
+    // project instead FAILS to fetch (a failed fetch never populates seenEntities at all) — a
+    // volume issue titled under a project's CURRENT live name (from a prior successful run) can
+    // then be unresolvable against this run's STALE manifest name (discovery unavailable + a
+    // Railway rename the manifest hasn't caught up to) while that stale-named project sits in
+    // `failedProjects`. Without this guard the entity falls straight to close-unprobed, falsely
+    // closing an active alert whose project merely failed to fetch. Staying conservative whenever
+    // ANYTHING failed/was truncated this run costs a delayed orphan-close (self-heals next clean
+    // run); a false-close on a real CRITICAL is the failure mode this whole monitor exists to
+    // prevent (Rule #4) — never trade the former's convenience for the latter's risk.
+    return ctx.failedProjects.size > 0 || ctx.truncatedProjects.size > 0 ? "keep-blind" : "close-unprobed";
+  }
   // A TRUNCATED project's seenEntities is exactly as untrustworthy for absence-detection as a
   // FAILED one — both mean "we cannot confirm this volume is actually gone," so both take the
   // keep-blind path, never close-absent.

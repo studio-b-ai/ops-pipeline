@@ -66,6 +66,7 @@ import { reconcileSeverity, buildSeverityTitle, parseSeverityTitle } from "./lib
 import { listIssuesByLabel, ensureLabel, openIssue, closeIssue, commentIssue, retitleIssue, type IssueRef } from "./lib/github-issues.js";
 import {
   sweepAbsentEntityIssues,
+  resolveProjectByPrefix,
   VOLUME_MONITOR_BLIND_TITLE as BLIND_TITLE,
   PROBE_FAILED_PREFIX,
   type SweepContext,
@@ -477,12 +478,25 @@ async function main(): Promise<void> {
   // it), it would NEVER be flagged by ANY path: not structurally invalid (path is just a string),
   // never evaluated in the per-volume loop above (its id matches no live v.volumeInstanceId), and
   // now excluded here too — a garbage entry sits in the manifest forever with zero visibility.
-  // The fix inverts to a DENYLIST: exclude ONLY entries whose derived name is a project we can
+  // The fix inverts to a DENYLIST: exclude ONLY entries whose owning project is one we can
   // POSITIVELY confirm is blind/truncated this run; anything else (including a bogus name
   // matching no known project) proceeds to the dangling check and gets flagged if unmatched.
+  //
+  // codex review finding (P2, fixed here): deriving "owning project" via a naive
+  // `path.split("/")[0]` first-segment split is the SAME class of bug `resolveProjectByPrefix`
+  // (Leg 1) exists to avoid — a project whose name is itself a prefix segment of another
+  // project's name (e.g. "a" and "a/b") would misattribute "a/b/..." to blind project "a" via a
+  // bare first-segment split, exempting a genuinely dangling "a/b" acceptance from ever being
+  // flagged. Reusing Leg 1's own longest-prefix resolver against THIS run's full `projects` set
+  // fixes it the same way it's already fixed for the sweep.
   const liveVolumeInstanceIds = new Set(allVolumes.map((v) => v.volumeInstanceId));
   const blindOrTruncatedProjectNames = new Set([...failedProjectNames, ...truncatedProjectNames]);
-  const scopedAcceptanceMap = new Map([...acceptanceMap].filter(([, av]) => !blindOrTruncatedProjectNames.has(av.path.split("/")[0])));
+  const scopedAcceptanceMap = new Map(
+    [...acceptanceMap].filter(([, av]) => {
+      const owningProject = resolveProjectByPrefix(av.path, projects);
+      return !owningProject || !blindOrTruncatedProjectNames.has(owningProject.name);
+    }),
+  );
   acceptanceDefects.push(...findDanglingAcceptances(scopedAcceptanceMap, liveVolumeInstanceIds));
 
   // Reconcile `[volume-monitor] ACCEPTED-STATE INVALID — <id>` issues BOTH directions — grouped

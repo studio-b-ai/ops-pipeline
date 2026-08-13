@@ -171,6 +171,37 @@ describe("classifySweepDisposition", () => {
     });
     expect(classifySweepDisposition(title, ctx)).toBe("keep");
   });
+
+  // codex review finding (P1): the THIRD variant — same stale-name-after-rename setup, but this
+  // time the stale-named project also FAILS to fetch this run (rather than succeeding). A failed
+  // fetch populates neither seenEntities nor a resolvable projectSet entry under the entity's
+  // live name, so the seenEntities-first check above cannot save this case the way it saves the
+  // "succeeded" variant. Before the fix this fell straight to close-unprobed, falsely closing an
+  // alert whose project merely failed to fetch (title carries the LIVE name from a prior
+  // successful run; this run's projectSet still carries the stale manifest name in failedProjects).
+  it("does NOT false-close when the stale-named project ALSO fails to fetch this run (downgrades to keep-blind, not close-unprobed)", () => {
+    const title = buildSeverityTitle("volume-monitor", `new-name/production/Postgres/pg-data [${UUID}]`, "WARN");
+    const ctx = okCtx({
+      projectSet: [proj("old-stale-manifest-name", "same-project-id")],
+      probedOkProjects: new Set(),
+      failedProjects: new Set(["old-stale-manifest-name"]), // THIS run: fetch failed, keyed by the stale name
+      seenEntities: new Set(), // nothing fetched — a failed fetch adds nothing
+    });
+    expect(classifySweepDisposition(title, ctx)).toBe("keep-blind");
+  });
+
+  // Negative control for the fix above: when NOTHING failed/was truncated anywhere this run,
+  // "no project prefix matches" still means what it always meant — the project is genuinely gone.
+  it("still correctly close-unprobes a genuinely-gone project when the run is otherwise completely clean (negative control)", () => {
+    const title = buildSeverityTitle("volume-monitor", `context-engine/production/Postgres/pg-data [${UUID}]`, "WARN");
+    const ctx = okCtx({
+      projectSet: [proj("wasala-platform")],
+      probedOkProjects: new Set(["wasala-platform"]),
+      failedProjects: new Set(),
+      truncatedProjects: new Set(),
+    });
+    expect(classifySweepDisposition(title, ctx)).toBe("close-unprobed");
+  });
 });
 
 // ───────────────────────────── sweepAbsentEntityIssues ─────────────────────────────
