@@ -43,7 +43,7 @@ studiob-price-sync · asthetik-trade-theme · asthetik-portal · ops-pipeline
 | 16b | ~~Hook-precision pass: ops#47 + ops#49~~ **CLOSED 8/06** | Both shipped (hooks `699d4a9`, `6d33698`), each live-fired both directions. #49 audit found a bigger collision than reported: `PAT` matched inside **`$PATH`**, so every path echo was blocked fleet-wide, silently. #47's WARN path proven against a **planted** stale checkout (#464) — the four natural probes only ever returned the default verdict | done |
 | 16c | ~~ops-pipeline#51~~ **CLOSED 8/12** — both halves shipped: guard (8/06) + default-deny ~/.claude config repo w/ auto-checkpoint (8/12, live-fired through the real hook path) | Receipts on the issue | done |
 | 17 | ~~ops-pipeline#21~~ **CLOSED 8/12** — Kevin's words landed + executed same day (16 archives, 7 Railway retirements, qa-runner inline, invest DARK); map FINAL w/ Lane column (ops#67); spelling-split rename executed (ops#68); wasala transferred | done (Batch 7 → ops#61) |
-| 18 | ops-pipeline#12 wasala volume WARN | Disposition MADE: static corpus, no resize (#462); issue stays open as dedup state until the per-volume accepted-state override ships (ops#71) | rides ops#71 |
+| 18 | ~~ops-pipeline#12~~ **CLOSED honestly 8/13** — per-volume accepted-state (85%, review 11/30) shipped + plant-proven (ops#71); alert returns on breach or expiry | done |
 
 ## Parked (deliberate, with resume runbooks)
 
@@ -55,10 +55,10 @@ studiob-price-sync · asthetik-trade-theme · asthetik-portal · ops-pipeline
 
 1. `studiob-cto` agent first-dispatch validation.
 2. **ops#66** — 👍-reaction dispatch for needs-human probe approvals (the approval had no machine on the other end).
-3. **ops#71** — volume-monitor hardening: absent-entity sweep (#381 class, bit 8/12 ×3) + per-volume accepted-state (frees ops#12).
+3. **ops#74** — port the proven absent-entity sweep to credential-expiry-monitor.
 4. Recurring repo-hygiene worker (deferred until after #21's classification — deliberate, see #21 comment; the shuttle mis-class in row 17 is a second reason the classifier needs work before it drives anything).
 
-**Shipped from this queue:** squasher-health widening to 4 callers · ops#37 orphan sweep · ops#47 + ops#49 hook-precision pass · **ops#51 both halves (guard 8/06 + config-plane versioning 8/12)**.
+**Shipped from this queue:** squasher-health widening to 4 callers · ops#37 orphan sweep · ops#47 + ops#49 hook-precision pass · **ops#51 both halves (guard 8/06 + config-plane versioning 8/12)** · **ops#71 both legs, designed by the studiob-cto agent (first-dispatch validation PASS) + plant-PROVEN in production 8/13 (11 runs, all controls held)**.
 
 ## Standing watches (armed, idle until their signal)
 
