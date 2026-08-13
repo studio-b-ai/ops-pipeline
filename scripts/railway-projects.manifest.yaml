@@ -32,6 +32,21 @@ projects:
     name: gi-lint
   - id: "ad6f97b7-5b83-4104-b857-3550cebffff0"
     name: wasala-platform
+    # ops#71 Leg 2 (Kevin-authorized 2026-08-12): ops#12 is a diagnosed-static corpus — 79.3% used
+    # (158,609MB/200,000MB), measured FLAT (-36MB over 4 days), no resize warranted. Without this
+    # override the issue must stay open forever purely as dedup state (global WARN threshold =
+    # 75%). Keyed by volume_instance_id (NOT path/name) so this can never suppress a same-named
+    # volume in a different environment; `path` is cross-checked against the live record at match
+    # time and a mismatch means the override does NOT apply (see lib/railway-volume-accept.ts).
+    # accepted_below_pct is provisional per Kevin's decision #2 until L2-P0's fresh usage reading
+    # confirms; review_by forces re-diagnosis regardless.
+    accepted_volumes:
+      - volume_instance_id: "a622cddb-8faf-4364-9dc2-75ba1b063967"
+        path: "wasala-platform/production/Postgres/postgres-volume"
+        accepted_below_pct: 85
+        review_by: "2026-11-30"
+        reason: "Diagnosed-static corpus (ops#12): 79.3% used (158,609MB/200,000MB), measured FLAT (-36MB over 4 days) — no resize warranted as of 2026-08-12."
+        issue: 12
   - id: "c7dbd520-ef13-4a61-854b-98f282069258"
     name: bolt-roth
   - id: "559b6644-c297-4696-b3e9-fa31a89092de"
