@@ -16,7 +16,8 @@
 # Get a project's id: `railway status` inside a linked checkout, the Railway dashboard (project
 # settings → the id in the URL), or `railway list-projects`-style tooling if you have it wired.
 #
-# This list reflects every project in the "kbibelhausen's Projects" workspace as of 2026-07-27
+# This list reflects every project in the "kbibelhausen's Projects" workspace as of 2026-08-12
+# (context-engine / relay / aesthetik-staging deleted from Railway in the ops#21 retirements)
 # (enumerated read-only, not guessed). If Kevin's RAILWAY_API_TOKEN is scoped to a different
 # team/workspace, add that workspace's projects here too.
 
@@ -31,13 +32,7 @@ projects:
     name: gi-lint
   - id: "ad6f97b7-5b83-4104-b857-3550cebffff0"
     name: wasala-platform
-  - id: "94c65463-997b-4a29-b3ca-aa4e221e360a"
-    name: context-engine
   - id: "c7dbd520-ef13-4a61-854b-98f282069258"
     name: bolt-roth
-  - id: "a8b29f1b-a3d2-41a6-8d72-49040502f7cd"
-    name: relay
   - id: "559b6644-c297-4696-b3e9-fa31a89092de"
     name: nzt
-  - id: "d5f0ce8c-c9a9-4ca3-b199-863479a7729d"
-    name: aesthetik-staging

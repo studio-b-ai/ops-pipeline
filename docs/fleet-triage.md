@@ -42,8 +42,8 @@ studiob-price-sync · asthetik-trade-theme · asthetik-portal · ops-pipeline
 | 16 | ~~ops-pipeline#37~~ CLOSED 8/05 (orphan sweep shipped, ops#43) | — | done |
 | 16b | ~~Hook-precision pass: ops#47 + ops#49~~ **CLOSED 8/06** | Both shipped (hooks `699d4a9`, `6d33698`), each live-fired both directions. #49 audit found a bigger collision than reported: `PAT` matched inside **`$PATH`**, so every path echo was blocked fleet-wide, silently. #47's WARN path proven against a **planted** stale checkout (#464) — the four natural probes only ever returned the default verdict | done |
 | 16c | **ops-pipeline#51 settings.json unversioned** | Near-miss while shipping #47: an entry-level filter deleted 4 sibling SessionStart hooks (vault-review #278, Qdrant preload, brain-push backstop, OneDrive guard) — valid JSON, silent, recoverable only by an ad-hoc backup. 68 hook registrations with no history. Fix pair = git root up + a registration-integrity assertion | CTO build queue |
-| 17 | ops-pipeline#21 org consolidation | 8/12: evidence sweep (ops#58) + live-surface probe + **disposition proposal (ops#59)** delivered — 7 decision batches await Kevin's words; zombie claims re-verified live (nzt/shuttle/gi-lint refuted, relay confirmed); shuttle PRESERVE stands | **Kevin** words |
-| 18 | ops-pipeline#12 wasala volume WARN | Static corpus; disposition rides #21 | rides #21 |
+| 17 | ~~ops-pipeline#21~~ **CLOSED 8/12** — Kevin's words landed + executed same day (16 archives, 7 Railway retirements, qa-runner inline, invest DARK); map FINAL w/ Lane column (ops#67); spelling-split rename executed (ops#68); wasala transferred | done (Batch 7 → ops#61) |
+| 18 | ops-pipeline#12 wasala volume WARN | Disposition MADE: static corpus, no resize (#462); issue stays open as dedup state until the per-volume accepted-state override ships (ops#71) | rides ops#71 |
 
 ## Parked (deliberate, with resume runbooks)
 
@@ -55,7 +55,9 @@ studiob-price-sync · asthetik-trade-theme · asthetik-portal · ops-pipeline
 
 1. **ops-pipeline#51** — settings.json versioning + registration-integrity check. Top of the queue because it removes a class of *silent, unrecoverable* fleet damage: a deleted hook registration doesn't error, it just stops protecting (#464), and there is currently no history to restore from.
 2. `studiob-cto` agent first-dispatch validation.
-3. Recurring repo-hygiene worker (deferred until after #21's classification — deliberate, see #21 comment; the shuttle mis-class in row 17 is a second reason the classifier needs work before it drives anything).
+3. **ops#66** — 👍-reaction dispatch for needs-human probe approvals (the approval had no machine on the other end).
+4. **ops#71** — volume-monitor hardening: absent-entity sweep (#381 class, bit 8/12 ×3) + per-volume accepted-state (frees ops#12).
+5. Recurring repo-hygiene worker (deferred until after #21's classification — deliberate, see #21 comment; the shuttle mis-class in row 17 is a second reason the classifier needs work before it drives anything).
 
 **Shipped from this queue:** squasher-health widening to 4 callers · ops#37 orphan sweep · ops#47 + ops#49 hook-precision pass.
 
