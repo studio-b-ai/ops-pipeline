@@ -5,6 +5,7 @@ import {
   buildUserPrompt,
   CAPS,
   extractFilePaths,
+  parseProbeRouting,
   PROBE_MARKER,
   renderComment,
   type ProbeContext,
@@ -89,6 +90,14 @@ describe("prompt + comment framing", () => {
     expect(s).toContain("NEEDS-KEVIN");
   });
 
+  it("system prompt mandates the ops-pipeline#66 machine trailer, both lines, always", () => {
+    const s = buildSystemPrompt();
+    expect(s).toContain("ROUTING: same-repo");
+    expect(s).toContain("ROUTING: cross-repo studio-b-ai/<repo>");
+    expect(s).toContain("NEEDS-KEVIN: yes|no");
+    expect(s).toContain("Always exactly two lines");
+  });
+
   it("rendered comment carries the dedup marker, the hypothesis framing (#412/#167), and the diagnosis verbatim", () => {
     const c = renderComment("## Culprit hypothesis\nthe sync filter", "claude-sonnet-5");
     expect(c.startsWith(PROBE_MARKER)).toBe(true);
@@ -97,5 +106,90 @@ describe("prompt + comment framing", () => {
     expect(c).toContain("the sync filter");
     // It must never claim to have verified or fixed anything.
     expect(c).not.toMatch(/verified|fixed the|resolved/i);
+  });
+});
+
+describe("parseProbeRouting (ops-pipeline#66 machine trailer)", () => {
+  // Negative control first (Rule #322): no trailer at all → null, never a guess.
+  it("null for a diagnosis with no trailer (the standing legacy probe-comment shape)", () => {
+    const body = ["## Culprit hypothesis", "the sync filter drops rows", "", "## NEEDS-KEVIN", "no — mechanical fix"].join("\n");
+    expect(parseProbeRouting(body)).toBeNull();
+  });
+
+  it("null for an empty or whitespace-only body", () => {
+    expect(parseProbeRouting("")).toBeNull();
+    expect(parseProbeRouting("   \n  \n")).toBeNull();
+  });
+
+  it("parses a same-repo trailer", () => {
+    const body = ["## Confidence + what would falsify this", "high", "", "ROUTING: same-repo", "NEEDS-KEVIN: no"].join("\n");
+    expect(parseProbeRouting(body)).toEqual({ routing: "same-repo", needsKevin: false });
+  });
+
+  it("parses a cross-repo trailer with target", () => {
+    const body = ["## Confidence + what would falsify this", "high", "", "ROUTING: cross-repo studio-b-ai/bolt-wms", "NEEDS-KEVIN: no"].join("\n");
+    expect(parseProbeRouting(body)).toEqual({ routing: "cross-repo", target: "studio-b-ai/bolt-wms", needsKevin: false });
+  });
+
+  it("parses NEEDS-KEVIN: yes on a same-repo trailer", () => {
+    const body = ["ROUTING: same-repo", "NEEDS-KEVIN: yes"].join("\n");
+    expect(parseProbeRouting(body)).toEqual({ routing: "same-repo", needsKevin: true });
+  });
+
+  it("parses NEEDS-KEVIN: yes on a cross-repo trailer", () => {
+    const body = ["ROUTING: cross-repo studio-b-ai/webhook-router", "NEEDS-KEVIN: yes"].join("\n");
+    expect(parseProbeRouting(body)).toEqual({ routing: "cross-repo", target: "studio-b-ai/webhook-router", needsKevin: true });
+  });
+
+  it("tolerates markdown bold wrapping either or both lines", () => {
+    const bodyA = ["**ROUTING: same-repo**", "**NEEDS-KEVIN: no**"].join("\n");
+    expect(parseProbeRouting(bodyA)).toEqual({ routing: "same-repo", needsKevin: false });
+    const bodyB = ["**ROUTING:** same-repo", "**NEEDS-KEVIN:** yes"].join("\n");
+    expect(parseProbeRouting(bodyB)).toEqual({ routing: "same-repo", needsKevin: true });
+  });
+
+  it("tolerates trailing whitespace on each trailer line", () => {
+    const body = ["ROUTING: same-repo   ", "NEEDS-KEVIN: no  "].join("\n");
+    expect(parseProbeRouting(body)).toEqual({ routing: "same-repo", needsKevin: false });
+  });
+
+  it("tolerates trailing blank lines after the trailer", () => {
+    const body = ["ROUTING: same-repo", "NEEDS-KEVIN: no", "", "   ", ""].join("\n");
+    expect(parseProbeRouting(body)).toEqual({ routing: "same-repo", needsKevin: false });
+  });
+
+  it("does NOT mistake the human-readable '## NEEDS-KEVIN' section for the trailer", () => {
+    // The full renderComment() shape: PROBE_MARKER header + prose sections (including the
+    // prose ## NEEDS-KEVIN heading) followed by the REAL machine trailer at the tail.
+    const body = [
+      PROBE_MARKER,
+      "🔎 Read-only diagnostic probe",
+      "",
+      "## Culprit hypothesis",
+      "the filter",
+      "## NEEDS-KEVIN",
+      "no — mechanical, no locked semantics touched",
+      "## Confidence + what would falsify this",
+      "high",
+      "",
+      "ROUTING: same-repo",
+      "NEEDS-KEVIN: no",
+    ].join("\n");
+    expect(parseProbeRouting(body)).toEqual({ routing: "same-repo", needsKevin: false });
+  });
+
+  it("null when only one trailer line is present (ROUTING without NEEDS-KEVIN)", () => {
+    const body = ["## Confidence", "high", "", "ROUTING: same-repo"].join("\n");
+    expect(parseProbeRouting(body)).toBeNull();
+  });
+
+  it("null for a malformed cross-repo target (not owner/repo shape)", () => {
+    const body = ["ROUTING: cross-repo not-a-repo-shape", "NEEDS-KEVIN: no"].join("\n");
+    expect(parseProbeRouting(body)).toBeNull();
+  });
+
+  it("null when NEEDS-KEVIN value is neither yes nor no", () => {
+    const body = ["ROUTING: same-repo", "NEEDS-KEVIN: maybe"].join("\n");
+    expect(parseProbeRouting(body)).toBeNull();
   });
 });

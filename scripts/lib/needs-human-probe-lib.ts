@@ -94,7 +94,77 @@ export function buildSystemPrompt(): string {
     "(yes/no — yes when the fix would amend locked semantics, pricing, credentials,",
     "customer-facing behavior, or anything a rule marks Kevin-gated; one line why)",
     "## Confidence + what would falsify this",
+    "",
+    "Then, after ALL sections above and as the ABSOLUTE LAST thing in your response —",
+    "no closing remarks, no blank commentary, nothing after it — append a MACHINE",
+    "trailer of EXACTLY two lines (ops-pipeline#66, consumed by an automated router;",
+    "this is separate from the human-readable ## NEEDS-KEVIN section above, which stays",
+    "prose). Use this EXACT grammar, no markdown bold, no extra punctuation:",
+    "ROUTING: same-repo",
+    "NEEDS-KEVIN: yes|no",
+    "or, when the fix belongs in a DIFFERENT Studio B repo than the one named at the top",
+    "of this prompt:",
+    "ROUTING: cross-repo studio-b-ai/<repo>",
+    "NEEDS-KEVIN: yes|no",
+    "",
+    "Trailer rules:",
+    "- Always exactly two lines, in this order: ROUTING then NEEDS-KEVIN. Never omit",
+    "  either line, even when NEEDS-KEVIN is 'no' or ROUTING is 'same-repo'.",
+    "- cross-repo names the exact target as studio-b-ai/<repo> — read from your own",
+    "  diagnosis, never a guess or a repo not evidenced by the context.",
+    "- NEEDS-KEVIN here must match your ## NEEDS-KEVIN section's yes/no verdict above —",
+    "  restate it, don't re-decide it.",
   ].join("\n");
+}
+
+/** A parsed machine routing trailer (ops-pipeline#66) — see buildSystemPrompt's trailer spec. */
+export type ProbeRouting =
+  | { routing: "same-repo"; needsKevin: boolean }
+  | { routing: "cross-repo"; target: string; needsKevin: boolean };
+
+const ROUTING_LINE_RE = /^ROUTING:\s*(same-repo|cross-repo\s+([\w.-]+\/[\w.-]+))\s*$/;
+const NEEDS_KEVIN_LINE_RE = /^NEEDS-KEVIN:\s*(yes|no)\s*$/;
+
+/**
+ * Extracts the ops-pipeline#66 machine trailer from a probe comment (or diagnosis) body.
+ * Returns `null` when no trailer parses — the documented fallback for the standing ~21
+ * legacy probe comments (pre-trailer) AND for any malformed/missing trailer (fail-safe,
+ * never guess): the ROUTER LIB (needs-human-router-lib.ts) treats `null` as
+ * `same-repo` + `needsKevin: false` per the design comment.
+ *
+ * Deliberately scoped to the LAST TWO non-blank lines of the body, not a body-wide
+ * search: buildSystemPrompt mandates the trailer as the absolute last thing emitted, and
+ * the diagnosis ALSO contains a pre-existing "## NEEDS-KEVIN" markdown HEADING (prose,
+ * yes/no + one line why) earlier in the same output. A body-wide regex could false-match
+ * prose under that heading (e.g. a model restating "NEEDS-KEVIN: yes" inline); requiring
+ * true adjacency at the very tail makes that class of false-positive structurally
+ * impossible rather than merely unlikely.
+ *
+ * Tolerant of markdown bold (`**`) and per-line surrounding whitespace — strips `**`
+ * globally and trims each line before matching — but NOT of case drift on the literal
+ * keywords/values: a trailer that doesn't match the mandated grammar exactly is treated
+ * as absent (falls back to the legacy default) rather than fuzzily coerced, which is the
+ * safer failure mode for a router that removes labels and closes issues.
+ */
+export function parseProbeRouting(commentBody: string): ProbeRouting | null {
+  const deBolded = commentBody.replace(/\*\*/g, "");
+  const nonEmptyLines = deBolded
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (nonEmptyLines.length < 2) return null;
+
+  const last = nonEmptyLines[nonEmptyLines.length - 1] as string;
+  const secondLast = nonEmptyLines[nonEmptyLines.length - 2] as string;
+
+  const needsKevinMatch = last.match(NEEDS_KEVIN_LINE_RE);
+  if (!needsKevinMatch) return null;
+  const routingMatch = secondLast.match(ROUTING_LINE_RE);
+  if (!routingMatch) return null;
+
+  const needsKevin = needsKevinMatch[1] === "yes";
+  if (routingMatch[1] === "same-repo") return { routing: "same-repo", needsKevin };
+  return { routing: "cross-repo", target: routingMatch[2] as string, needsKevin };
 }
 
 export function buildUserPrompt(ctx: ProbeContext): string {
