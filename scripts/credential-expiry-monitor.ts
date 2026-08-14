@@ -35,6 +35,19 @@
  * SECURITY (Rule #259/#282): credential VALUES are read into variables and passed to probes; they
  * are NEVER logged, never put in issue text. Only NAME-level metadata + derived expiry DATES flow
  * out.
+ *
+ * Absent-entity orphan sweep (2026-08-14, ops-pipeline#74): the per-credential loop above
+ * iterates `credentials.manifest.yaml` items ONLY — a credential REMOVED from the manifest
+ * (rotated off, decommissioned, migrated to a keyless alternative) left its open issue orphaned
+ * forever, the same gap already fixed for gateway-token-watch.ts (#37) and
+ * railway-volume-monitor.ts (#71 Leg 1). This is the SIMPLEST instance of the class — see
+ * `lib/credential-reconcile.ts`'s header for why it ports as the gateway-style name-in-set sweep
+ * rather than the volume monitor's three-way one. Runs AFTER the per-credential loop, own
+ * separate block, over the same `openIssuesList` already read above; close comments say "no
+ * longer monitored", never "resolved" — this sweep never re-verifies a removed credential's
+ * actual state. `--dry-run` previews sweep closes distinctly (`SWEEP-CLOSE #<num> <title> (no
+ * longer monitored)`) since the real issue-list read already happens in dry-run (#376); zero
+ * mutations either way.
  */
 
 import { readFileSync } from "node:fs";
@@ -55,6 +68,7 @@ import {
 } from "./lib/credential-probes.js";
 import { reconcileSeverity, buildSeverityTitle, parseSeverityTitle } from "./lib/severity-issue-reconcile.js";
 import { listIssuesByLabel, ensureLabel, openIssue, closeIssue, commentIssue, retitleIssue, type IssueRef } from "./lib/github-issues.js";
+import { sweepUnmonitoredCredentialIssues } from "./lib/credential-reconcile.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_FILE = join(HERE, "credentials.manifest.yaml");
@@ -224,16 +238,33 @@ function credentialCloseComment(r: ItemResult): string {
   return `\`${r.item.name}\` is back to OK — auto-closed by the credential monitor.`;
 }
 
+/**
+ * ops-pipeline#74 — the absent-entity sweep's close comment. Per the design comment, NEVER a
+ * bare "resolved"/"back to OK" CLAIM — this sweep closes because the credential left the
+ * manifest, not because its actual state was re-verified (it wasn't). Mirrors
+ * railway-volume-reconcile.ts's sweepCloseComment (#71 Leg 1) in intent; distinct in wording
+ * (this monitor has one disposition, not three).
+ */
+function credentialSweepCloseComment(entity: string): string {
+  return `\`${entity}\` is no longer in credentials.manifest.yaml — no longer monitored. This says nothing about the credential's actual state (it was NOT verified as rotated or resolved); if it still exists and matters, re-add it to the manifest. Auto-closed by the credential monitor's absent-entity sweep (ops-pipeline#74).`;
+}
+
 // ───────────────────────────── issue action plan ─────────────────────────────
 
 type PlannedAction =
   | { kind: "open"; title: string; body: string }
   | { kind: "retitle"; num: number; newTitle: string; comment: string }
-  | { kind: "close"; num: number; comment: string };
+  | { kind: "close"; num: number; comment: string; sweepTitle?: string };
 
+/**
+ * `sweepTitle` is set only by the #74 absent-entity sweep — same underlying `close` action as an
+ * ordinary OK-recovery close, but the two mean different things (Rule #412), so the dry-run
+ * preview text distinguishes them instead of collapsing both to a bare `CLOSE #<num>`.
+ */
 function describePlanned(p: PlannedAction): string {
   if (p.kind === "open") return `OPEN ${p.title}`;
   if (p.kind === "retitle") return `RETITLE #${p.num} → ${p.newTitle}`;
+  if (p.kind === "close" && p.sweepTitle) return `SWEEP-CLOSE #${p.num} ${p.sweepTitle} (no longer monitored)`;
   return `CLOSE #${p.num}`;
 }
 
@@ -267,6 +298,10 @@ async function main(): Promise<void> {
   const manifest = parseYaml(readFileSync(MANIFEST_FILE, "utf-8")) as { credentials?: ManifestItem[] };
   const items = manifest.credentials ?? [];
   if (items.length === 0) throw new Error("manifest has no credentials");
+  // ops-pipeline#74 — the full monitored-name set, unconditional of probe outcome (a
+  // PROBE_FAILED credential is still IN the manifest, so its name belongs here too — see
+  // lib/credential-reconcile.ts's header for why the sweep must never see an empty set here).
+  const manifestNames = new Set(items.map((i) => i.name));
 
   const results: ItemResult[] = [];
   for (const item of items) {
@@ -301,9 +336,22 @@ async function main(): Promise<void> {
     }
   }
 
+  // ops-pipeline#74 — absent-entity sweep, run AFTER the per-credential loop above (own
+  // separate block, mirrors railway-volume-monitor.ts's sweep call-site convention): closes any
+  // OPEN credential-monitor issue whose entity has left credentials.manifest.yaml. Structurally
+  // disjoint from the loop above by construction — that loop only ever acts on entities IN
+  // `manifestNames` (it iterates `results`, itself built from `items`); the sweep only ever acts
+  // on entities NOT in `manifestNames` (lib/credential-reconcile.ts's own guard).
+  const sweep = sweepUnmonitoredCredentialIssues(openIssuesList, manifestNames);
+  for (const action of sweep.actions) {
+    planned.push({ kind: "close", num: action.number, comment: credentialSweepCloseComment(action.entity), sweepTitle: action.title });
+  }
+
   const okCount = results.filter((r) => statusOf(r) === "OK").length;
   const attentionCount = results.length - okCount;
-  const summary = `Credential monitor — ${results.length} checked, ${okCount} OK, ${attentionCount} need attention. Issue actions: ${planned.length}.`;
+  const summary =
+    `Credential monitor — ${results.length} checked, ${okCount} OK, ${attentionCount} need attention. Issue actions: ${planned.length}. ` +
+    `Absent-entity sweep: ${sweep.actions.length} orphan(s) closed.`;
 
   if (dryRun) {
     console.log("=== credential-expiry-monitor --dry-run (no secrets, no probe network calls; REAL gh issue list, NO issue mutations) ===");
