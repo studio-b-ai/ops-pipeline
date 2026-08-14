@@ -20,7 +20,7 @@
  * than re-parsing — ONE place owns the trailer grammar.
  */
 
-import { parseProbeRouting } from "./needs-human-probe-lib.js";
+import { looksLikeAttemptedTrailer, parseProbeRouting } from "./needs-human-probe-lib.js";
 
 /** Posted once a same-repo route (or a pre-routing rejection) has happened — the load-bearing
  * dedup state for the MAIN pass (design comment step 1) and what the RECALL pass searches for. */
@@ -125,12 +125,19 @@ export interface RouterDecisionInput {
  *   2. Authorized 👎, pre-routing -> close-rejected. This is the ONE place the brake acts in the
  *      main pass, and only because a human actually pressed it before routing ran.
  *   3. No probe comment yet -> no-probe (counted, never mutated — #331).
- *   4. Parse the trailer. `null` (no trailer / legacy comment) defaults to same-repo +
- *      needsKevin:false per the design comment (the standing ~21 pre-trailer probes; same-repo
- *      relabeling is the lowest-blast-radius action and self-correcting at fold time). Otherwise
- *      NEEDS-KEVIN:yes always wins regardless of ROUTING (a same-repo fix can still need a human
- *      — the design comment's step-3 bullets are checked in exactly this order: NEEDS-KEVIN
- *      first, then same-repo, then cross-repo).
+ *   4. Parse the trailer. `null` from parseProbeRouting means one of TWO different things
+ *      (codex review pass 2 P2, 2026-08-14) and they are NOT treated the same:
+ *        - genuinely legacy (no trailer attempted at all, per looksLikeAttemptedTrailer) ->
+ *          same-repo + needsKevin:false, per the design comment (the standing ~21 pre-trailer
+ *          probes; same-repo relabeling is the lowest-blast-radius action and self-correcting
+ *          at fold time).
+ *        - a MALFORMED attempt (the tail contains "ROUTING:"/"NEEDS-KEVIN:" but didn't parse
+ *          cleanly) -> hold-needs-kevin. The model tried to signal something and the signal was
+ *          lost to a parsing failure; defaulting a broken channel to the lowest-scrutiny path
+ *          would be trusting output we know is corrupted. Held for a human instead.
+ *      Otherwise (a clean parse) NEEDS-KEVIN:yes always wins regardless of ROUTING (a same-repo
+ *      fix can still need a human — the design comment's step-3 bullets are checked in exactly
+ *      this order: NEEDS-KEVIN first, then same-repo, then cross-repo).
  *
  * A cross-repo target equal to the caller's OWN repo is a degenerate same-repo case (the probe
  * naming the repo the issue already lives in) — normalized to route-same-repo rather than held
@@ -147,7 +154,12 @@ export function routeDisposition(input: RouterDecisionInput): RouterDisposition 
   if (input.probeCommentBody === null) return { kind: "no-probe" };
 
   const parsed = parseProbeRouting(input.probeCommentBody);
-  if (parsed === null) return { kind: "route-same-repo" }; // legacy default
+  if (parsed === null) {
+    // Malformed attempt vs. genuinely legacy — see the doc comment above. A broken signal is
+    // held for a human rather than trusted with the lowest-scrutiny same-repo default.
+    if (looksLikeAttemptedTrailer(input.probeCommentBody)) return { kind: "hold-needs-kevin" };
+    return { kind: "route-same-repo" }; // genuinely legacy default
+  }
 
   if (parsed.needsKevin) return { kind: "hold-needs-kevin" };
   if (parsed.routing === "same-repo") return { kind: "route-same-repo" };
