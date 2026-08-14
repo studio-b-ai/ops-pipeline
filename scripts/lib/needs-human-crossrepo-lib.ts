@@ -23,16 +23,25 @@
  * remit is the ONE case the same-repo router structurally cannot act on: filing the twin
  * issue in another repo.
  *
- * Marker reuse (deliberate, not an oversight): `ROUTE_RECEIPT_MARKER` — imported from
- * needs-human-router-lib.ts, the SAME constant the same-repo router posts for its own
- * route-same-repo case — is also what this sweep posts on a successful cross-repo route.
- * A shared marker means the same-repo router's own RECALL pass (which searches by
- * REACTION, not by label, specifically because a route removes the `needs-human` label)
- * transparently also catches a late 👎 on an already-cross-repo-routed origin issue and
- * closes it — no duplicate recall machinery needed in this sweep for the origin half.
- * This sweep's own close-rejected path additionally closes the TWIN when one is already
- * on record (the one thing the same-repo router's recall pass cannot reach, since the
- * twin lives in a different repo) — see `twinExists` on CrossRepoDecisionInput below.
+ * Marker + trust reuse (deliberate, not an oversight): `ROUTE_RECEIPT_MARKER` — imported
+ * from needs-human-router-lib.ts, the SAME constant the same-repo router posts for its
+ * own route-same-repo case — is also what this sweep posts on a successful cross-repo
+ * route, and `isTrustedMarkerAuthor` (same import) now recognizes BOTH the same-repo
+ * router's `github-actions[bot]` identity AND this sweep's own fleet-App-token identity
+ * (ops-pipeline#88, codex review pass 1 P1 — a same-repo-router-only trust check meant
+ * neither sweep could recognize the OTHER's receipts, which broke both self-recognition
+ * on re-evaluation and 👎 detection on either sweep's own posted receipts). A shared,
+ * mutually-trusted marker means the same-repo router's own RECALL pass (which searches
+ * by REACTION, not by label, specifically because a route removes the `needs-human`
+ * label) transparently also catches a late 👎 on an already-cross-repo-routed origin
+ * issue and closes the ORIGIN — but it has no way to reach the TWIN, which lives in a
+ * different repo it never looks at. This sweep therefore runs its OWN recall pass (the
+ * script's job, not this file's — see `crossRepoRecallDisposition` below), keyed off a
+ * MACHINE-READABLE twin pointer this sweep embeds inside its own route receipt
+ * (`buildTwinPointer`/`extractTwinPointer`) so a post-routing 👎 can close both sides
+ * even after the origin's `needs-human` label — and with it, this sweep's own label-based
+ * enumeration — is long gone (ops-pipeline#88, codex review pass 1 P1 — "Handle rejected
+ * already-routed twins").
  */
 
 import { parseProbeRouting } from "./needs-human-probe-lib.js";
@@ -208,4 +217,71 @@ export function summarizeCrossRepoDispositions(
   >;
   for (const d of dispositions) counts[d.kind] += 1;
   return counts;
+}
+
+// ───────────────────────────── twin pointer (recall pass idempotency key) ─────────────────────────────
+
+/**
+ * Embeds a MACHINE-READABLE pointer to the twin issue inside the origin's own
+ * ROUTE_RECEIPT_MARKER receipt comment (ops-pipeline#88, codex review pass 1 P1 — "Handle
+ * rejected already-routed twins"). This is what makes a post-routing 👎 recoverable: once
+ * a fully-successful route removes the origin's `needs-human` label, the origin drops out
+ * of the main pass's label-based enumeration FOREVER — the only way anything can still
+ * find "which twin does this origin point to" is by reading this pointer back out of the
+ * receipt itself. A prose/markdown-link parse of the human-facing receipt text would be
+ * fragile (wording can change, links can get re-flowed); this is a dedicated, greppable
+ * HTML-comment marker, the same idiom as PROBE_MARKER / ROUTE_RECEIPT_MARKER /
+ * HOLD_RECEIPT_MARKER. It also DISAMBIGUATES which mechanism posted a given
+ * ROUTE_RECEIPT_MARKER comment: the same-repo router's own route-same-repo receipt shares
+ * the marker but NEVER embeds this pointer, since it never files a twin at all.
+ */
+export function buildTwinPointer(target: string, twinNumber: number): string {
+  return `<!-- needs-human-crossrepo:twin:${target}#${twinNumber} -->`;
+}
+
+const TWIN_POINTER_RE = /<!-- needs-human-crossrepo:twin:([\w.-]+\/[\w.-]+)#(\d+) -->/;
+
+export interface TwinPointer {
+  target: string;
+  number: number;
+}
+
+/** Extracts the pointer `buildTwinPointer` embeds, or null when absent (a same-repo
+ * route's receipt, a hold receipt, or any comment that never carried one). Used by the
+ * cross-repo sweep's own recall pass to (a) identify that a receipt was posted by THIS
+ * sweep specifically, and (b) know which twin to close — no I/O re-search needed, unlike
+ * the main pass's file-cross-repo idempotency check. */
+export function extractTwinPointer(commentBody: string): TwinPointer | null {
+  const m = commentBody.match(TWIN_POINTER_RE);
+  if (!m?.[1] || !m[2]) return null;
+  return { target: m[1], number: Number(m[2]) };
+}
+
+// ───────────────────────────── recall pass (post-routing 👎) ─────────────────────────────
+
+export interface CrossRepoRecallDecisionInput {
+  /** A TRUSTED ROUTE_RECEIPT_MARKER comment is present on this issue AND carries a twin
+   * pointer (extractTwinPointer non-null) — i.e., THIS sweep routed this origin
+   * specifically, as opposed to the same-repo router's own route-same-repo case (which
+   * shares the marker but never embeds a pointer). The caller resolves this by finding
+   * the receipt and calling extractTwinPointer on it — see needs-human-crossrepo.ts. */
+  hasCrossRepoRouteReceipt: boolean;
+  hasAuthorizedDisapproval: boolean;
+}
+
+export type CrossRepoRecallDisposition = { kind: "close-rejected" } | { kind: "none" };
+
+/**
+ * The cross-repo sweep's own recall pass (ops-pipeline#88, codex review pass 1 P1),
+ * mirroring needs-human-router-lib.ts's `recallDisposition` exactly in shape and for the
+ * same reason: a completed route removes the `needs-human` label, so a late 👎 on an
+ * already-routed issue is invisible to any label-based main pass by construction — a
+ * reaction-search-based recall pass is the only way to find it again. Evaluated only for
+ * issues the caller found via that search AND that already carry this sweep's own route
+ * receipt (with a twin pointer). Unlike the same-repo router's recall pass (which can
+ * only reach the origin), the caller here also has the twin pointer and closes BOTH.
+ */
+export function crossRepoRecallDisposition(input: CrossRepoRecallDecisionInput): CrossRepoRecallDisposition {
+  if (input.hasCrossRepoRouteReceipt && input.hasAuthorizedDisapproval) return { kind: "close-rejected" };
+  return { kind: "none" };
 }

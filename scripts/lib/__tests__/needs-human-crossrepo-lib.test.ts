@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildTwinPointer,
   buildTwinTitle,
   crossRepoDisposition,
+  crossRepoRecallDisposition,
+  extractTwinPointer,
   findTwinMatch,
   shortRepoName,
   summarizeCrossRepoDispositions,
   twinExists,
   twinTitlePrefix,
   type CrossRepoDecisionInput,
+  type CrossRepoRecallDecisionInput,
   type TwinCandidate,
 } from "../needs-human-crossrepo-lib.js";
 
@@ -245,6 +249,61 @@ describe("summarizeCrossRepoDispositions (Rule #465 — always all five kinds, i
       "file-cross-repo": 2,
       "skip-twin-exists": 0,
       "hold-invalid-target": 1,
+    });
+  });
+});
+
+// ───────────────────────────── buildTwinPointer / extractTwinPointer (codex pass 1 P1) ─────────────────────────────
+
+describe("buildTwinPointer / extractTwinPointer", () => {
+  it("round-trips: extract(build(x)) === x", () => {
+    const marker = buildTwinPointer("studio-b-ai/bolt-wms", 1234);
+    expect(extractTwinPointer(marker)).toEqual({ target: "studio-b-ai/bolt-wms", number: 1234 });
+  });
+
+  it("finds the pointer embedded inside a full receipt body, not just a bare marker string", () => {
+    const body = [
+      "<!-- needs-human-router:v1 -->",
+      buildTwinPointer("studio-b-ai/studiob-price-sync", 42),
+      "🌐 **Cross-repo routed** — filed as `studiob-price-sync#42`.",
+    ].join("\n");
+    expect(extractTwinPointer(body)).toEqual({ target: "studio-b-ai/studiob-price-sync", number: 42 });
+  });
+
+  // Negative control (Rule #322): a same-repo route's receipt shares ROUTE_RECEIPT_MARKER
+  // but NEVER embeds a twin pointer, since it never files a twin — this is the exact
+  // disambiguation the recall pass depends on.
+  it("negative control: a plain receipt with no pointer returns null", () => {
+    expect(extractTwinPointer("<!-- needs-human-router:v1 -->\n🧭 Auto-routed to this repo's lane backlog.")).toBeNull();
+  });
+
+  it("negative control: an ordinary comment with no marker at all returns null", () => {
+    expect(extractTwinPointer("just a regular comment, nothing special here")).toBeNull();
+  });
+});
+
+// ───────────────────────────── crossRepoRecallDisposition (codex pass 1 P1) ─────────────────────────────
+
+describe("crossRepoRecallDisposition — post-routing 👎 pass (mirrors needs-human-router-lib.ts's recallDisposition)", () => {
+  function recallBase(overrides: Partial<CrossRepoRecallDecisionInput> = {}): CrossRepoRecallDecisionInput {
+    return { hasCrossRepoRouteReceipt: false, hasAuthorizedDisapproval: false, ...overrides };
+  }
+
+  it("no receipt, no disapproval -> none (negative control)", () => {
+    expect(crossRepoRecallDisposition(recallBase())).toEqual({ kind: "none" });
+  });
+
+  it("receipt present but no authorized 👎 -> none (nothing to recall)", () => {
+    expect(crossRepoRecallDisposition(recallBase({ hasCrossRepoRouteReceipt: true }))).toEqual({ kind: "none" });
+  });
+
+  it("authorized 👎 present but NO cross-repo route receipt -> none (not this sweep's issue to recall — could be a same-repo-routed issue, or nothing routed at all)", () => {
+    expect(crossRepoRecallDisposition(recallBase({ hasAuthorizedDisapproval: true }))).toEqual({ kind: "none" });
+  });
+
+  it("cross-repo route receipt + authorized 👎 -> close-rejected", () => {
+    expect(crossRepoRecallDisposition(recallBase({ hasCrossRepoRouteReceipt: true, hasAuthorizedDisapproval: true }))).toEqual({
+      kind: "close-rejected",
     });
   });
 });
