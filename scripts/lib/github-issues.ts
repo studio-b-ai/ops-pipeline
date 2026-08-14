@@ -127,10 +127,12 @@ export interface CommentReaction {
  * additive for ops-pipeline#66's #398 authorization check: a reaction is origin-signed but WHO
  * reacted still needs checking against org membership before it can act as a brake. Called only
  * for the specific comments the router cares about (the probe comment, its own receipt) — not
- * fanned out over a whole thread.
+ * fanned out over a whole thread. `--paginate` (codex review pass 1 P2, 2026-08-14): a comment
+ * with more reactions than GitHub's default single-page size would otherwise silently drop a
+ * later reactor's 👎 from the authorization check — mirrors `listIssueComments`'s own guard.
  */
 export function getCommentReactions(repo: string, commentId: number): CommentReaction[] {
-  const out = gh(["api", `repos/${repo}/issues/comments/${commentId}/reactions`, "--jq", ".[] | {content, login: .user.login}"]);
+  const out = gh(["api", `repos/${repo}/issues/comments/${commentId}/reactions`, "--paginate", "--jq", ".[] | {content, login: .user.login}"]);
   return out
     .split("\n")
     .filter((line) => line.trim().length > 0)
@@ -139,15 +141,27 @@ export function getCommentReactions(repo: string, commentId: number): CommentRea
 
 /**
  * Whether `login` is a member of `org` — GitHub's membership-check endpoint returns 204 (member)
- * or 404 (not a member / private membership the caller can't see); `gh api` exits non-zero on
- * 404, so that path is treated as "not a member" rather than propagating the error. Rule #398:
- * a 👎 is origin-signed but not authorized on its own — this is the WHO check.
+ * or 404 (genuinely not a member, or private membership the caller can't see). Rule #398: a 👎
+ * is origin-signed but not authorized on its own — this is the WHO check, and it is the router's
+ * ONE brake, so it must fail in the SAFE direction.
+ *
+ * codex review pass 1 P1 (2026-08-14): the original version caught ANY thrown error (network
+ * blip, rate limit, a token missing `read:org`, a transient 5xx) and returned `false` — silently
+ * indistinguishable from a confirmed 404. That direction is backwards: it would let a REAL
+ * org-member's 👎 be treated as absent whenever the membership check merely couldn't complete,
+ * so the router would route/close an issue a human actually tried to reject. Only a stderr
+ * carrying the literal `HTTP 404` (verified live: `gh api orgs/<org>/members/<login>` on a
+ * confirmed non-member prints exactly `gh: Not Found (HTTP 404)` to stderr, exit 1) is treated
+ * as a real "not a member" answer; every other failure shape is unresolved and THROWN — the
+ * caller's run fails loud rather than silently mis-authorizing.
  */
 export function isOrgMember(org: string, login: string): boolean {
   try {
     gh(["api", `orgs/${org}/members/${login}`]);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    const detail = err instanceof Error ? `${(err as NodeJS.ErrnoException & { stderr?: string }).stderr ?? ""}\n${err.message}` : String(err);
+    if (detail.includes("HTTP 404")) return false; // confirmed: not a member
+    throw new Error(`isOrgMember(${org}, ${login}): ambiguous failure, not a confirmed 404 — refusing to treat as "not a member": ${detail.trim()}`);
   }
 }

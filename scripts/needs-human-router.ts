@@ -48,6 +48,7 @@ import {
   hasAuthorizedDisapproval,
   hasHoldReceipt,
   hasRouteReceipt,
+  isTrustedMarkerAuthor,
   recallDisposition,
   routeDisposition,
   summarizeDispositions,
@@ -132,6 +133,18 @@ function holdCrossRepoReceipt(target: string, targetAllowed: boolean): string {
 
 // ───────────────────────────── shared helpers ─────────────────────────────
 
+/**
+ * Narrows to comments authored by the trusted bot identity ONLY (codex review pass 1 P1,
+ * 2026-08-14) — every marker-matching call site in this file (finding the probe comment,
+ * checking for an existing route/hold receipt, finding reaction-bearing candidates) MUST go
+ * through this filter first. Without it, `.includes(marker)` over every comment body regardless
+ * of author lets anyone with issue-comment access forge a fake probe trailer or a fake receipt
+ * marker — see isTrustedMarkerAuthor's doc comment for the full exploit shape.
+ */
+function trustedComments(comments: IssueComment[]): IssueComment[] {
+  return comments.filter((c) => isTrustedMarkerAuthor(c.login));
+}
+
 function findLast(comments: IssueComment[], marker: string): IssueComment | undefined {
   for (let i = comments.length - 1; i >= 0; i--) {
     if (comments[i]?.body.includes(marker)) return comments[i];
@@ -140,13 +153,14 @@ function findLast(comments: IssueComment[], marker: string): IssueComment | unde
 }
 
 /**
- * Rule #398, resolved with real I/O: reactions on every comment the router or probe posted on
- * this issue (the probe comment, a route receipt, a hold receipt — whichever exist), narrowed to
- * org-member 👎s only. Only the DOWNVOTING logins are membership-checked (not every reactor) to
- * keep the API-call count proportional to actual brake attempts, not thread popularity.
+ * Rule #398, resolved with real I/O: reactions on every TRUSTED-AUTHOR comment the router or
+ * probe posted on this issue (the probe comment, a route receipt, a hold receipt — whichever
+ * exist), narrowed to org-member 👎s only. Only the DOWNVOTING logins are membership-checked
+ * (not every reactor) to keep the API-call count proportional to actual brake attempts, not
+ * thread popularity.
  */
 function resolveDisapproval(repo: string, comments: IssueComment[]): boolean {
-  const candidates = comments.filter(
+  const candidates = trustedComments(comments).filter(
     (c) => c.body.includes(PROBE_MARKER) || c.body.includes(ROUTE_RECEIPT_MARKER) || c.body.includes(HOLD_RECEIPT_MARKER),
   );
   const reactors: Reactor[] = [];
@@ -197,9 +211,10 @@ function runMainPass(repo: string, dryRun: boolean, actionedThisRun: Set<number>
 
   for (const issue of issues.sort((a, b) => a.number - b.number)) {
     const comments = listIssueComments(repo, issue.number);
-    const probeComment = findLast(comments, PROBE_MARKER);
-    const routeReceiptPresent = hasRouteReceipt(comments.map((c) => c.body));
-    const holdReceiptPresent = hasHoldReceipt(comments.map((c) => c.body));
+    const trusted = trustedComments(comments);
+    const probeComment = findLast(trusted, PROBE_MARKER);
+    const routeReceiptPresent = hasRouteReceipt(trusted.map((c) => c.body));
+    const holdReceiptPresent = hasHoldReceipt(trusted.map((c) => c.body));
     const disapproval = resolveDisapproval(repo, comments);
 
     const disposition = routeDisposition({
@@ -284,9 +299,13 @@ function logResult(head: string, describe: string, result: "applied" | "would-ap
 // ───────────────────────────── recall pass ─────────────────────────────
 
 /** `gh search issues --reactions ">0"` — deliberately NOT label-scoped: a same-repo route
- * removes `needs-human`, so a label-based query can never find an already-routed issue again. */
+ * removes `needs-human`, so a label-based query can never find an already-routed issue again.
+ * `--limit 1000` (codex review pass 1 P2, 2026-08-14): `gh search issues` defaults to only 30
+ * results — a repo with more than 30 open reaction-bearing issues would silently drop a routed
+ * issue's late 👎 outside that page, exactly the recall pass's own reason for existing. Mirrors
+ * `listIssuesByLabel`'s own limit convention. */
 function searchOpenIssuesWithReactions(repo: string): IssueRow[] {
-  const out = gh(["search", "issues", "--repo", repo, "--reactions", ">0", "--state", "open", "--json", "number,title"]);
+  const out = gh(["search", "issues", "--repo", repo, "--reactions", ">0", "--state", "open", "--json", "number,title", "--limit", "1000"]);
   const parsed = JSON.parse(out) as IssueRow[];
   return Array.isArray(parsed) ? parsed : [];
 }
@@ -303,7 +322,7 @@ function runRecallPass(repo: string, dryRun: boolean, actionedThisRun: Set<numbe
       continue;
     }
     const comments = listIssueComments(repo, issue.number);
-    const hasReceiptMarker = hasAnyRouterReceipt(comments.map((c) => c.body));
+    const hasReceiptMarker = hasAnyRouterReceipt(trustedComments(comments).map((c) => c.body));
     if (!hasReceiptMarker) {
       // Reactions exist but the router never touched this issue — out of scope for recall
       // (an ordinary 👍/👎 on an un-routed, still-labeled issue belongs to the MAIN pass).

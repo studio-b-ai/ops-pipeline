@@ -49,6 +49,26 @@ export function hasAnyRouterReceipt(commentBodies: string[]): boolean {
   return hasRouteReceipt(commentBodies) || hasHoldReceipt(commentBodies);
 }
 
+/**
+ * The GitHub Actions default GITHUB_TOKEN posts issue comments as this exact bot login —
+ * verified live against a real needs-human-probe comment in bolt-wms#1466 (codex review pass
+ * 1, 2026-08-14: forged-marker P1 finding). This is the ONLY author whose comments the router
+ * trusts for marker matching (PROBE_MARKER, ROUTE_RECEIPT_MARKER, HOLD_RECEIPT_MARKER).
+ *
+ * Without this check, a plain `.includes(marker)` scan over EVERY comment body (regardless of
+ * author) lets anyone with issue-comment access on the repo forge a fake probe comment ending
+ * in a crafted `ROUTING: same-repo` / `NEEDS-KEVIN: no` trailer (tricking the router into
+ * removing the `needs-human` label on an issue the real probe never touched) or a fake
+ * ROUTE_RECEIPT_MARKER comment (making the main pass believe an untouched issue was already
+ * routed, silently skipping it forever). Both directions matter: a forged marker must never be
+ * trusted, and a REAL marker from the trusted author must always still be found.
+ */
+export const TRUSTED_MARKER_AUTHOR = "github-actions[bot]";
+
+export function isTrustedMarkerAuthor(login: string): boolean {
+  return login === TRUSTED_MARKER_AUTHOR;
+}
+
 export interface Reactor {
   /** GitHub reaction content: "+1" | "-1" | ... — only "-1" (👎) is ever load-bearing here. */
   content: string;

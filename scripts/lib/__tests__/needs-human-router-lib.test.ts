@@ -5,10 +5,12 @@ import {
   hasHoldReceipt,
   hasRouteReceipt,
   HOLD_RECEIPT_MARKER,
+  isTrustedMarkerAuthor,
   recallDisposition,
   ROUTE_RECEIPT_MARKER,
   routeDisposition,
   summarizeDispositions,
+  TRUSTED_MARKER_AUTHOR,
   type RouterDecisionInput,
 } from "../needs-human-router-lib.js";
 
@@ -48,6 +50,22 @@ describe("hasRouteReceipt / hasHoldReceipt / hasAnyRouterReceipt", () => {
   it("hasAnyRouterReceipt is true for either marker alone", () => {
     expect(hasAnyRouterReceipt([ROUTE_RECEIPT_MARKER])).toBe(true);
     expect(hasAnyRouterReceipt([HOLD_RECEIPT_MARKER])).toBe(true);
+  });
+});
+
+describe("isTrustedMarkerAuthor (codex pass 1 P1 — forged marker comments)", () => {
+  it("true for the real GitHub Actions bot login (verified live against bolt-wms#1466)", () => {
+    expect(isTrustedMarkerAuthor("github-actions[bot]")).toBe(true);
+    expect(isTrustedMarkerAuthor(TRUSTED_MARKER_AUTHOR)).toBe(true);
+  });
+
+  it("false for a human — even the repo owner can't forge a trusted marker", () => {
+    expect(isTrustedMarkerAuthor("kbibelhausen")).toBe(false);
+  });
+
+  it("false for a look-alike login (no fuzzy/substring match)", () => {
+    expect(isTrustedMarkerAuthor("github-actions")).toBe(false);
+    expect(isTrustedMarkerAuthor("github-actions[bot]-fake")).toBe(false);
   });
 });
 
