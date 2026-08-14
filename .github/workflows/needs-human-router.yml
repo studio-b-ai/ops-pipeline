@@ -1,0 +1,73 @@
+name: Needs-human router (reusable)
+
+# ops-pipeline#66 chip A — design comment: CTO seat, 2026-08-14 ~03:45Z, issue #66
+# comment 5289224655. Kevin's ruling: "auto-route immediately" — the reaction is a
+# BRAKE (👎), never a gate. See scripts/needs-human-router.ts for the full design
+# rationale (main pass + recall pass, metering, marker-deduped receipts).
+#
+# This is the REUSABLE half, mirroring needs-human-probe.yml / squasher-automerge.yml's
+# house-pattern architecture: thin per-repo cron callers `uses:` this workflow so the
+# router logic stays central in ops-pipeline. No centralized cross-repo write credential
+# exists (verified in the design comment — no fleet GitHub App is wired), so this
+# workflow runs entirely against the CALLER's own repo, using the CALLER's own ambient
+# GITHUB_TOKEN (`github.token` resolves in the caller's job context on a workflow_call,
+# not ops-pipeline's) — zero new credentials, matching #66's chip-A scope. Cross-repo
+# routing HOLDS in v1 rather than acting (Rule #184: no cross-repo writes).
+#
+# Chip B (5 repos) adds the per-repo hourly cron callers + the 2 probe callers
+# (webhook-router, asthetik-trade-theme) that this workflow depends on for coverage —
+# NOT part of this PR.
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: "owner/repo to route needs-human issues in (the caller's own repo)"
+        required: true
+        type: string
+      dry_run:
+        description: "Real gh reads throughout (including org-membership checks), zero mutations — preview only"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+# One router run at a time per repo: an hourly cron racing a slow prior run (or a
+# manual workflow_dispatch) must not double-process the same issues.
+concurrency:
+  group: needs-human-router-${{ inputs.repo }}
+  cancel-in-progress: false
+
+jobs:
+  route:
+    name: "Route needs-human issues"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ops-pipeline (router scripts live here, not in the caller repo)
+        uses: actions/checkout@v4
+        with:
+          repository: studio-b-ai/ops-pipeline
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Run needs-human router
+        working-directory: scripts
+        env:
+          # The CALLER's own ambient token — this workflow runs IN the caller's repo
+          # context via workflow_call, so github.token here is scoped to inputs.repo
+          # with the issues:write permission the caller's own workflow file grants.
+          # ops-pipeline's own issues:write (declared above) covers this workflow's
+          # OWN checkout/run; the actual issue mutations land in inputs.repo because
+          # every gh call in needs-human-router.ts is explicitly --repo-qualified.
+          GH_TOKEN: ${{ github.token }}
+        run: npx tsx needs-human-router.ts --repo "${{ inputs.repo }}" ${{ inputs.dry_run && '--dry-run' || '' }}
