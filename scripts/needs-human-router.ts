@@ -249,19 +249,23 @@ function logMainOutcome(
   const head = `  #${issue.number} "${issue.title}"`;
 
   switch (disposition.kind) {
-    case "skip-already-routed": {
-      // Self-heal (codex review pass 2 P2, 2026-08-14): this disposition is reached ONLY when
-      // an issue is STILL enumerable via the needs-human label (this main pass's own candidate
-      // set) AND already carries ROUTE_RECEIPT_MARKER. With the comment-then-label ordering
-      // below, that combination can only mean a PRIOR run's removeLabel failed after its
-      // commentIssue already succeeded (a comment succeeding then a label staying is the sole
-      // reachable partial-failure shape). removeLabel is idempotent (a no-op if already gone —
-      // see github-issues.ts), so retrying costs nothing in the normal case and heals the rare
-      // partial-failure one.
-      const result = tryApply(() => removeLabel(repo, issue.number, LABEL), dryRun);
-      logResult(head, "skip-already-routed (label-removal self-heal retry, idempotent)", result);
+    case "skip-already-routed":
+      // No mutation here — deliberately (codex review pass 3 P2, 2026-08-14, reverting pass
+      // 2's self-heal attempt). A prior version retried removeLabel on the theory that "still
+      // labeled + already carries ROUTE_RECEIPT_MARKER" could ONLY mean a partial failure
+      // (comment posted, label removal didn't take). That reasoning missed a real case: a
+      // human (or another workflow) can INTENTIONALLY re-add `needs-human` to an
+      // already-routed issue — the receipt+label combination is NOT exclusive to a partial
+      // failure — and the self-heal would silently strip that deliberate re-escalation right
+      // back off without ever re-evaluating it. The route-same-repo case below already fixed
+      // the stranding risk this was defending against (receipt now posts BEFORE label
+      // removal, so a mid-failure leaves the issue fully re-evaluable, not stranded); the
+      // residual case this reverts to accepting — comment succeeds, removeLabel fails, the
+      // label lingers — just sits visibly in the needs-human backlog re-evaluating to this
+      // same no-op every run, which is a correctness cost far below silently overriding a
+      // human's explicit action.
+      console.log(`${head}  skip-already-routed`);
       return;
-    }
     case "no-probe":
       console.log(`${head}  no-probe (no findings comment yet — nothing to route on)`);
       return;
