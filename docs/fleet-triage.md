@@ -6,7 +6,7 @@
 > queue. Refreshed each CTO sitting from live issue state — a stale row is a
 > bug (#355). Diagnoses link to probe pre-briefs on the issues themselves.
 
-**Refreshed:** 2026-08-12 (repo-arc synthesis sitting) · **Coverage:** bolt-wms · studiob ·
+**Refreshed:** 2026-08-14 (ops#74 sitting) · **Coverage:** bolt-wms · studiob ·
 studiob-price-sync · asthetik-trade-theme · asthetik-portal · ops-pipeline
 
 ## P0 — customer-facing: money or orders wrong/stuck
@@ -51,14 +51,12 @@ studiob-price-sync · asthetik-trade-theme · asthetik-portal · ops-pipeline
 
 ## CTO build queue (the seat's own, in order)
 
-*(refreshed 8/06 — items 1, 2 and the hook-precision pass have shipped)*
+*(refreshed 8/14 — ops#74 shipped + plant-proven; ops#66 is the queue head)*
 
-1. `studiob-cto` agent first-dispatch validation.
-2. **ops#66** — 👍-reaction dispatch for needs-human probe approvals (the approval had no machine on the other end).
-3. **ops#74** — port the proven absent-entity sweep to credential-expiry-monitor.
-4. Recurring repo-hygiene worker (deferred until after #21's classification — deliberate, see #21 comment; the shuttle mis-class in row 17 is a second reason the classifier needs work before it drives anything).
+1. **ops#66** — 👍-reaction dispatch for needs-human probe approvals (the approval had no machine on the other end). First move: its loss ledger (#462) — count approvals that actually sat unconsumed before sizing the machinery.
+2. Recurring repo-hygiene worker (deferred until after #21's classification — deliberate, see #21 comment; the shuttle mis-class in row 17 is a second reason the classifier needs work before it drives anything).
 
-**Shipped from this queue:** squasher-health widening to 4 callers · ops#37 orphan sweep · ops#47 + ops#49 hook-precision pass · **ops#51 both halves (guard 8/06 + config-plane versioning 8/12)** · **ops#71 both legs, designed by the studiob-cto agent (first-dispatch validation PASS) + plant-PROVEN in production 8/13 (11 runs, all controls held)**.
+**Shipped from this queue:** squasher-health widening to 4 callers · ops#37 orphan sweep · ops#47 + ops#49 hook-precision pass · **ops#51 both halves (guard 8/06 + config-plane versioning 8/12)** · **ops#71 both legs, designed by the studiob-cto agent (first-dispatch validation PASS) + plant-PROVEN in production 8/13 (11 runs, all controls held)** · **studiob-cto agent first-dispatch validation (rode ops#71)** · **ops#74 absent-entity sweep ported to credential-expiry-monitor + plant-PROVEN live 8/14 (PR #85; plant #86 closed "no longer monitored", live WARN-7 controls #56/#57 held) — all three monitors now carry the sweep, standing ahead of the 8/20 rotation**.
 
 ## Standing watches (armed, idle until their signal)
 
