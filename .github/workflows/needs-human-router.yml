@@ -69,5 +69,15 @@ jobs:
           # ops-pipeline's own issues:write (declared above) covers this workflow's
           # OWN checkout/run; the actual issue mutations land in inputs.repo because
           # every gh call in needs-human-router.ts is explicitly --repo-qualified.
+          #
+          # UNVERIFIED (codex review pass 3, 2026-08-14 — see lib/github-issues.ts's
+          # isOrgMember doc comment for the full writeup): this GITHUB_TOKEN also gates
+          # the 👎-authorization org-membership check, and whether a repo-scoped
+          # installation token can see PRIVATE org membership for an arbitrary login is
+          # genuinely uncertain without a live fire. The design comment's own plant
+          # ladder (issue #66: "second planted issue with org-member 👎 -> close-as-
+          # rejected") is the first real signal on this — if that planted 👎 does NOT
+          # get honored, the fix is a Kevin-gated read:org-scoped PAT passed as a
+          # secret here, not more client-side logic.
           GH_TOKEN: ${{ github.token }}
         run: npx tsx needs-human-router.ts --repo "${{ inputs.repo }}" ${{ inputs.dry_run && '--dry-run' || '' }}

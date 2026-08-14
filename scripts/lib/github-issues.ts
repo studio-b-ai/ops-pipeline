@@ -154,6 +154,28 @@ export function getCommentReactions(repo: string, commentId: number): CommentRea
  * confirmed non-member prints exactly `gh: Not Found (HTTP 404)` to stderr, exit 1) is treated
  * as a real "not a member" answer; every other failure shape is unresolved and THROWN — the
  * caller's run fails loud rather than silently mis-authorizing.
+ *
+ * ⚠️ FLAGGED, NOT RESOLVED (codex review pass 3, 2026-08-14 — Rule #50/#218, needs LIVE
+ * verification, not more guessing): GitHub's docs for this exact endpoint note that a 404 can
+ * ALSO mean "the requester lacks visibility into this membership" (e.g. a private membership),
+ * not only "genuinely not a member" — those two cases are NOT distinguishable from the response
+ * alone. All live testing so far (this file's own verification script, this session) ran under
+ * a real authenticated `gh` CLI session (an actual org owner), which reliably tells the two
+ * apart. In PRODUCTION this function runs via each caller repo's own ambient `GITHUB_TOKEN` — a
+ * repo-scoped installation token, NOT a human's personal token — and `GITHUB_TOKEN`'s available
+ * `permissions:` categories (contents, issues, etc.) do not include an org-membership scope at
+ * all, so whether it can see PRIVATE org membership for an arbitrary login is genuinely
+ * uncertain without firing the real deployed workflow. If it cannot, a real member's 👎 could
+ * still 404 and be (correctly, per the logic above) read as "not a member" — the brake would
+ * fail silently in exactly the direction this fix was trying to close, just one layer up, at
+ * the API-visibility layer instead of the error-handling layer. This is EXPLICITLY a live-fire
+ * question for the plant ladder the design comment calls out (issue #66, "Plant ladder in
+ * bolt-wms after both merge... second planted issue with org-member 👎 → close-as-rejected"):
+ * that planted-👎 test is the first real signal on whether GITHUB_TOKEN's org-membership
+ * visibility holds in a real caller repo. If it fails there, the fix is NOT more client-side
+ * logic (there is no way to disambiguate the two 404 causes from this endpoint's response) — it
+ * is switching the requester identity, e.g. a Kevin-gated fine-grained PAT with `read:org`
+ * passed as a secret to the reusable workflow.
  */
 export function isOrgMember(org: string, login: string): boolean {
   try {
