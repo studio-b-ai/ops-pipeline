@@ -6,7 +6,7 @@
 > queue. Refreshed each CTO sitting from live issue state — a stale row is a
 > bug (#355). Diagnoses link to probe pre-briefs on the issues themselves.
 
-**Refreshed:** 2026-08-14 (ops#74 sitting) · **Coverage:** bolt-wms · studiob ·
+**Refreshed:** 2026-08-14 (Batch 7 sitting) · **Coverage:** bolt-wms · studiob ·
 studiob-price-sync · asthetik-trade-theme · asthetik-portal · ops-pipeline
 
 ## P0 — customer-facing: money or orders wrong/stuck
@@ -44,6 +44,8 @@ studiob-price-sync · asthetik-trade-theme · asthetik-portal · ops-pipeline
 | 16c | ~~ops-pipeline#51~~ **CLOSED 8/12** — both halves shipped: guard (8/06) + default-deny ~/.claude config repo w/ auto-checkpoint (8/12, live-fired through the real hook path) | Receipts on the issue | done |
 | 17 | ~~ops-pipeline#21~~ **CLOSED 8/12** — Kevin's words landed + executed same day (16 archives, 7 Railway retirements, qa-runner inline, invest DARK); map FINAL w/ Lane column (ops#67); spelling-split rename executed (ops#68); wasala transferred | done (Batch 7 → ops#61) |
 | 18 | ~~ops-pipeline#12~~ **CLOSED honestly 8/13** — per-volume accepted-state (85%, review 11/30) shipped + plant-proven (ops#71); alert returns on breach or expiry | done |
+| 19 | ~~ops-pipeline#61~~ **CLOSED 8/14** — Batch 7 executed on Kevin's word (4 idle agent services retired + 16 dead mesh vars purged + acuconfig/acureport archived as IP + acuops.com metrics cron */5→hourly); acuops-hub proven LIVE (license gate traffic same-day), acudev proven LIVE (certification cron + community monitor) | done |
+| 20 | doc-generator#2 broken-silent since 7/24 (`getaddrinfo redis.railway.internal`, zero logs since) — surfaced by the Batch 7 sweep; owner decides fix-or-retire (#366) | doc-gen/COO lane |
 
 ## Parked (deliberate, with resume runbooks)
 
@@ -51,12 +53,11 @@ studiob-price-sync · asthetik-trade-theme · asthetik-portal · ops-pipeline
 
 ## CTO build queue (the seat's own, in order)
 
-*(refreshed 8/14 late — ops#66 shipped whole; ops#61 Batch 7 is the queue head, own sitting)*
+*(refreshed 8/14 late-2 — Batch 7 executed + closed; the hygiene worker's deferral condition is now resolved)*
 
-1. **ops#61** — Batch 7: acu* family consolidation pass (18 repos). Own sitting.
-2. Recurring repo-hygiene worker (deferred until after #21's classification — deliberate, see #21 comment; the shuttle mis-class in row 17 is a second reason the classifier needs work before it drives anything).
+1. **Recurring repo-hygiene worker** — UNBLOCKED (its deferral was "after #21's classification", complete as of Batch 7). Design note carried from row 17: the classifier mis-classed shuttle once, so the worker FLAGS drift for the board, never auto-acts on classification alone (instrument-first, the Batch 7 law).
 
-**Shipped from this queue:** squasher-health widening to 4 callers · ops#37 orphan sweep · ops#47 + ops#49 hook-precision pass · **ops#51 both halves (guard 8/06 + config-plane versioning 8/12)** · **ops#71 both legs, designed by the studiob-cto agent (first-dispatch validation PASS) + plant-PROVEN in production 8/13 (11 runs, all controls held)** · **studiob-cto agent first-dispatch validation (rode ops#71)** · **ops#74 absent-entity sweep ported to credential-expiry-monitor + plant-PROVEN live 8/14 (PR #85; plant #86 closed "no longer monitored", live WARN-7 controls #56/#57 held) — all three monitors now carry the sweep, standing ahead of the 8/20 rotation** · **ops#88 cross-repo sweep MERGED 8/14 PM (fleet App `studiob-fleet-bot` Kevin+seat co-driven; PR #97, 462/462, codex ×4; App-token mint first-fired + bot login API-verified; twin-filing awaits first ORGANIC cross-repo case — :47 cron standing; probe plant-resistance finding → CoS)** · **wr#567 closed same sitting (key live, 5 issues probed + drained)** · **ops#66 needs-human AUTOPILOT shipped whole 8/14 (Kevin: "auto-route immediately" — reaction is a brake): reusable router (ops#89) + 5 staggered hourly cron callers + wr/trade-theme probe callers + brake fix (ops#91, the org-visibility P1 found→fixed→re-proven live in one sitting); plant-proven both directions (route #1656 / brake #1657); bolt drained 10/10 first firing (pool 10→4). Kevin-gates: ops#88 fleet App (cross-repo filing) · wr#567 probe key**.
+**Shipped from this queue:** squasher-health widening to 4 callers · ops#37 orphan sweep · ops#47 + ops#49 hook-precision pass · **ops#51 both halves (guard 8/06 + config-plane versioning 8/12)** · **ops#71 both legs, designed by the studiob-cto agent (first-dispatch validation PASS) + plant-PROVEN in production 8/13 (11 runs, all controls held)** · **studiob-cto agent first-dispatch validation (rode ops#71)** · **ops#74 absent-entity sweep ported to credential-expiry-monitor + plant-PROVEN live 8/14 (PR #85; plant #86 closed "no longer monitored", live WARN-7 controls #56/#57 held) — all three monitors now carry the sweep, standing ahead of the 8/20 rotation** · **ops#88 cross-repo sweep MERGED 8/14 PM (fleet App `studiob-fleet-bot` Kevin+seat co-driven; PR #97, 462/462, codex ×4; App-token mint first-fired + bot login API-verified; twin-filing awaits first ORGANIC cross-repo case — :47 cron standing; probe plant-resistance finding → CoS)** · **wr#567 closed same sitting (key live, 5 issues probed + drained)** · **ops#66 needs-human AUTOPILOT shipped whole 8/14 (Kevin: "auto-route immediately" — reaction is a brake): reusable router (ops#89) + 5 staggered hourly cron callers + wr/trade-theme probe callers + brake fix (ops#91, the org-visibility P1 found→fixed→re-proven live in one sitting); plant-proven both directions (route #1656 / brake #1657); bolt drained 10/10 first firing (pool 10→4). Kevin-gates: ops#88 fleet App (cross-repo filing) · wr#567 probe key** · **ops#61 Batch 7 executed whole 8/14 eve (Kevin: full package + hourly): instrument sweep over the 18 acu* repos (traffic/log receipts, zero naming calls) → acuops-hub + acudev proven LIVE · acusync/acuconfig/acudocs/acureport proven instrument-dead and RETIRED (name-echo-verified deletes; cascade falls back to acudev by construction; wr's ACUDOCS/ACUREPORT URLs were already pointing at nonexistent domains — nobody noticed, confirming dormancy) · 16 dead mesh vars purged (8 env-shared + 8 wr) · acuconfig/acureport archived as IP w/ pointer descriptions · acuops.com metrics cron */5→hourly (acuops-website#33, `6af2c01b`) · doc-generator#2 filed (broken-silent since 7/24)**.
 
 ## Standing watches (armed, idle until their signal)
 
