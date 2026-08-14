@@ -83,3 +83,18 @@ jobs:
 
       - name: Tests
         run: npm test
+
+  cfo_brief_regression:
+    name: "CFO brief — July classification regression"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The classifier ships as a verbatim copy of the seat-proven ruleset
+      # (penny-exact on July 2026, codex-hardened). This gate asserts the
+      # committed July fixture still classifies to the EXACT adopted model-v2
+      # totals — any change that moves a penny of the solved month fails here.
+      # Python stdlib only; not a required context on main (the Scripts job
+      # holds that role) but red here blocks merge by fleet convention.
+      - name: "July fixture must reproduce the adopted totals"
+        run: python3 scripts/cfo-brief/test_july_regression.py
