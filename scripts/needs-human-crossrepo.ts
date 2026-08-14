@@ -82,6 +82,22 @@
  * REAL close failure on a CONFIRMED-open issue now propagates loudly instead of being
  * silently read as "probably already closed."
  *
+ * Codex review pass 4 (FINAL, hard ceiling) folded a P1 + a P2, both defense-in-depth
+ * on pass 3's own fixes. The P1 ("Propagate inconclusive close state checks") caught that
+ * closeIfOpen's `"check-failed"` result — the state CHECK itself failing, as opposed to
+ * the close call failing — was being silently swallowed one layer up: a `void`-returning
+ * closeIfOpen let a caller march on to the NEXT close (and log success) even though the
+ * FIRST issue's actual state was never confirmed, the exact false-success shape pass 3
+ * closed at the close-layer, just relocated to the check-layer. Fixed by making
+ * closeIfOpen return a discriminated `CloseIfOpenResult` every call site now explicitly
+ * branches on, aborting the rest of the sequence on `"check-failed"` rather than
+ * proceeding. The P2 ("Enforce the allowlist before recall closes twins") is defense-in-
+ * depth for the recall pass specifically: under normal operation a twin pointer's target
+ * is always allowlist-valid (it's built from an already-validated disposition.target),
+ * but the pointer is re-PARSED from comment text on a later run by different code — the
+ * recall pass now explicitly re-checks `ALLOWLIST.has(pointer.target)` before acting,
+ * matching the guard the main pass and orphan-cleanup pass already had.
+ *
  * Metering (#331): unlike the same-repo router's ACTION_CAP over ALL mutations, this
  * script caps only ISSUE-CREATIONS (filing a NEW twin in a repo other than the one this
  * process is even running against is the one genuinely expensive, higher-blast-radius
@@ -500,8 +516,23 @@ function applyDisposition(ctx: {
       // origin OPEN and re-evaluable next run — safely retryable, and closeIfOpen (codex
       // review pass 3 P2) makes re-closing an already-closed twin on that retry an
       // explicit, verified no-op rather than a guessed one.
-      if (twin) closeIfOpen(disposition.target, twin.number, twinRecallCloseComment(ownRepo, issue.number));
-      closeIfOpen(ownRepo, issue.number, crossRepoRejectReceipt(disposition.target, twin));
+      //
+      // Both results are checked for "check-failed" (codex review pass 4 P1) — an
+      // inconclusive STATE CHECK is not a success, and must abort the rest of this
+      // sequence rather than let the caller march on and log/claim a close that was never
+      // actually confirmed.
+      if (twin) {
+        const twinResult = closeIfOpen(disposition.target, twin.number, twinRecallCloseComment(ownRepo, issue.number));
+        if (twinResult === "check-failed") {
+          console.log(`${head}  SWEEP-REJECT -> ABORTED: couldn't confirm the twin's current state — origin left untouched, retried next run`);
+          return;
+        }
+      }
+      const originResult = closeIfOpen(ownRepo, issue.number, crossRepoRejectReceipt(disposition.target, twin));
+      if (originResult === "check-failed") {
+        console.log(`${head}  SWEEP-REJECT -> twin handled, but couldn't confirm the ORIGIN's current state — retried next run`);
+        return;
+      }
       console.log(`${head}  SWEEP-REJECT -> ${describe} [APPLIED]`);
       return;
     }
@@ -661,14 +692,34 @@ function checkIssueOpen(repo: string, number: number): "open" | "closed" | "chec
   }
 }
 
-function closeIfOpen(repo: string, number: number, comment: string): void {
+/**
+ * Codex review pass 4 P1 ("Propagate inconclusive close state checks"): the pass-3 fix
+ * closed the FAILED-close swallow but left an identical false-success gap one layer up —
+ * a `void`-returning closeIfOpen let `check-failed` (the state check itself failing, e.g.
+ * a rate limit or transient network error on the READ) return silently, indistinguishable
+ * from a confirmed success to every caller. A two-close sequence (twin then origin) would
+ * still march on to close the origin and log "[APPLIED]" even though the twin's actual
+ * state was NEVER confirmed — the exact false Rule #412 claim ("the twin was closed
+ * too") this whole redesign exists to prevent, just relocated to the check layer instead
+ * of the close layer.
+ *
+ * Fixed by making the result impossible to ignore: `closeIfOpen` now returns a
+ * discriminated `CloseIfOpenResult` instead of `void`, and every call site (below, in the
+ * main pass, the recall pass, and the orphan-cleanup pass) explicitly branches on
+ * `"check-failed"` — aborting the REST of that issue's close sequence and skipping any
+ * receipt/log line that would otherwise imply success, rather than silently continuing.
+ */
+type CloseIfOpenResult = "closed" | "already-closed" | "check-failed";
+
+function closeIfOpen(repo: string, number: number, comment: string): CloseIfOpenResult {
   const state = checkIssueOpen(repo, number);
   if (state === "closed") {
     console.log(`    [info] ${repo}#${number} is already closed — no action needed`);
-    return;
+    return "already-closed";
   }
-  if (state === "check-failed") return; // already logged by checkIssueOpen
+  if (state === "check-failed") return "check-failed"; // already logged by checkIssueOpen
   closeIssue(repo, number, comment); // confirmed open — a failure HERE is real and propagates loudly, never swallowed
+  return "closed";
 }
 
 /**
@@ -705,6 +756,26 @@ function runRecallPass(repo: string, dryRun: boolean, isAuthorizedReactor: (logi
     const pointer = routeComment ? extractTwinPointer(routeComment.body) : null;
     if (!pointer) continue; // search false-positive (marker text quoted/discussed elsewhere) or a same-repo-router receipt — not this sweep's to act on
 
+    // Defense-in-depth (codex review pass 4 P2 — "Enforce the allowlist before recall
+    // closes twins"): under normal operation `pointer.target` is ALWAYS allowlist-valid,
+    // since it's built from a `disposition.target` the pure lib already validated before
+    // this sweep ever posted the pointer (crossRepoDisposition's own allowlist gate). But
+    // this pointer is PARSED BACK OUT of comment text later, by a DIFFERENT code path, on
+    // a DIFFERENT run — nothing here structurally prevents a future bug, or a future
+    // COVERED_REPOS edit that drops a repo an OLD pointer still names, from reaching this
+    // point with an off-allowlist target. The org-wide fleet App token can technically
+    // write anywhere in the org, so this check is the one thing standing between "a
+    // malformed trusted receipt" and a cross-repo mutation outside this sweep's remit —
+    // the SAME guard the main pass and orphan-cleanup pass already apply before ever
+    // computing or acting on a target.
+    if (!ALLOWLIST.has(pointer.target)) {
+      console.log(
+        `  [recall:${shortRepoName(repo)}] #${issue.number}  ⚠️  pointer target ${pointer.target} is OFF the allowlist — refusing to act (should be structurally unreachable; investigate)`,
+      );
+      dispositions.push({ kind: "skip" });
+      continue;
+    }
+
     const disapproval = resolveDisapproval(repo, comments, isAuthorizedReactor);
     const recallResult = crossRepoRecallDisposition({ hasCrossRepoRouteReceipt: true, hasAuthorizedDisapproval: disapproval });
     if (recallResult.kind === "none") {
@@ -718,8 +789,21 @@ function runRecallPass(repo: string, dryRun: boolean, isAuthorizedReactor: (logi
       dispositions.push({ kind: "close-rejected", target: pointer.target, twinExists: true });
       continue;
     }
-    closeIfOpen(pointer.target, pointer.number, twinRecallCloseComment(repo, issue.number));
-    closeIfOpen(repo, issue.number, crossRepoRejectReceipt(pointer.target, { number: pointer.number, url: issueUrl(pointer.target, pointer.number) }));
+    // Both results checked for "check-failed" (codex review pass 4 P1) — see closeIfOpen's
+    // doc comment: an inconclusive state check must abort the rest of the sequence, never
+    // be read as permission to proceed.
+    const twinResult = closeIfOpen(pointer.target, pointer.number, twinRecallCloseComment(repo, issue.number));
+    if (twinResult === "check-failed") {
+      console.log(`${head}  SWEEP-REJECT (recall) -> ABORTED: couldn't confirm the twin's current state — retried next run`);
+      dispositions.push({ kind: "skip" });
+      continue;
+    }
+    const originResult = closeIfOpen(repo, issue.number, crossRepoRejectReceipt(pointer.target, { number: pointer.number, url: issueUrl(pointer.target, pointer.number) }));
+    if (originResult === "check-failed") {
+      console.log(`${head}  SWEEP-REJECT (recall) -> twin handled, but couldn't confirm the ORIGIN's current state — retried next run`);
+      dispositions.push({ kind: "skip" });
+      continue;
+    }
     console.log(`${head}  SWEEP-REJECT (recall) -> closed origin + twin ${shortRepoName(pointer.target)}#${pointer.number} (or already closed) [APPLIED]`);
     dispositions.push({ kind: "close-rejected", target: pointer.target, twinExists: true });
   }
@@ -786,7 +870,13 @@ function runOrphanTwinCleanup(repo: string, dryRun: boolean, isAuthorizedReactor
       handled++;
       continue;
     }
-    closeIfOpen(parsed.target, lookup.twin.number, orphanedTwinCloseComment(repo, issue.number));
+    // Checked for "check-failed" (codex review pass 4 P1) — see closeIfOpen's doc
+    // comment: an inconclusive state check is never permission to count this as handled.
+    const result = closeIfOpen(parsed.target, lookup.twin.number, orphanedTwinCloseComment(repo, issue.number));
+    if (result === "check-failed") {
+      console.log(`${head}  ORPHAN-CLEANUP -> ABORTED: couldn't confirm the twin's current state — retried next run`);
+      continue;
+    }
     console.log(`${head}  ORPHAN-CLEANUP -> closed orphaned twin ${shortRepoName(parsed.target)}#${lookup.twin.number} [APPLIED]`);
     handled++;
   }
