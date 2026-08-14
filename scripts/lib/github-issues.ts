@@ -82,3 +82,72 @@ export function commentIssue(repo: string, num: number, comment: string): void {
 export function retitleIssue(repo: string, num: number, title: string): void {
   gh(["issue", "edit", String(num), "--repo", repo, "--title", title]);
 }
+
+/**
+ * Remove a label from an issue — additive for ops-pipeline#66 (the needs-human router): a
+ * same-repo auto-route REMOVES `needs-human` so the issue re-enters the owning lane's ordinary
+ * (unlabeled-issue) re-entry folds. `gh issue edit --remove-label` is idempotent — removing an
+ * absent label is a no-op, not an error — so callers never need to pre-check membership.
+ */
+export function removeLabel(repo: string, num: number, label: string): void {
+  gh(["issue", "edit", String(num), "--repo", repo, "--remove-label", label]);
+}
+
+export interface IssueComment {
+  /** Numeric REST id — NOT the GraphQL node id `gh issue view --json comments` returns; this is
+   * the id `GET /repos/{repo}/issues/comments/{id}/reactions` requires. */
+  id: number;
+  body: string;
+  login: string;
+}
+
+/**
+ * All comments on an issue via the REST list endpoint (numeric `id`s, unlike `gh issue view
+ * --json comments`'s GraphQL node ids) — additive for ops-pipeline#66, which needs the numeric
+ * id to fetch per-comment reactions (see `getCommentReactions` below). `--paginate` follows
+ * Link headers so a long thread's later comments are never silently dropped (Rule #331).
+ */
+export function listIssueComments(repo: string, issueNumber: number): IssueComment[] {
+  const out = gh(["api", `repos/${repo}/issues/${issueNumber}/comments`, "--paginate", "--jq", ".[] | {id, body, login: .user.login}"]);
+  // `--paginate` concatenates one JSON value per page on its own line, not a single array.
+  return out
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as IssueComment);
+}
+
+export interface CommentReaction {
+  /** GitHub reaction content: "+1" | "-1" | "laugh" | "confused" | "heart" | "hooray" | "rocket" | "eyes". */
+  content: string;
+  login: string;
+}
+
+/**
+ * Per-user reactions on ONE issue comment (numeric comment id, not the GraphQL node id) —
+ * additive for ops-pipeline#66's #398 authorization check: a reaction is origin-signed but WHO
+ * reacted still needs checking against org membership before it can act as a brake. Called only
+ * for the specific comments the router cares about (the probe comment, its own receipt) — not
+ * fanned out over a whole thread.
+ */
+export function getCommentReactions(repo: string, commentId: number): CommentReaction[] {
+  const out = gh(["api", `repos/${repo}/issues/comments/${commentId}/reactions`, "--jq", ".[] | {content, login: .user.login}"]);
+  return out
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as CommentReaction);
+}
+
+/**
+ * Whether `login` is a member of `org` — GitHub's membership-check endpoint returns 204 (member)
+ * or 404 (not a member / private membership the caller can't see); `gh api` exits non-zero on
+ * 404, so that path is treated as "not a member" rather than propagating the error. Rule #398:
+ * a 👎 is origin-signed but not authorized on its own — this is the WHO check.
+ */
+export function isOrgMember(org: string, login: string): boolean {
+  try {
+    gh(["api", `orgs/${org}/members/${login}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
