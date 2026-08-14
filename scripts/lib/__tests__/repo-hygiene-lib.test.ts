@@ -380,6 +380,25 @@ describe("renderDriftIssueBody", () => {
     expect(body).not.toContain("rulesVersion mismatch");
   });
 
+  // Live-verified 2026-08-14: studiob-fleet-bot's org installation carries only
+  // issues:write + metadata:read (no Contents:read), so the commits endpoint 403s for
+  // every repo today. Rule #464 — a finding class that can never fire must say so.
+  it("does NOT print the bot-churn systemic-failure note when unset (negative control)", () => {
+    const body = renderDriftIssueBody([], meta);
+    expect(body).not.toContain("structurally degraded");
+  });
+
+  it("prints a loud bot-churn systemic-failure note when set, naming the Contents:read gap", () => {
+    const body = renderDriftIssueBody([], {
+      ...meta,
+      botChurnSystemicFailure: { attempted: 7, firstError: "HTTP 403: Resource not accessible by integration" },
+    });
+    expect(body).toContain("structurally degraded");
+    expect(body).toContain("Contents");
+    expect(body).toContain("7 repo(s)");
+    expect(body).toContain("HTTP 403: Resource not accessible by integration");
+  });
+
   it("prints a loud rulesVersion mismatch note when the baseline's version differs (Rule #381)", () => {
     const body = renderDriftIssueBody([], { ...meta, baselineRulesVersion: 999 });
     expect(body).toContain("rulesVersion mismatch");

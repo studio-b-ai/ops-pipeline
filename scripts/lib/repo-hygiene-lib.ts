@@ -270,6 +270,20 @@ export interface DriftMeta {
   baselineSeededAt: string;
   /** ISO 8601 — when THIS run generated the body (the worker's `new Date()`, passed in so this function stays pure). */
   generatedAt: string;
+  /**
+   * Set by the caller when the bot-churn-freshness leg's commit-history fetch FAILED FOR
+   * EVERY repo it attempted this run (as opposed to a handful of individually flaky repos)
+   * — live-verified 2026-08-14: the fleet App (`studiob-fleet-bot`) is installed with only
+   * `issues:write` + `metadata:read`; GitHub's own docs list `GET
+   * /repos/{owner}/{repo}/commits` as requiring the **Contents** permission (read), which
+   * this installation does not have, so every commit fetch 403s today. Rule #464 ("a
+   * guard's first live firing is part of its ship, not its follow-up"): a finding class
+   * that can structurally never fire must say so where a human will see it, not sit
+   * silently at 0 looking identical to "no drift this week". `undefined`/omitted when
+   * nothing was attempted or at least one fetch succeeded (the ordinary, expected state
+   * once Contents:read is granted).
+   */
+  botChurnSystemicFailure?: { attempted: number; firstError: string };
 }
 
 const FINDING_CLASS_LABELS: Record<FindingClass, string> = {
@@ -301,6 +315,13 @@ export function renderDriftIssueBody(findings: Finding[], meta: DriftMeta): stri
     lines.push("");
     lines.push(
       `⚠️ **Baseline rulesVersion mismatch (Rule #381)**: the baseline file carries rulesVersion ${meta.baselineRulesVersion}, this worker runs BASELINE_RULES_VERSION ${BASELINE_RULES_VERSION}. Treat this run as a FULL re-evaluation — every finding below is a complete re-check against current live state, not an incremental diff since the baseline's rule vocabulary was last current.`,
+    );
+  }
+
+  if (meta.botChurnSystemicFailure) {
+    lines.push("");
+    lines.push(
+      `⚠️ **bot-churn-freshness is structurally degraded this run (Rule #464)**: commit-history fetch failed for all ${meta.botChurnSystemicFailure.attempted} repo(s) it attempted — this reads as a permission gap, not per-repo flakiness. \`GET /repos/{owner}/{repo}/commits\` requires the App's **Contents** permission (read); the fleet App's org installation currently grants only \`issues:write\` + \`metadata:read\`. This class will read 0 findings until Contents:read is granted to \`studiob-fleet-bot\`'s installation (org Settings → GitHub Apps → studiob-fleet-bot → org-owner UI, no API path). First error observed: ${meta.botChurnSystemicFailure.firstError}`,
     );
   }
 
