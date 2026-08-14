@@ -168,34 +168,45 @@ export function parseProbeRouting(commentBody: string): ProbeRouting | null {
 }
 
 /**
- * True when the tail of a comment body LOOKS LIKE an attempted machine trailer (the literal
- * `ROUTING:` or `NEEDS-KEVIN:` substring appears in the same last-two-non-blank-line window
- * parseProbeRouting inspects) even though it failed to parse cleanly.
+ * True when the region AFTER the diagnosis's LAST markdown "## " heading contains the literal
+ * `ROUTING:` or `NEEDS-KEVIN:` substring, even though the trailer failed to parse cleanly.
  *
  * Distinguishing this from a genuinely legacy (pre-trailer) comment matters (codex review pass
  * 2 P2, ops-pipeline#66, 2026-08-14): `parseProbeRouting` returns `null` for BOTH cases
  * identically, but only the genuinely-legacy case is safe to default to same-repo (the design
  * comment's own documented blessing for the standing ~21 pre-trailer probes). A comment that
- * clearly TRIED to emit a trailer and got it wrong — extra trailing text, a truncated second
- * line, a corrupted routing target — means the model attempted to signal something (possibly
+ * clearly TRIED to emit a trailer and got it wrong — extra trailing text, a corrupted routing
+ * line, a malformed cross-repo target — means the model attempted to signal something (possibly
  * `NEEDS-KEVIN: yes`, or a cross-repo target) and the signal was lost to a parsing failure;
  * silently defaulting THAT to the lowest-scrutiny same-repo path would mean trusting a broken
  * channel instead of routing it to a human. The router lib (needs-human-router-lib.ts) uses
  * this to route a malformed-attempt comment to `hold-needs-kevin` instead.
  *
- * Deliberately scoped to the SAME tail window as parseProbeRouting, not a body-wide search: a
- * whole-body substring search for `NEEDS-KEVIN:` would false-positive on prose the model writes
- * under the diagnosis's own pre-existing "## NEEDS-KEVIN" heading (see buildSystemPrompt) if it
- * happens to restate the verdict with a colon — that heading sits well before the tail in any
- * well-formed diagnosis, so the tail-only window naturally excludes it.
+ * v1 of this function scoped to the last TWO non-blank lines, matching parseProbeRouting's own
+ * strict window — codex review pass 3 (2026-08-14) found the gap: a well-formed trailer
+ * followed by TWO OR MORE stray closing lines (e.g. a model ignoring "nothing after it" and
+ * adding a sign-off) pushes the actual `ROUTING:`/`NEEDS-KEVIN:` text outside that fixed
+ * 2-line window, so the malformed attempt was missed and silently defaulted to same-repo —
+ * exactly the case this function exists to catch.
+ *
+ * Fixed here by keying off structure instead of a fixed line count: everything strictly AFTER
+ * the LAST "## "-prefixed heading is the tail region a trailer (or a botched attempt at one)
+ * can live in — that region is unbounded in length, so any number of stray trailing lines after
+ * a real or attempted trailer still gets scanned. This also stays immune to the original
+ * false-positive concern (the diagnosis's own pre-existing "## NEEDS-KEVIN" prose heading)
+ * WITHOUT needing to guess a safe line count: buildSystemPrompt's mandated section order always
+ * places "## Confidence + what would falsify this" AFTER "## NEEDS-KEVIN", so "## NEEDS-KEVIN"
+ * can never itself be the LAST heading in a well-formed diagnosis — its own prose is therefore
+ * always excluded from the scanned region, regardless of how short the Confidence section is.
  */
 export function looksLikeAttemptedTrailer(commentBody: string): boolean {
   const deBolded = commentBody.replace(/\*\*/g, "");
-  const nonEmptyLines = deBolded
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-  const tail = nonEmptyLines.slice(-2);
+  const lines = deBolded.split("\n").map((l) => l.trim());
+  let lastHeadingIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i]?.startsWith("## ")) lastHeadingIdx = i;
+  }
+  const tail = lines.slice(lastHeadingIdx + 1).filter((l) => l.length > 0);
   return tail.some((l) => l.includes("ROUTING:") || l.includes("NEEDS-KEVIN:"));
 }
 

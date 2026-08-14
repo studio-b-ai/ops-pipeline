@@ -244,4 +244,25 @@ describe("looksLikeAttemptedTrailer (codex pass 2 P2 — malformed vs genuinely-
     ].join("\n");
     expect(looksLikeAttemptedTrailer(body)).toBe(false);
   });
+
+  // codex review pass 3 (2026-08-14): a well-formed trailer followed by MULTIPLE stray
+  // closing lines used to escape the old fixed 2-line window; the heading-boundary rewrite
+  // fixes it by scanning everything after the LAST "## " heading, unbounded in length.
+  it("true when a well-formed trailer is followed by MULTIPLE stray sign-off lines (escaped the old 2-line window)", () => {
+    const body = [
+      "## Confidence + what would falsify this",
+      "high",
+      "ROUTING: same-repo",
+      "NEEDS-KEVIN: no",
+      "Thanks for reading!",
+      "Let me know if anything changes.",
+    ].join("\n");
+    expect(parseProbeRouting(body)).toBeNull(); // confirm it's actually a null-parse case
+    expect(looksLikeAttemptedTrailer(body)).toBe(true);
+  });
+
+  it("still false for a genuinely legacy comment even with a terse one-line Confidence section (heading-boundary reasoning holds regardless of section length)", () => {
+    const body = ["## Culprit hypothesis", "x", "## NEEDS-KEVIN", "no", "## Confidence + what would falsify this", "n/a"].join("\n");
+    expect(looksLikeAttemptedTrailer(body)).toBe(false);
+  });
 });
