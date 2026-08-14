@@ -78,10 +78,29 @@ function parseArgs(argv: string[]): { repo: string; dryRun: boolean } {
   return { repo, dryRun };
 }
 
-// ───────────────────────────── org-membership cache (per run) ─────────────────────────────
+// ───────────────────────────── reactor authorization (per run) ─────────────────────────────
+
+/**
+ * Plant-ladder finding (bolt-wms run 31780796895, 2026-08-14 — the live resolution of the
+ * codex pass-3 P1 flagged in lib/github-issues.ts's isOrgMember): kbibelhausen's org
+ * membership is PRIVATE, and the workflow's repo-scoped GITHUB_TOKEN receives a clean
+ * HTTP 404 from `orgs/{org}/members/{login}` for private memberships — indistinguishable
+ * from genuine non-membership, exactly the feared direction. The planted 👎 was therefore
+ * (correctly, per isOrgMember's contract) treated as unauthorized and the brake did not
+ * fire; the router degraded to the conservative HOLD, not a misroute — fail-safe held.
+ *
+ * The fix that needs NO org visibility at all: a static allowlist of authorized reactor
+ * logins, checked FIRST. The org-membership probe stays as the fallback for logins not
+ * listed (a future member with PUBLIC membership is still recognized with zero config).
+ * The at-scale fix for private memberships remains the read:org PAT documented in
+ * isOrgMember — deliberately NOT minted for a one-human org (Rule #60: consumption
+ * machinery before more credentials; Rule #203: mechanism over measurement).
+ */
+const AUTHORIZED_REACTORS = new Set(["kbibelhausen"]);
 
 const orgMemberCache = new Map<string, boolean>();
-function isMemberCached(login: string): boolean {
+function isAuthorizedReactor(login: string): boolean {
+  if (AUTHORIZED_REACTORS.has(login)) return true;
   const cached = orgMemberCache.get(login);
   if (cached !== undefined) return cached;
   const result = isOrgMember(ORG, login);
@@ -172,11 +191,11 @@ function resolveDisapproval(repo: string, comments: IssueComment[]): boolean {
     for (const r of getCommentReactions(repo, c.id)) reactors.push({ content: r.content, login: r.login });
   }
   const downvoteLogins = new Set(reactors.filter((r) => r.content === "-1").map((r) => r.login));
-  const orgMembers = new Set<string>();
+  const authorized = new Set<string>();
   for (const login of downvoteLogins) {
-    if (isMemberCached(login)) orgMembers.add(login);
+    if (isAuthorizedReactor(login)) authorized.add(login);
   }
-  return hasAuthorizedDisapproval(reactors, orgMembers);
+  return hasAuthorizedDisapproval(reactors, authorized);
 }
 
 // ───────────────────────────── metering ─────────────────────────────
