@@ -167,6 +167,38 @@ export function parseProbeRouting(commentBody: string): ProbeRouting | null {
   return { routing: "cross-repo", target: routingMatch[2] as string, needsKevin };
 }
 
+/**
+ * True when the tail of a comment body LOOKS LIKE an attempted machine trailer (the literal
+ * `ROUTING:` or `NEEDS-KEVIN:` substring appears in the same last-two-non-blank-line window
+ * parseProbeRouting inspects) even though it failed to parse cleanly.
+ *
+ * Distinguishing this from a genuinely legacy (pre-trailer) comment matters (codex review pass
+ * 2 P2, ops-pipeline#66, 2026-08-14): `parseProbeRouting` returns `null` for BOTH cases
+ * identically, but only the genuinely-legacy case is safe to default to same-repo (the design
+ * comment's own documented blessing for the standing ~21 pre-trailer probes). A comment that
+ * clearly TRIED to emit a trailer and got it wrong — extra trailing text, a truncated second
+ * line, a corrupted routing target — means the model attempted to signal something (possibly
+ * `NEEDS-KEVIN: yes`, or a cross-repo target) and the signal was lost to a parsing failure;
+ * silently defaulting THAT to the lowest-scrutiny same-repo path would mean trusting a broken
+ * channel instead of routing it to a human. The router lib (needs-human-router-lib.ts) uses
+ * this to route a malformed-attempt comment to `hold-needs-kevin` instead.
+ *
+ * Deliberately scoped to the SAME tail window as parseProbeRouting, not a body-wide search: a
+ * whole-body substring search for `NEEDS-KEVIN:` would false-positive on prose the model writes
+ * under the diagnosis's own pre-existing "## NEEDS-KEVIN" heading (see buildSystemPrompt) if it
+ * happens to restate the verdict with a colon — that heading sits well before the tail in any
+ * well-formed diagnosis, so the tail-only window naturally excludes it.
+ */
+export function looksLikeAttemptedTrailer(commentBody: string): boolean {
+  const deBolded = commentBody.replace(/\*\*/g, "");
+  const nonEmptyLines = deBolded
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  const tail = nonEmptyLines.slice(-2);
+  return tail.some((l) => l.includes("ROUTING:") || l.includes("NEEDS-KEVIN:"));
+}
+
 export function buildUserPrompt(ctx: ProbeContext): string {
   const parts: string[] = [];
   parts.push(`Repository: ${ctx.repo}`);

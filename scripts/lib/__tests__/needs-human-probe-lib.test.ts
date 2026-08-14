@@ -5,6 +5,7 @@ import {
   buildUserPrompt,
   CAPS,
   extractFilePaths,
+  looksLikeAttemptedTrailer,
   parseProbeRouting,
   PROBE_MARKER,
   renderComment,
@@ -191,5 +192,56 @@ describe("parseProbeRouting (ops-pipeline#66 machine trailer)", () => {
   it("null when NEEDS-KEVIN value is neither yes nor no", () => {
     const body = ["ROUTING: same-repo", "NEEDS-KEVIN: maybe"].join("\n");
     expect(parseProbeRouting(body)).toBeNull();
+  });
+});
+
+describe("looksLikeAttemptedTrailer (codex pass 2 P2 — malformed vs genuinely-legacy null-parse)", () => {
+  // Negative controls first (Rule #322).
+  it("false for a genuinely legacy comment (no trailer attempted at all)", () => {
+    const body = ["## Culprit hypothesis", "the sync filter", "", "## NEEDS-KEVIN", "no — mechanical fix", "## Confidence", "high"].join("\n");
+    expect(looksLikeAttemptedTrailer(body)).toBe(false);
+  });
+
+  it("false for empty/whitespace-only body", () => {
+    expect(looksLikeAttemptedTrailer("")).toBe(false);
+    expect(looksLikeAttemptedTrailer("  \n  ")).toBe(false);
+  });
+
+  it("false for a well-formed trailer too (parseProbeRouting already handles that case — this predicate is only consulted on a null parse)", () => {
+    const body = ["ROUTING: same-repo", "NEEDS-KEVIN: no"].join("\n");
+    // Not false because it's malformed -- it's a well-formed trailer, so the predicate
+    // correctly says "yes this looks like a trailer" too; included to show the predicate
+    // doesn't ONLY fire on broken input.
+    expect(looksLikeAttemptedTrailer(body)).toBe(true);
+  });
+
+  it("true when a valid trailer has stray trailing text after it (violates 'nothing after it')", () => {
+    const body = ["ROUTING: same-repo", "NEEDS-KEVIN: no", "Let me know if you need anything else!"].join("\n");
+    expect(parseProbeRouting(body)).toBeNull(); // confirm it's actually a null-parse case
+    expect(looksLikeAttemptedTrailer(body)).toBe(true);
+  });
+
+  it("true for a corrupted ROUTING line paired with a well-formed NEEDS-KEVIN line", () => {
+    const body = ["ROUTING same-repo (missing colon)", "NEEDS-KEVIN: no"].join("\n");
+    expect(parseProbeRouting(body)).toBeNull();
+    expect(looksLikeAttemptedTrailer(body)).toBe(true);
+  });
+
+  it("true for a malformed cross-repo target sitting next to a well-formed NEEDS-KEVIN line", () => {
+    const body = ["ROUTING: cross-repo not-a-repo-shape", "NEEDS-KEVIN: no"].join("\n");
+    expect(parseProbeRouting(body)).toBeNull();
+    expect(looksLikeAttemptedTrailer(body)).toBe(true);
+  });
+
+  it("does NOT false-positive on the diagnosis's own pre-existing '## NEEDS-KEVIN' prose heading when it is NOT in the tail window", () => {
+    const body = [
+      "## Culprit hypothesis",
+      "the filter",
+      "## NEEDS-KEVIN",
+      "no — mechanical, no locked semantics touched",
+      "## Confidence + what would falsify this",
+      "high — nothing else to add",
+    ].join("\n");
+    expect(looksLikeAttemptedTrailer(body)).toBe(false);
   });
 });
