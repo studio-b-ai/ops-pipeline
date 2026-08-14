@@ -128,6 +128,19 @@ describe("routeDisposition — main per-issue pass", () => {
     expect(routeDisposition(base({ probeCommentBody: legacyBody }))).toEqual({ kind: "route-same-repo" });
   });
 
+  // codex review pass 2 P2 (2026-08-14): a MALFORMED trailer attempt must NOT get the same
+  // lowest-scrutiny same-repo default as a genuinely legacy comment — see
+  // looksLikeAttemptedTrailer's doc comment. Held for a human instead.
+  it("malformed trailer attempt (stray trailing text) -> hold-needs-kevin, NOT route-same-repo", () => {
+    const body = ["ROUTING: same-repo", "NEEDS-KEVIN: no", "Let me know if you need anything else!"].join("\n");
+    expect(routeDisposition(base({ probeCommentBody: body }))).toEqual({ kind: "hold-needs-kevin" });
+  });
+
+  it("malformed trailer attempt (corrupted ROUTING line) -> hold-needs-kevin", () => {
+    const body = ["ROUTING same-repo (missing colon)", "NEEDS-KEVIN: no"].join("\n");
+    expect(routeDisposition(base({ probeCommentBody: body }))).toEqual({ kind: "hold-needs-kevin" });
+  });
+
   it("same-repo trailer, needs-kevin no -> route-same-repo", () => {
     expect(routeDisposition(base({ probeCommentBody: trailer("same-repo", "no") }))).toEqual({ kind: "route-same-repo" });
   });
