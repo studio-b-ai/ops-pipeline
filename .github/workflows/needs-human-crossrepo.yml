@@ -1,0 +1,91 @@
+name: Needs-human cross-repo sweep
+
+# ops-pipeline#88 — the cross-repo leg of the needs-human autopilot (design comment: CTO
+# seat, 2026-08-14 ~03:45Z, issue #66 comment 5289224655; issue #88 itself, closed the
+# same night, records the fleet GitHub App setup this workflow depends on:
+# `studiob-fleet-bot`, App ID 4595770, installed org-wide with issues:write +
+# metadata:read; App ID + private key live as this repo's FLEET_APP_ID /
+# FLEET_APP_PRIVATE_KEY secrets).
+#
+# NOT reusable, unlike needs-human-router.yml — deliberately (Rule #38): a reusable
+# workflow invoked FROM another repo via `workflow_call` cannot read OPS-PIPELINE's OWN
+# repo secrets, only the CALLER's. That's exactly why the same-repo router runs as a
+# reusable workflow with each caller's own ambient GITHUB_TOKEN (scoped to that one
+# repo) — and exactly why cross-repo filing needs the opposite shape. This workflow runs
+# entirely INSIDE ops-pipeline, where FLEET_APP_ID/FLEET_APP_PRIVATE_KEY are native repo
+# secrets, mints a FRESH org-wide installation token every run via
+# actions/create-github-app-token@v1, and sweeps all five covered repos
+# (scripts/needs-human-crossrepo.ts) in ONE run with that single token. The five per-repo
+# needs-human-router.yml callers still own SAME-repo routing with their own ambient
+# tokens; this workflow resolves the CROSS-repo holds they leave behind
+# (needs-human-router-lib.ts's `hold-cross-repo` disposition, #66's v1 scope boundary).
+#
+# Cron sits at :47 — between the five staggered per-repo router crons (:05/:17/:29/:41/
+# :53, per #66's ship receipts) so a cross-repo route always has a fresh same-repo pass's
+# receipt/label state to read from within the hour, without racing any of them on the
+# minute.
+
+on:
+  schedule:
+    - cron: "47 * * * *" # hourly, UTC (Rule #94 — GH Actions cron is UTC-only)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real gh reads throughout (including the fleet App token mint and the twin-existence search) — zero mutations, preview only"
+        required: false
+        type: boolean
+        default: false
+
+# Job-level permissions cover ONLY this job's own checkout via the ambient GITHUB_TOKEN —
+# every actual mutation (issue create/comment/label-remove/close, in ANY of the five
+# covered repos, including this one) rides the MINTED fleet installation token (GH_TOKEN
+# below), never this ambient token. `contents: read` is enough for actions/checkout and
+# nothing else needs write via the ambient token: if the mint step ever failed silently
+# and a later step fell back to `github.token`, that token has no issues permission at
+# all here, so every gh call would fail loud rather than quietly mutate the wrong repo.
+permissions:
+  contents: read
+
+concurrency:
+  group: needs-human-crossrepo-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: "Cross-repo sweep (fleet App token)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted UNCONDITIONALLY — including on a dry run: Rule #376, a dry run that reads
+      # nothing proves nothing, and every read this sweep does (issue lists, comments,
+      # reactions, the twin-existence search across five repos) needs real cross-repo
+      # read access the ambient GITHUB_TOKEN structurally cannot provide.
+      - name: Mint fleet installation token
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+          # Org-wide (no `repositories:` narrowing) — deliberate: this sweep reads/writes
+          # across all five covered repos in a single run, and the covered-repo set
+          # (COVERED_REPOS in needs-human-crossrepo.ts) can grow without a matching
+          # token-scope change here (Rule #38's whole point — the App is already
+          # installed org-wide with issues:write, so scoping the per-run TOKEN narrower
+          # than the app's own installation would just reintroduce a maintenance seam
+          # this design exists to avoid).
+
+      - name: Run needs-human cross-repo sweep
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+        run: npx tsx needs-human-crossrepo.ts ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}

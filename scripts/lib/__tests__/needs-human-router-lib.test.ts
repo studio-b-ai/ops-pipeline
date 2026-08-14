@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  FLEET_APP_MARKER_AUTHOR,
   hasAnyRouterReceipt,
   hasAuthorizedDisapproval,
   hasHoldReceipt,
@@ -59,13 +60,24 @@ describe("isTrustedMarkerAuthor (codex pass 1 P1 — forged marker comments)", (
     expect(isTrustedMarkerAuthor(TRUSTED_MARKER_AUTHOR)).toBe(true);
   });
 
+  // ops-pipeline#88 codex review pass 1 P1 ("Accept the fleet App bot as a trusted
+  // marker author"): the cross-repo sweep posts its own receipts via the minted fleet
+  // App token, authored by a DIFFERENT bot identity than github-actions[bot].
+  it("true for the fleet App bot login (ops#88 cross-repo sweep's own receipt author)", () => {
+    expect(isTrustedMarkerAuthor("studiob-fleet-bot[bot]")).toBe(true);
+    expect(isTrustedMarkerAuthor(FLEET_APP_MARKER_AUTHOR)).toBe(true);
+  });
+
   it("false for a human — even the repo owner can't forge a trusted marker", () => {
     expect(isTrustedMarkerAuthor("kbibelhausen")).toBe(false);
   });
 
-  it("false for a look-alike login (no fuzzy/substring match)", () => {
+  it("false for a look-alike login (no fuzzy/substring match), for EITHER trusted identity", () => {
     expect(isTrustedMarkerAuthor("github-actions")).toBe(false);
     expect(isTrustedMarkerAuthor("github-actions[bot]-fake")).toBe(false);
+    expect(isTrustedMarkerAuthor("studiob-fleet-bot")).toBe(false);
+    expect(isTrustedMarkerAuthor("studiob-fleet-bot[bot]-fake")).toBe(false);
+    expect(isTrustedMarkerAuthor("some-other-app[bot]")).toBe(false);
   });
 });
 

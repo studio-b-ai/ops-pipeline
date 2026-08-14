@@ -52,8 +52,8 @@ export function hasAnyRouterReceipt(commentBodies: string[]): boolean {
 /**
  * The GitHub Actions default GITHUB_TOKEN posts issue comments as this exact bot login —
  * verified live against a real needs-human-probe comment in bolt-wms#1466 (codex review pass
- * 1, 2026-08-14: forged-marker P1 finding). This is the ONLY author whose comments the router
- * trusts for marker matching (PROBE_MARKER, ROUTE_RECEIPT_MARKER, HOLD_RECEIPT_MARKER).
+ * 1, 2026-08-14: forged-marker P1 finding). Trusted for marker matching (PROBE_MARKER,
+ * ROUTE_RECEIPT_MARKER, HOLD_RECEIPT_MARKER).
  *
  * Without this check, a plain `.includes(marker)` scan over EVERY comment body (regardless of
  * author) lets anyone with issue-comment access on the repo forge a fake probe comment ending
@@ -61,12 +61,39 @@ export function hasAnyRouterReceipt(commentBodies: string[]): boolean {
  * removing the `needs-human` label on an issue the real probe never touched) or a fake
  * ROUTE_RECEIPT_MARKER comment (making the main pass believe an untouched issue was already
  * routed, silently skipping it forever). Both directions matter: a forged marker must never be
- * trusted, and a REAL marker from the trusted author must always still be found.
+ * trusted, and a REAL marker from a trusted author must always still be found.
  */
 export const TRUSTED_MARKER_AUTHOR = "github-actions[bot]";
 
+/**
+ * ops-pipeline#88 (chip A, codex review pass 1 P1 — "Accept the fleet App bot as a
+ * trusted marker author"): the cross-repo sweep (needs-human-crossrepo.ts) posts its own
+ * receipts using a MINTED FLEET APP installation token, not the default GITHUB_TOKEN — so
+ * ITS comments are authored by the App's own bot identity, not github-actions[bot]. Both
+ * identities are trusted HERE (not only in the cross-repo sweep's own files) so the
+ * SAME-REPO router's existing recall pass — which imports isTrustedMarkerAuthor from THIS
+ * file — still recognizes a cross-repo-routed issue's receipt and can act on a late 👎
+ * against the ORIGIN (needs-human-crossrepo-lib.ts's header comment covers the full
+ * marker/trust-reuse rationale; the cross-repo sweep's OWN recall pass additionally
+ * closes the TWIN, which this router's recall pass has no way to reach). Without this,
+ * a lingering `needs-human` label could produce duplicate receipts on re-evaluation
+ * (this router never recognizing its own sibling's prior receipt as trusted), and a 👎
+ * on a cross-repo receipt would be silently ignored by BOTH sweeps.
+ *
+ * ⚠️ UNVERIFIED exact bot login (flagged, not resolved — Rule #50/#218, needs a live
+ * fire): GitHub derives an App's bot login from its slug as `<slug>[bot]`; the fleet
+ * App's display name is `studiob-fleet-bot` (ops-pipeline#88's close receipt), so
+ * `studiob-fleet-bot[bot]` is the EXPECTED login, but the actual slug is only confirmed
+ * by a real posted comment's `user.login`. The plant ladder's first real cross-repo fire
+ * is the first live signal — if the observed login differs, update this constant (single
+ * edit point; both the same-repo router and the cross-repo sweep import it from here).
+ */
+export const FLEET_APP_MARKER_AUTHOR = "studiob-fleet-bot[bot]";
+
+const TRUSTED_MARKER_AUTHORS: ReadonlySet<string> = new Set([TRUSTED_MARKER_AUTHOR, FLEET_APP_MARKER_AUTHOR]);
+
 export function isTrustedMarkerAuthor(login: string): boolean {
-  return login === TRUSTED_MARKER_AUTHOR;
+  return TRUSTED_MARKER_AUTHORS.has(login);
 }
 
 export interface Reactor {
