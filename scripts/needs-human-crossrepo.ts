@@ -59,8 +59,28 @@
  * find the (now-closed) origin again, stranding the twin exactly as before, just via a
  * new path. Fixed by making searchCrossRepoRoutedOrigins state-agnostic (content-search
  * keyed on this sweep's own twin-pointer marker text, not open-state-plus-reactions) and
- * every recall-pass close a `safeCloseIssue` (idempotent-on-already-closed) — see both
- * functions' doc comments below for the full reasoning.
+ * every recall-pass close a `closeIfOpen` (state-CHECKED, not guessed-from-a-caught-
+ * exception — see codex review pass 3 below) — see both functions' doc comments below.
+ *
+ * Codex review pass 3 folded a P1 + a P2. The P1 ("Add recovery for pre-receipt twin
+ * creations") is a narrower instance of the SAME race the pass-2 fix addressed: if
+ * fileTwinIssue (step a) succeeds but commentIssue (step b, which posts the receipt AND
+ * the twin pointer together) then fails or the process dies before it runs, the origin is
+ * left open+labeled with a real twin but genuinely NO pointer anywhere to search for —
+ * an authorized 👎 landing in that narrow window can let the same-repo router's own
+ * close-rejected win the race and close the origin before this sweep's own self-heal
+ * (skip-twin-exists, on its next run) or its content-search recall pass (nothing to find
+ * — no pointer was ever posted) can catch it, permanently stranding the twin. Fixed by
+ * runOrphanTwinCleanup below: a third pass scanning CLOSED-but-still-`needs-human`-
+ * labeled origins (close-rejected never removes the label — only a completed route
+ * does) for a confirmed cross-repo probe trailer + a confirmed authorized 👎 + NO route
+ * receipt + a twin that (per the SAME findTwin idempotency check used everywhere else in
+ * this sweep) already exists — and closes that orphaned twin directly.
+ *
+ * The P2 ("Do not swallow non-idempotent close failures") is fixed by checkIssueOpen/
+ * closeIfOpen below, replacing an earlier version's catch-everything safeCloseIssue: a
+ * REAL close failure on a CONFIRMED-open issue now propagates loudly instead of being
+ * silently read as "probably already closed."
  *
  * Metering (#331): unlike the same-repo router's ACTION_CAP over ALL mutations, this
  * script caps only ISSUE-CREATIONS (filing a NEW twin in a repo other than the one this
@@ -71,13 +91,15 @@
  * hold/reject receipt.
  *
  * `--dry-run`: identical reads throughout — including the twin-existence search, the
- * recall pass's reaction search, and the org-membership fallback (Rule #376: a dry run
- * that reads nothing proves nothing) — zero mutations, one preview line per planned
- * action, labeled distinctly: `TWIN-FILE` (would create the twin issue), `SWEEP-ROUTE`
- * (would post the receipt + remove the label, either right after a fresh TWIN-FILE or
- * completing a prior partial run's dangling twin), `SWEEP-REJECT` (would close-reject,
- * and the twin too if one exists — main pass or recall pass), `SWEEP-HOLD` (would post
- * the off-allowlist hold receipt).
+ * recall pass's content search, the orphan-cleanup pass's closed-issue scan, and the
+ * org-membership fallback (Rule #376: a dry run that reads nothing proves nothing) —
+ * zero mutations, one preview line per planned action, labeled distinctly: `TWIN-FILE`
+ * (would create the twin issue), `SWEEP-ROUTE` (would post the receipt + remove the
+ * label, either right after a fresh TWIN-FILE or completing a prior partial run's
+ * dangling twin), `SWEEP-REJECT` (would close-reject, and the twin too if one exists —
+ * main pass or recall pass), `SWEEP-HOLD` (would post the off-allowlist hold receipt),
+ * `ORPHAN-CLEANUP` (would close a twin orphaned by the codex review pass 3 P1 race,
+ * below).
  *
  * Usage: tsx needs-human-crossrepo.ts [--dry-run]  (no --repo — this script always
  * sweeps every covered repo in one run; that's the whole point of holding the fleet
@@ -475,10 +497,11 @@ function applyDisposition(ctx: {
       // false Rule #412 claim) while the twin is stranded open with nothing left to
       // re-evaluate it (a closed origin drops out of every open-issue search this sweep
       // runs). Closing the twin first means a failure on the origin half leaves the
-      // origin OPEN and re-evaluable next run — safely retryable, and closing an
-      // already-closed twin on that retry is an idempotent no-op.
-      if (twin) closeIssue(disposition.target, twin.number, twinRecallCloseComment(ownRepo, issue.number));
-      closeIssue(ownRepo, issue.number, crossRepoRejectReceipt(disposition.target, twin));
+      // origin OPEN and re-evaluable next run — safely retryable, and closeIfOpen (codex
+      // review pass 3 P2) makes re-closing an already-closed twin on that retry an
+      // explicit, verified no-op rather than a guessed one.
+      if (twin) closeIfOpen(disposition.target, twin.number, twinRecallCloseComment(ownRepo, issue.number));
+      closeIfOpen(ownRepo, issue.number, crossRepoRejectReceipt(disposition.target, twin));
       console.log(`${head}  SWEEP-REJECT -> ${describe} [APPLIED]`);
       return;
     }
@@ -606,21 +629,46 @@ function searchCrossRepoRoutedOrigins(repo: string): IssueRow[] {
   }
 }
 
-/** Wraps closeIssue so a close attempt on an issue some OTHER mechanism (the same-repo
- * router's recall pass, or a prior run of this same recall pass) already closed is a
- * logged no-op rather than a thrown error that would abort the whole run. This is new
- * territory for this codebase specifically: every OTHER recall-style close elsewhere here
- * pre-filters to `--state open` first (needs-human-router.ts's own recall pass included),
- * so it never attempts to close something already closed — this recall pass deliberately
- * searches state-agnostically (see searchCrossRepoRoutedOrigins above) specifically to
- * catch a race where the target MAY already be closed, so closeIssue's actual behavior on
- * an already-closed issue is no longer just theoretical here. */
-function safeCloseIssue(repo: string, number: number, comment: string): void {
+/**
+ * Codex review pass 3 P2 ("Do not swallow non-idempotent close failures"): an earlier
+ * version of this file's already-closed handling caught EVERY closeIssue error
+ * indiscriminately and logged it as "probably already closed, harmless" — which also
+ * swallows permission errors, rate limits, network failures, and a stale/bad issue
+ * number, none of which are safe to treat as done. If that happened on the TWIN half of
+ * a two-close sequence, the code would still go on to post a receipt on the ORIGIN
+ * claiming the twin was closed too — a false Rule #412 claim, and a genuinely-failed
+ * close with zero operator visibility.
+ *
+ * The fix: CHECK state first, never guess from a caught exception. `gh issue view --json
+ * state` returns `{"state":"OPEN"}` / `{"state":"CLOSED"}` (verified live this session
+ * against a known-open and a known-closed bolt-wms issue — #1670 and the router-plant
+ * control #1656). Already-closed is a confirmed, harmless no-op — skip the close call
+ * entirely, nothing can fail. Confirmed-open but the close attempt itself then fails is a
+ * REAL, unexplained failure — let it THROW and propagate (Rule #161: stop on first
+ * unexpected failure), which aborts processing for this issue BEFORE any receipt claiming
+ * success gets posted, and surfaces loudly in the run's logs rather than being read as a
+ * silent success. A failed STATE CHECK (not the close itself) is its own third case —
+ * inconclusive, so this issue is skipped for the run rather than guessed at either way.
+ */
+function checkIssueOpen(repo: string, number: number): "open" | "closed" | "check-failed" {
   try {
-    closeIssue(repo, number, comment);
+    const out = gh(["issue", "view", String(number), "--repo", repo, "--json", "state"]);
+    const parsed = JSON.parse(out) as { state: string };
+    return parsed.state.toUpperCase() === "OPEN" ? "open" : "closed";
   } catch (err) {
-    console.log(`    [warn] closeIssue(${repo}#${number}) failed — likely already closed by another mechanism (harmless, treated as done): ${describeError(err)}`);
+    console.log(`    [warn] couldn't confirm current state of ${repo}#${number}: ${describeError(err)} — skipping any close attempt on it this run`);
+    return "check-failed";
   }
+}
+
+function closeIfOpen(repo: string, number: number, comment: string): void {
+  const state = checkIssueOpen(repo, number);
+  if (state === "closed") {
+    console.log(`    [info] ${repo}#${number} is already closed — no action needed`);
+    return;
+  }
+  if (state === "check-failed") return; // already logged by checkIssueOpen
+  closeIssue(repo, number, comment); // confirmed open — a failure HERE is real and propagates loudly, never swallowed
 }
 
 /**
@@ -640,8 +688,10 @@ function safeCloseIssue(repo: string, number: number, comment: string): void {
  * regardless of the issue's current open/closed state, so disapproval is resolved
  * identically whether or not something already closed the origin. On an authorized 👎,
  * closes the TWIN FIRST, then the ORIGIN (same failure-recovery ordering as the main
- * pass's own close-rejected case, codex review pass 1 P2) — both via `safeCloseIssue`,
- * since either side may already be closed by the time this pass gets to it.
+ * pass's own close-rejected case, codex review pass 1 P2) — both via `closeIfOpen`
+ * (codex review pass 3 P2), since either side may already be closed by the time this
+ * pass gets to it, and a REAL failure on a confirmed-open side must propagate loudly
+ * rather than being silently swallowed.
  */
 function runRecallPass(repo: string, dryRun: boolean, isAuthorizedReactor: (login: string) => boolean): CrossRepoDisposition[] {
   const candidates = searchCrossRepoRoutedOrigins(repo).sort((a, b) => a.number - b.number);
@@ -668,13 +718,79 @@ function runRecallPass(repo: string, dryRun: boolean, isAuthorizedReactor: (logi
       dispositions.push({ kind: "close-rejected", target: pointer.target, twinExists: true });
       continue;
     }
-    safeCloseIssue(pointer.target, pointer.number, twinRecallCloseComment(repo, issue.number));
-    safeCloseIssue(repo, issue.number, crossRepoRejectReceipt(pointer.target, { number: pointer.number, url: issueUrl(pointer.target, pointer.number) }));
+    closeIfOpen(pointer.target, pointer.number, twinRecallCloseComment(repo, issue.number));
+    closeIfOpen(repo, issue.number, crossRepoRejectReceipt(pointer.target, { number: pointer.number, url: issueUrl(pointer.target, pointer.number) }));
     console.log(`${head}  SWEEP-REJECT (recall) -> closed origin + twin ${shortRepoName(pointer.target)}#${pointer.number} (or already closed) [APPLIED]`);
     dispositions.push({ kind: "close-rejected", target: pointer.target, twinExists: true });
   }
 
   return dispositions;
+}
+
+// ───────────────────────────── orphan twin cleanup (codex review pass 3 P1) ─────────────────────────────
+
+function orphanedTwinCloseComment(originRepo: string, originNumber: number): string {
+  return `🚫 Closed — the origin issue [\`${shortRepoName(originRepo)}#${originNumber}\`](${issueUrl(originRepo, originNumber)}) was rejected (closed with an authorized 👎) before this sweep ever posted a route receipt linking to this twin — a rare partial-failure window between filing the twin and posting the origin's receipt (codex review pass 3 P1). Reopen if this was a mistake. _(ops-pipeline#88 cross-repo sweep, orphan cleanup)_`;
+}
+
+/**
+ * The third leg (codex review pass 3 P1 — "Add recovery for pre-receipt twin
+ * creations"): recovers a twin left orphaned by a specific narrow race — `fileTwinIssue`
+ * (step a) succeeds, but `commentIssue` (step b, which posts BOTH the receipt and the
+ * only durable twin pointer in the SAME call) then fails, or this process dies, before it
+ * runs. The origin is left open+labeled with a real twin already created but genuinely NO
+ * pointer posted anywhere. If an authorized 👎 lands in that window, the SAME-REPO
+ * router's own close-rejected path (which only needs an open+labeled issue with a probe
+ * comment and no route receipt — it doesn't know or care about twins) can close the
+ * origin before EITHER this sweep's own main-pass self-heal (skip-twin-exists, which
+ * would otherwise catch this on its very next run) or its recall pass (searches by
+ * pointer text — there is none to find) gets a chance to. Once closed, the origin is
+ * invisible to both of this sweep's other passes, and the twin is stranded forever.
+ *
+ * Recovery: scan CLOSED issues still carrying the `needs-human` label (close-rejected
+ * never removes it — ONLY a completed route does, which is exactly the case this
+ * function must NOT be able to reach: if a route receipt exists at all, this function
+ * skips the issue outright, whether or not it carries a pointer). For each survivor with
+ * a probe comment naming an allowlisted cross-repo target, re-run the SAME findTwin
+ * idempotency check used everywhere else in this sweep; a "found" result plus a
+ * CONFIRMED authorized 👎 (never assumed from the mere fact of being closed — a human
+ * closing an origin for an unrelated reason, e.g. "duplicate of #X", must never trigger
+ * this) means the twin really is orphaned by this exact race, and it gets closed
+ * directly — via closeIfOpen, so a concurrent close by anything else is still safe.
+ */
+function runOrphanTwinCleanup(repo: string, dryRun: boolean, isAuthorizedReactor: (login: string) => boolean): number {
+  const ownRepoShort = shortRepoName(repo);
+  const closedLabeled = listIssuesByLabel(repo, LABEL, "closed").sort((a, b) => a.number - b.number);
+  console.log(`[crossrepo] ${repo}: ${closedLabeled.length} closed issue(s) still labeled '${LABEL}' — orphan-twin check.`);
+
+  let handled = 0;
+  for (const issue of closedLabeled) {
+    const comments = listIssueComments(repo, issue.number);
+    const trusted = trustedComments(comments);
+    if (hasRouteReceipt(trusted.map((c) => c.body))) continue; // a route receipt exists (with or without a pointer) — not this function's case, whatever else may be true
+
+    const probeComment = findLast(trusted, PROBE_MARKER);
+    if (!probeComment) continue;
+    const parsed = parseProbeRouting(probeComment.body);
+    if (!parsed || parsed.needsKevin || parsed.routing !== "cross-repo" || parsed.target === repo || !ALLOWLIST.has(parsed.target)) continue;
+
+    const disapproval = resolveDisapproval(repo, comments, isAuthorizedReactor);
+    if (!disapproval) continue; // closed for some OTHER reason (no confirmed 👎) — never presume a reject, never touch the twin
+
+    const lookup = findTwin(parsed.target, ownRepoShort, issue.number);
+    if (lookup.kind !== "found") continue; // nothing orphaned to clean up (or the check was inconclusive — retried next run either way)
+
+    const head = `  [orphan:${ownRepoShort}] #${issue.number} "${truncate(issue.title, 70)}"`;
+    if (dryRun) {
+      console.log(`${head}  ORPHAN-CLEANUP -> would close orphaned twin ${shortRepoName(parsed.target)}#${lookup.twin.number} [PREVIEW — would apply]`);
+      handled++;
+      continue;
+    }
+    closeIfOpen(parsed.target, lookup.twin.number, orphanedTwinCloseComment(repo, issue.number));
+    console.log(`${head}  ORPHAN-CLEANUP -> closed orphaned twin ${shortRepoName(parsed.target)}#${lookup.twin.number} [APPLIED]`);
+    handled++;
+  }
+  return handled;
 }
 
 // ───────────────────────────── main ─────────────────────────────
@@ -686,6 +802,7 @@ async function main(): Promise<void> {
 
   const isAuthorizedReactor = createAuthorizedReactorChecker();
   const allDispositions: CrossRepoDisposition[] = [];
+  let orphansHandled = 0;
 
   for (const repo of COVERED_REPOS) {
     const ownRepoShort = shortRepoName(repo);
@@ -697,6 +814,7 @@ async function main(): Promise<void> {
       allDispositions.push(disposition);
     }
     allDispositions.push(...runRecallPass(repo, dryRun, isAuthorizedReactor));
+    orphansHandled += runOrphanTwinCleanup(repo, dryRun, isAuthorizedReactor);
   }
 
   const summary = summarizeCrossRepoDispositions(allDispositions);
@@ -705,6 +823,7 @@ async function main(): Promise<void> {
   for (const [kind, count] of Object.entries(summary)) {
     console.log(`  ${kind.padEnd(20)} ${count}`);
   }
+  console.log(`  orphan-twin-cleanup  ${orphansHandled}`);
   console.log(`  issue creations: ${creationsApplied}${dryRun ? " (previewed, not applied)" : " applied"}, cap=${ISSUE_CREATION_CAP}`);
   if (creationsCapped > 0) {
     console.log(`  ⚠️  CAPPED — ${creationsCapped} cross-repo filing(s) deferred to the next run (Rule #331).`);
