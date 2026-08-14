@@ -1,0 +1,110 @@
+name: CFO Monthly Brief
+
+# The CFO seat's actuals-vs-glide heartbeat (design of record:
+# brain library/product/2026-08-14-cfo-monthly-cadence-machinery-design.md).
+# Monthly on the 6th, 13:00 UTC (9am ET; GH Actions cron is UTC-only — Rule #94),
+# processing the PREVIOUS calendar month: pull the closed month via the gateway
+# (dedicated token, consumer ops-pipeline-cfo-brief, tenant heritage — see
+# scripts/credentials.manifest.yaml), classify under the seat-proven ruleset
+# v1.1 (verbatim module, July-fixture-gated in CI), two-oracle GL reconciliation,
+# render the brief, post it as an issue labeled `cfo-brief` (the durable brief),
+# best-effort Slack notification-lane ping (#165). Machinery failures open a
+# bug-labeled issue (squasher lane) — mirrors credential-expiry-monitor.yml.
+#
+# Rule #464: NOT "live" until the planted firing (workflow_dispatch period=072026)
+# reproduces the adopted July numbers in the issue it posts.
+# Escalation prose is never auto-sent — a below-floor quarter renders an
+# ESCALATION-CANDIDATE block in the brief; the seat owns what reaches Kevin.
+
+on:
+  schedule:
+    - cron: "0 13 6 * *"
+  workflow_dispatch:
+    inputs:
+      period:
+        description: "Period MMYYYY (e.g. 072026); empty = previous calendar month"
+        type: string
+        default: ""
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: cfo-monthly-brief
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    name: "CFO brief — pull, classify, reconcile, post"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Resolve period"
+        id: period
+        run: |
+          if [ -n "${{ inputs.period }}" ]; then
+            P="${{ inputs.period }}"
+          else
+            P=$(python3 -c "import datetime; t=datetime.datetime.now(datetime.timezone.utc).date().replace(day=1); p=t-datetime.timedelta(days=1); print(f'{p.month:02d}{p.year}')")
+          fi
+          YM="${P:2:4}${P:0:2}"
+          echo "period=$P" >> "$GITHUB_OUTPUT"
+          echo "ym=$YM" >> "$GITHUB_OUTPUT"
+          echo "Processing period $P (ym $YM)"
+
+      - name: "Pull month + GL oracle"
+        env:
+          ACUMATICA_GATEWAY_URL: ${{ secrets.ACUMATICA_GATEWAY_URL }}
+          ACUMATICA_GATEWAY_TOKEN: ${{ secrets.ACUMATICA_GATEWAY_TOKEN }}
+        run: python3 scripts/cfo-brief/pull_month.py --period "${{ steps.period.outputs.period }}" --ym "${{ steps.period.outputs.ym }}" --workdir work
+
+      - name: "Classify + render brief"
+        run: python3 scripts/cfo-brief/run_month.py --ym "${{ steps.period.outputs.ym }}" --workdir work --out work/brief.md
+
+      - name: "Post the brief issue"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          YM="${{ steps.period.outputs.ym }}"
+          TITLE="CFO monthly brief — ${YM:0:4}-${YM:4:2}"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label cfo-brief --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body-file work/brief.md
+            echo "issue_url=$(gh issue view "$EXISTING" --repo "$GITHUB_REPOSITORY" --json url --jq .url)" >> "$GITHUB_ENV"
+          else
+            URL=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --label cfo-brief --body-file work/brief.md)
+            echo "issue_url=$URL" >> "$GITHUB_ENV"
+          fi
+
+      - name: "Notification-lane ping (best-effort)"
+        continue-on-error: true
+        env:
+          SLACK_TOKEN: ${{ secrets.STUDIOB_SLACK_BOT_TOKEN }}
+        run: |
+          [ -z "$SLACK_TOKEN" ] && { echo "no slack token — skipping ping"; exit 0; }
+          YM="${{ steps.period.outputs.ym }}"
+          curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"channel\":\"C0B4B3F62H2\",\"text\":\"🧾 CFO monthly brief ${YM:0:4}-${YM:4:2} posted: ${issue_url}\"}" | grep -o '"ok":[a-z]*'
+
+      - name: "Machinery failure issue"
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="cfo-monthly-brief: run failed ($(date -u +%Y-%m-%d))"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label bug --search "cfo-monthly-brief: run failed in:title" --json number --jq '.[0].number // empty')
+          BODY="Scheduled CFO brief run failed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID — full log attached to the run. Period: ${{ steps.period.outputs.period }}."
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --label bug --body "$BODY"
+          fi
+
+      - name: "Terminal status"
+        if: ${{ !cancelled() }}
+        run: echo "cfo-monthly-brief finished with job status ${{ job.status }} for period ${{ steps.period.outputs.period }}"
