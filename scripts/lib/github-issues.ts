@@ -82,3 +82,108 @@ export function commentIssue(repo: string, num: number, comment: string): void {
 export function retitleIssue(repo: string, num: number, title: string): void {
   gh(["issue", "edit", String(num), "--repo", repo, "--title", title]);
 }
+
+/**
+ * Remove a label from an issue — additive for ops-pipeline#66 (the needs-human router): a
+ * same-repo auto-route REMOVES `needs-human` so the issue re-enters the owning lane's ordinary
+ * (unlabeled-issue) re-entry folds. `gh issue edit --remove-label` is idempotent — removing an
+ * absent label is a no-op, not an error — so callers never need to pre-check membership.
+ */
+export function removeLabel(repo: string, num: number, label: string): void {
+  gh(["issue", "edit", String(num), "--repo", repo, "--remove-label", label]);
+}
+
+export interface IssueComment {
+  /** Numeric REST id — NOT the GraphQL node id `gh issue view --json comments` returns; this is
+   * the id `GET /repos/{repo}/issues/comments/{id}/reactions` requires. */
+  id: number;
+  body: string;
+  login: string;
+}
+
+/**
+ * All comments on an issue via the REST list endpoint (numeric `id`s, unlike `gh issue view
+ * --json comments`'s GraphQL node ids) — additive for ops-pipeline#66, which needs the numeric
+ * id to fetch per-comment reactions (see `getCommentReactions` below). `--paginate` follows
+ * Link headers so a long thread's later comments are never silently dropped (Rule #331).
+ */
+export function listIssueComments(repo: string, issueNumber: number): IssueComment[] {
+  const out = gh(["api", `repos/${repo}/issues/${issueNumber}/comments`, "--paginate", "--jq", ".[] | {id, body, login: .user.login}"]);
+  // `--paginate` concatenates one JSON value per page on its own line, not a single array.
+  return out
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as IssueComment);
+}
+
+export interface CommentReaction {
+  /** GitHub reaction content: "+1" | "-1" | "laugh" | "confused" | "heart" | "hooray" | "rocket" | "eyes". */
+  content: string;
+  login: string;
+}
+
+/**
+ * Per-user reactions on ONE issue comment (numeric comment id, not the GraphQL node id) —
+ * additive for ops-pipeline#66's #398 authorization check: a reaction is origin-signed but WHO
+ * reacted still needs checking against org membership before it can act as a brake. Called only
+ * for the specific comments the router cares about (the probe comment, its own receipt) — not
+ * fanned out over a whole thread. `--paginate` (codex review pass 1 P2, 2026-08-14): a comment
+ * with more reactions than GitHub's default single-page size would otherwise silently drop a
+ * later reactor's 👎 from the authorization check — mirrors `listIssueComments`'s own guard.
+ */
+export function getCommentReactions(repo: string, commentId: number): CommentReaction[] {
+  const out = gh(["api", `repos/${repo}/issues/comments/${commentId}/reactions`, "--paginate", "--jq", ".[] | {content, login: .user.login}"]);
+  return out
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as CommentReaction);
+}
+
+/**
+ * Whether `login` is a member of `org` — GitHub's membership-check endpoint returns 204 (member)
+ * or 404 (genuinely not a member, or private membership the caller can't see). Rule #398: a 👎
+ * is origin-signed but not authorized on its own — this is the WHO check, and it is the router's
+ * ONE brake, so it must fail in the SAFE direction.
+ *
+ * codex review pass 1 P1 (2026-08-14): the original version caught ANY thrown error (network
+ * blip, rate limit, a token missing `read:org`, a transient 5xx) and returned `false` — silently
+ * indistinguishable from a confirmed 404. That direction is backwards: it would let a REAL
+ * org-member's 👎 be treated as absent whenever the membership check merely couldn't complete,
+ * so the router would route/close an issue a human actually tried to reject. Only a stderr
+ * carrying the literal `HTTP 404` (verified live: `gh api orgs/<org>/members/<login>` on a
+ * confirmed non-member prints exactly `gh: Not Found (HTTP 404)` to stderr, exit 1) is treated
+ * as a real "not a member" answer; every other failure shape is unresolved and THROWN — the
+ * caller's run fails loud rather than silently mis-authorizing.
+ *
+ * ⚠️ FLAGGED, NOT RESOLVED (codex review pass 3, 2026-08-14 — Rule #50/#218, needs LIVE
+ * verification, not more guessing): GitHub's docs for this exact endpoint note that a 404 can
+ * ALSO mean "the requester lacks visibility into this membership" (e.g. a private membership),
+ * not only "genuinely not a member" — those two cases are NOT distinguishable from the response
+ * alone. All live testing so far (this file's own verification script, this session) ran under
+ * a real authenticated `gh` CLI session (an actual org owner), which reliably tells the two
+ * apart. In PRODUCTION this function runs via each caller repo's own ambient `GITHUB_TOKEN` — a
+ * repo-scoped installation token, NOT a human's personal token — and `GITHUB_TOKEN`'s available
+ * `permissions:` categories (contents, issues, etc.) do not include an org-membership scope at
+ * all, so whether it can see PRIVATE org membership for an arbitrary login is genuinely
+ * uncertain without firing the real deployed workflow. If it cannot, a real member's 👎 could
+ * still 404 and be (correctly, per the logic above) read as "not a member" — the brake would
+ * fail silently in exactly the direction this fix was trying to close, just one layer up, at
+ * the API-visibility layer instead of the error-handling layer. This is EXPLICITLY a live-fire
+ * question for the plant ladder the design comment calls out (issue #66, "Plant ladder in
+ * bolt-wms after both merge... second planted issue with org-member 👎 → close-as-rejected"):
+ * that planted-👎 test is the first real signal on whether GITHUB_TOKEN's org-membership
+ * visibility holds in a real caller repo. If it fails there, the fix is NOT more client-side
+ * logic (there is no way to disambiguate the two 404 causes from this endpoint's response) — it
+ * is switching the requester identity, e.g. a Kevin-gated fine-grained PAT with `read:org`
+ * passed as a secret to the reusable workflow.
+ */
+export function isOrgMember(org: string, login: string): boolean {
+  try {
+    gh(["api", `orgs/${org}/members/${login}`]);
+    return true;
+  } catch (err) {
+    const detail = err instanceof Error ? `${(err as NodeJS.ErrnoException & { stderr?: string }).stderr ?? ""}\n${err.message}` : String(err);
+    if (detail.includes("HTTP 404")) return false; // confirmed: not a member
+    throw new Error(`isOrgMember(${org}, ${login}): ambiguous failure, not a confirmed 404 — refusing to treat as "not a member": ${detail.trim()}`);
+  }
+}

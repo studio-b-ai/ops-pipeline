@@ -94,7 +94,141 @@ export function buildSystemPrompt(): string {
     "(yes/no — yes when the fix would amend locked semantics, pricing, credentials,",
     "customer-facing behavior, or anything a rule marks Kevin-gated; one line why)",
     "## Confidence + what would falsify this",
+    "",
+    "Then, after ALL sections above and as the ABSOLUTE LAST thing in your response —",
+    "no closing remarks, no blank commentary, nothing after it — append a MACHINE",
+    "trailer of EXACTLY two lines (ops-pipeline#66, consumed by an automated router;",
+    "this is separate from the human-readable ## NEEDS-KEVIN section above, which stays",
+    "prose). Use this EXACT grammar, no markdown bold, no extra punctuation:",
+    "ROUTING: same-repo",
+    "NEEDS-KEVIN: yes|no",
+    "or, when the fix belongs in a DIFFERENT Studio B repo than the one named at the top",
+    "of this prompt:",
+    "ROUTING: cross-repo studio-b-ai/<repo>",
+    "NEEDS-KEVIN: yes|no",
+    "",
+    "Trailer rules:",
+    "- Always exactly two lines, in this order: ROUTING then NEEDS-KEVIN. Never omit",
+    "  either line, even when NEEDS-KEVIN is 'no' or ROUTING is 'same-repo'.",
+    "- cross-repo names the exact target as studio-b-ai/<repo> — read from your own",
+    "  diagnosis, never a guess or a repo not evidenced by the context.",
+    "- NEEDS-KEVIN here must match your ## NEEDS-KEVIN section's yes/no verdict above —",
+    "  restate it, don't re-decide it.",
   ].join("\n");
+}
+
+/** A parsed machine routing trailer (ops-pipeline#66) — see buildSystemPrompt's trailer spec. */
+export type ProbeRouting =
+  | { routing: "same-repo"; needsKevin: boolean }
+  | { routing: "cross-repo"; target: string; needsKevin: boolean };
+
+const ROUTING_LINE_RE = /^ROUTING:\s*(same-repo|cross-repo\s+([\w.-]+\/[\w.-]+))\s*$/;
+const NEEDS_KEVIN_LINE_RE = /^NEEDS-KEVIN:\s*(yes|no)\s*$/;
+
+/**
+ * Extracts the ops-pipeline#66 machine trailer from a probe comment (or diagnosis) body.
+ * Returns `null` when no trailer parses — the documented fallback for the standing ~21
+ * legacy probe comments (pre-trailer) AND for any malformed/missing trailer (fail-safe,
+ * never guess): the ROUTER LIB (needs-human-router-lib.ts) treats `null` as
+ * `same-repo` + `needsKevin: false` per the design comment.
+ *
+ * Deliberately scoped to the LAST TWO non-blank lines of the body, not a body-wide
+ * search: buildSystemPrompt mandates the trailer as the absolute last thing emitted, and
+ * the diagnosis ALSO contains a pre-existing "## NEEDS-KEVIN" markdown HEADING (prose,
+ * yes/no + one line why) earlier in the same output. A body-wide regex could false-match
+ * prose under that heading (e.g. a model restating "NEEDS-KEVIN: yes" inline); requiring
+ * true adjacency at the very tail makes that class of false-positive structurally
+ * impossible rather than merely unlikely.
+ *
+ * Tolerant of markdown bold (`**`) and per-line surrounding whitespace — strips `**`
+ * globally and trims each line before matching — but NOT of case drift on the literal
+ * keywords/values: a trailer that doesn't match the mandated grammar exactly is treated
+ * as absent (falls back to the legacy default) rather than fuzzily coerced, which is the
+ * safer failure mode for a router that removes labels and closes issues.
+ */
+export function parseProbeRouting(commentBody: string): ProbeRouting | null {
+  const deBolded = commentBody.replace(/\*\*/g, "");
+  const nonEmptyLines = deBolded
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (nonEmptyLines.length < 2) return null;
+
+  const last = nonEmptyLines[nonEmptyLines.length - 1] as string;
+  const secondLast = nonEmptyLines[nonEmptyLines.length - 2] as string;
+
+  const needsKevinMatch = last.match(NEEDS_KEVIN_LINE_RE);
+  if (!needsKevinMatch) return null;
+  const routingMatch = secondLast.match(ROUTING_LINE_RE);
+  if (!routingMatch) return null;
+
+  const needsKevin = needsKevinMatch[1] === "yes";
+  if (routingMatch[1] === "same-repo") return { routing: "same-repo", needsKevin };
+  return { routing: "cross-repo", target: routingMatch[2] as string, needsKevin };
+}
+
+/** The exact, fixed final section heading buildSystemPrompt mandates — the trailer is defined
+ * to come strictly after this, so this string is the anchor looksLikeAttemptedTrailer keys off. */
+const FINAL_MANDATED_HEADING = "## Confidence + what would falsify this";
+
+/**
+ * True when a diagnosis LOOKS LIKE it either attempted a machine trailer and botched it, or
+ * never got far enough to reach one at all — both cases where trusting the lowest-scrutiny
+ * same-repo default would mean trusting a signal we know is broken or absent.
+ *
+ * Distinguishing "attempted/incomplete" from genuinely legacy matters (codex review pass 2 P2,
+ * ops-pipeline#66, 2026-08-14): `parseProbeRouting` returns `null` for a corrupted NEW-format
+ * attempt and a pre-trailer LEGACY comment identically, but only the legacy case is safe to
+ * default to same-repo (the design comment's own documented blessing for the standing ~21
+ * pre-trailer probes). The router lib (needs-human-router-lib.ts) routes anything this function
+ * flags to `hold-needs-kevin` instead.
+ *
+ * Two checks, both needed (history in this doc comment because each was a real, live-found gap
+ * across three codex review passes — Rule #401, a "the corpus says X" claim earns a citation):
+ *
+ * 1. Region-after-anchor scan for `ROUTING:`/`NEEDS-KEVIN:`. v1 scanned only the last two
+ *    non-blank lines (matching parseProbeRouting's strict adjacency check) — pass 3 found that a
+ *    well-formed trailer followed by 2+ stray closing lines (a model ignoring "nothing after
+ *    it") escapes a fixed 2-line window. Widened to "everything after the LAST markdown '## '
+ *    heading" — which pass 4 then found ALSO breaks if the model appends a stray heading (e.g.
+ *    `## Notes`) after the trailer: the "last heading" becomes that stray one, and the scan
+ *    starts AFTER it, skipping straight past the real trailer sitting just before it. Fixed by
+ *    anchoring on the specific, fixed, mandated `FINAL_MANDATED_HEADING` text instead of
+ *    "whatever heading happens to be last" — that heading can only appear once, as the actual
+ *    final of the 5 sections buildSystemPrompt requires, so scanning everything after its LAST
+ *    occurrence is immune to extra headings the model adds afterward. Still immune to the
+ *    original false-positive concern (the diagnosis's own "## NEEDS-KEVIN" prose heading)
+ *    because that heading always precedes `FINAL_MANDATED_HEADING` in the mandated order.
+ *
+ * 2. Missing-anchor fallback: if `FINAL_MANDATED_HEADING` does not appear at all, the response
+ *    was cut short before even reaching the last mandated section (pass 4's max_tokens
+ *    truncation concern) — a genuinely legacy comment (written under the pre-trailer prompt,
+ *    which already required this same section) always has it, so its absence is itself
+ *    evidence of an incomplete NEW-format response, regardless of whether any trailer-like text
+ *    exists anywhere. Treated as an attempted-and-failed case, not legacy.
+ *
+ * KNOWN RESIDUAL GAP (documented, not silently ignored — Rule #158): a response that completes
+ * `FINAL_MANDATED_HEADING`'s own section in full and is THEN truncated at the exact boundary
+ * before emitting even one trailer character is indistinguishable from genuinely legacy by text
+ * alone (both have the heading present and zero trailer-like text after it). Closing this
+ * fully would need the API response's `stop_reason` threaded through from needs-human-probe.ts
+ * into the rendered comment (out of chip-A scope — that file isn't part of this chip's
+ * deliverables) — left as a follow-up, not fixed here. Given `PROBE_MAX_TOKENS = 2500` and
+ * typical diagnosis lengths, exact-boundary truncation is a narrow case, and its worst outcome
+ * (an incomplete diagnosis auto-routes to the ordinary backlog instead of holding) is bounded
+ * and recoverable, not silent/permanent — a human working the backlog still sees the truncated
+ * diagnosis and can escalate by hand.
+ */
+export function looksLikeAttemptedTrailer(commentBody: string): boolean {
+  const deBolded = commentBody.replace(/\*\*/g, "");
+  const lines = deBolded.split("\n").map((l) => l.trim());
+  let anchorIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i] === FINAL_MANDATED_HEADING) anchorIdx = i;
+  }
+  if (anchorIdx === -1) return true; // never reached the final mandated section -- looks truncated
+  const tail = lines.slice(anchorIdx + 1).filter((l) => l.length > 0);
+  return tail.some((l) => l.includes("ROUTING:") || l.includes("NEEDS-KEVIN:"));
 }
 
 export function buildUserPrompt(ctx: ProbeContext): string {
