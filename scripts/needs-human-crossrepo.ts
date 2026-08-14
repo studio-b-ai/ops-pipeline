@@ -52,6 +52,16 @@
  * the origin before the twin, stranding the twin open on a mid-failure — reordered to
  * twin-then-origin everywhere this sweep closes both.
  *
+ * Codex review pass 2 folded one more P1, born directly from fix (1) above: widening
+ * trust also means the SAME-REPO router's OWN recall pass now recognizes this sweep's
+ * route receipts and can close the ORIGIN on a 👎 all by itself — racing this sweep's
+ * recall pass to it. If that router wins, an open-state-scoped search here would never
+ * find the (now-closed) origin again, stranding the twin exactly as before, just via a
+ * new path. Fixed by making searchCrossRepoRoutedOrigins state-agnostic (content-search
+ * keyed on this sweep's own twin-pointer marker text, not open-state-plus-reactions) and
+ * every recall-pass close a `safeCloseIssue` (idempotent-on-already-closed) — see both
+ * functions' doc comments below for the full reasoning.
+ *
  * Metering (#331): unlike the same-repo router's ACTION_CAP over ALL mutations, this
  * script caps only ISSUE-CREATIONS (filing a NEW twin in a repo other than the one this
  * process is even running against is the one genuinely expensive, higher-blast-radius
@@ -531,43 +541,119 @@ function processIssue(
 
 // ───────────────────────────── recall pass (codex review pass 1 P1 — post-routing 👎) ─────────────────────────────
 
-/** `gh search issues --reactions ">0"` — deliberately NOT label-scoped, mirroring
- * needs-human-router.ts's own searchOpenIssuesWithReactions for the identical reason: a
- * fully-successful cross-repo route removes `needs-human` from the origin, so a
- * label-based query can never find it again. `--limit 1000` for the same #331 reason as
- * every other search/list call in this sweep. */
-function searchOpenIssuesWithReactions(repo: string): IssueRow[] {
-  const out = gh(["search", "issues", "--repo", repo, "--reactions", ">0", "--state", "open", "--json", "number,title", "--limit", "1000"]);
-  const parsed = JSON.parse(out) as IssueRow[];
-  return Array.isArray(parsed) ? parsed : [];
+/**
+ * Candidate discovery for the recall pass: every issue (OPEN **or CLOSED**) in `repo`
+ * whose comments mention this sweep's own twin-pointer marker text — i.e., every origin
+ * THIS sweep has EVER cross-repo-routed. `in:comments` is a real, documented GitHub
+ * search qualifier (used elsewhere in this file too, via `in:title`, for the twin-
+ * existence search).
+ *
+ * Deliberately state-agnostic (codex review pass 2 P1 — "Prevent same-repo recall from
+ * consuming cross-repo receipts"): pass 1's fix widened isTrustedMarkerAuthor so the
+ * SAME-REPO router's OWN recall pass now also recognizes this sweep's route receipts and
+ * can close the ORIGIN on an authorized 👎 — which is exactly what makes that router's
+ * recall pass finally able to help at all, but it has no idea a twin exists and can race
+ * THIS sweep to the origin's close. If it wins that race, an `open`-scoped search here
+ * would never find the (now-closed) origin again, stranding the twin forever — the same
+ * failure this whole recall pass exists to prevent, just via a new path. Searching by
+ * content instead of by open-state-plus-reactions structurally closes that race: no
+ * matter WHICH mechanism closed the origin first, this sweep still finds it via its own
+ * marker text and still gets a chance to close the twin. `--limit 1000` for the same
+ * #331 reason as every other search/list call in this sweep.
+ *
+ * Best-effort only, unlike `findTwin`'s authoritative list-scan (Rule #376's
+ * authoritative-fallback discipline does NOT apply here the same way): a missed
+ * candidate this run just means the twin stays open a little longer, caught on a LATER
+ * run once the search index catches up (an hour of slack before the next run, ample for
+ * typical index lag) — never a duplicate-creation risk, so no plain-list fallback is
+ * needed the way findTwin's file-cross-repo idempotency check requires one. False
+ * POSITIVES are equally harmless: every candidate is still re-verified per-issue against
+ * a REAL trusted marker + twin pointer below (`if (!pointer) continue`) before anything
+ * is acted on, so an over-broad search here costs at most a few wasted API calls, never a
+ * wrong action.
+ *
+ * TWO live-verified `gh` CLI quirks fixed here (this chip's own dry-run smoke test caught
+ * BOTH — neither codex nor the unit suite would have; Rule #4/#234: tests passing is not
+ * verification):
+ *   1. NO `--state` flag. `gh search issues --state` accepts ONLY `open` or `closed` —
+ *      `all` is rejected outright (`invalid argument "all" for "--state" flag`), unlike
+ *      `gh issue list --state`'s `open|closed|all` (used correctly elsewhere in this
+ *      file, e.g. twinCandidatesViaList). A first version passed `--state all` and it
+ *      silently no-op'd EVERY run. Confirmed live: OMITTING `--state` entirely returns
+ *      BOTH open and closed issues in one call (`gh search issues --repo
+ *      studio-b-ai/ops-pipeline "needs-human" --json number,title,state` returned
+ *      `states seen: {'closed', 'open'}`) — exactly the state-agnostic behavior needed.
+ *   2. NO colon in the search term, and NO surrounding quotes. A quoted phrase containing
+ *      `:` (`"needs-human-crossrepo:twin"`) — even though `:` is legal inside `in:title`
+ *      elsewhere in this file — made `gh`'s own query-serialization mangle the argument
+ *      into invalid syntax (`Invalid search query "( \"needs-human-crossrepo:\"twin...`,
+ *      confirmed via a direct probe: the SAME quoted-colon string failed identically
+ *      against a KNOWN-good repo/term). The unquoted, colon-free term
+ *      `needs-human-crossrepo` (this sweep's unique marker prefix, no trailing `:twin`)
+ *      works cleanly and was confirmed live to actually match real marker text (probed
+ *      against `needs-human-router` — the same-repo router's own unique prefix — which
+ *      correctly matched real routed-receipt comments in bolt-wms, including the known
+ *      plant-test issues #1656/#1657).
+ */
+function searchCrossRepoRoutedOrigins(repo: string): IssueRow[] {
+  try {
+    const out = gh(["search", "issues", "--repo", repo, "needs-human-crossrepo", "in:comments", "--json", "number,title", "--limit", "1000"]);
+    const parsed = JSON.parse(out) as IssueRow[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.log(`  [warn] recall-pass search failed for ${repo}: ${describeError(err)} — will retry next run`);
+    return [];
+  }
+}
+
+/** Wraps closeIssue so a close attempt on an issue some OTHER mechanism (the same-repo
+ * router's recall pass, or a prior run of this same recall pass) already closed is a
+ * logged no-op rather than a thrown error that would abort the whole run. This is new
+ * territory for this codebase specifically: every OTHER recall-style close elsewhere here
+ * pre-filters to `--state open` first (needs-human-router.ts's own recall pass included),
+ * so it never attempts to close something already closed — this recall pass deliberately
+ * searches state-agnostically (see searchCrossRepoRoutedOrigins above) specifically to
+ * catch a race where the target MAY already be closed, so closeIssue's actual behavior on
+ * an already-closed issue is no longer just theoretical here. */
+function safeCloseIssue(repo: string, number: number, comment: string): void {
+  try {
+    closeIssue(repo, number, comment);
+  } catch (err) {
+    console.log(`    [warn] closeIssue(${repo}#${number}) failed — likely already closed by another mechanism (harmless, treated as done): ${describeError(err)}`);
+  }
 }
 
 /**
  * Closes the gap codex review pass 1 P1 found ("Handle rejected already-routed twins"):
  * a fully-completed cross-repo route removes the origin's `needs-human` label, so the
  * MAIN pass (label-based enumeration) can never see that issue again — a 👎 arriving
- * after routing needs its own reaction-search-based pass to be found at all, mirroring
- * needs-human-router.ts's own two-pass architecture exactly.
+ * after routing needs its own pass to be found at all, mirroring needs-human-router.ts's
+ * own two-pass architecture in SHAPE (main pass + recall pass) though not in the recall
+ * candidate-discovery mechanism (see searchCrossRepoRoutedOrigins's doc comment for why
+ * this one must be state-agnostic, unlike that router's own open-only search).
  *
- * Every candidate this search returns is checked for a TRUSTED ROUTE_RECEIPT_MARKER
- * comment carrying a twin pointer (extractTwinPointer) — that pointer is BOTH the
- * disambiguator (a same-repo-routed issue shares the marker but never has a pointer, so
- * it's correctly ignored here — that's the same-repo router's own recall pass's job) AND
- * the twin's identity, with no re-search needed. On an authorized 👎, closes the TWIN
- * FIRST, then the ORIGIN (same failure-recovery ordering as the main pass's own
- * close-rejected case, codex review pass 1 P2).
+ * Every candidate is checked for a TRUSTED ROUTE_RECEIPT_MARKER comment carrying a twin
+ * pointer (extractTwinPointer) — that pointer is BOTH the disambiguator (a same-repo-
+ * routed issue shares the marker but never has a pointer, so it's correctly ignored here
+ * — that's the same-repo router's own recall pass's job) AND the twin's identity, with no
+ * re-search needed. `resolveDisapproval` reads comment REACTIONS, which persist
+ * regardless of the issue's current open/closed state, so disapproval is resolved
+ * identically whether or not something already closed the origin. On an authorized 👎,
+ * closes the TWIN FIRST, then the ORIGIN (same failure-recovery ordering as the main
+ * pass's own close-rejected case, codex review pass 1 P2) — both via `safeCloseIssue`,
+ * since either side may already be closed by the time this pass gets to it.
  */
 function runRecallPass(repo: string, dryRun: boolean, isAuthorizedReactor: (login: string) => boolean): CrossRepoDisposition[] {
-  const candidates = searchOpenIssuesWithReactions(repo).sort((a, b) => a.number - b.number);
+  const candidates = searchCrossRepoRoutedOrigins(repo).sort((a, b) => a.number - b.number);
   const dispositions: CrossRepoDisposition[] = [];
-  console.log(`[crossrepo] ${repo}: ${candidates.length} open issue(s) with reactions>0 — recall pass.`);
+  console.log(`[crossrepo] ${repo}: ${candidates.length} issue(s) ever cross-repo-routed by this sweep — recall pass.`);
 
   for (const issue of candidates) {
     const comments = listIssueComments(repo, issue.number);
     const trusted = trustedComments(comments);
     const routeComment = findLast(trusted, ROUTE_RECEIPT_MARKER);
     const pointer = routeComment ? extractTwinPointer(routeComment.body) : null;
-    if (!pointer) continue; // no cross-repo route receipt from THIS sweep — out of scope for this pass
+    if (!pointer) continue; // search false-positive (marker text quoted/discussed elsewhere) or a same-repo-router receipt — not this sweep's to act on
 
     const disapproval = resolveDisapproval(repo, comments, isAuthorizedReactor);
     const recallResult = crossRepoRecallDisposition({ hasCrossRepoRouteReceipt: true, hasAuthorizedDisapproval: disapproval });
@@ -578,13 +664,13 @@ function runRecallPass(repo: string, dryRun: boolean, isAuthorizedReactor: (logi
 
     const head = `  [recall:${shortRepoName(repo)}] #${issue.number} "${truncate(issue.title, 70)}"`;
     if (dryRun) {
-      console.log(`${head}  SWEEP-REJECT (recall) -> would close origin + twin ${shortRepoName(pointer.target)}#${pointer.number} [PREVIEW — would apply]`);
+      console.log(`${head}  SWEEP-REJECT (recall) -> would close origin + twin ${shortRepoName(pointer.target)}#${pointer.number} (either may already be closed) [PREVIEW — would apply]`);
       dispositions.push({ kind: "close-rejected", target: pointer.target, twinExists: true });
       continue;
     }
-    closeIssue(pointer.target, pointer.number, twinRecallCloseComment(repo, issue.number));
-    closeIssue(repo, issue.number, crossRepoRejectReceipt(pointer.target, { number: pointer.number, url: issueUrl(pointer.target, pointer.number) }));
-    console.log(`${head}  SWEEP-REJECT (recall) -> closed origin + twin ${shortRepoName(pointer.target)}#${pointer.number} [APPLIED]`);
+    safeCloseIssue(pointer.target, pointer.number, twinRecallCloseComment(repo, issue.number));
+    safeCloseIssue(repo, issue.number, crossRepoRejectReceipt(pointer.target, { number: pointer.number, url: issueUrl(pointer.target, pointer.number) }));
+    console.log(`${head}  SWEEP-REJECT (recall) -> closed origin + twin ${shortRepoName(pointer.target)}#${pointer.number} (or already closed) [APPLIED]`);
     dispositions.push({ kind: "close-rejected", target: pointer.target, twinExists: true });
   }
 
