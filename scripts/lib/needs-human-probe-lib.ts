@@ -167,46 +167,67 @@ export function parseProbeRouting(commentBody: string): ProbeRouting | null {
   return { routing: "cross-repo", target: routingMatch[2] as string, needsKevin };
 }
 
+/** The exact, fixed final section heading buildSystemPrompt mandates — the trailer is defined
+ * to come strictly after this, so this string is the anchor looksLikeAttemptedTrailer keys off. */
+const FINAL_MANDATED_HEADING = "## Confidence + what would falsify this";
+
 /**
- * True when the region AFTER the diagnosis's LAST markdown "## " heading contains the literal
- * `ROUTING:` or `NEEDS-KEVIN:` substring, even though the trailer failed to parse cleanly.
+ * True when a diagnosis LOOKS LIKE it either attempted a machine trailer and botched it, or
+ * never got far enough to reach one at all — both cases where trusting the lowest-scrutiny
+ * same-repo default would mean trusting a signal we know is broken or absent.
  *
- * Distinguishing this from a genuinely legacy (pre-trailer) comment matters (codex review pass
- * 2 P2, ops-pipeline#66, 2026-08-14): `parseProbeRouting` returns `null` for BOTH cases
- * identically, but only the genuinely-legacy case is safe to default to same-repo (the design
- * comment's own documented blessing for the standing ~21 pre-trailer probes). A comment that
- * clearly TRIED to emit a trailer and got it wrong — extra trailing text, a corrupted routing
- * line, a malformed cross-repo target — means the model attempted to signal something (possibly
- * `NEEDS-KEVIN: yes`, or a cross-repo target) and the signal was lost to a parsing failure;
- * silently defaulting THAT to the lowest-scrutiny same-repo path would mean trusting a broken
- * channel instead of routing it to a human. The router lib (needs-human-router-lib.ts) uses
- * this to route a malformed-attempt comment to `hold-needs-kevin` instead.
+ * Distinguishing "attempted/incomplete" from genuinely legacy matters (codex review pass 2 P2,
+ * ops-pipeline#66, 2026-08-14): `parseProbeRouting` returns `null` for a corrupted NEW-format
+ * attempt and a pre-trailer LEGACY comment identically, but only the legacy case is safe to
+ * default to same-repo (the design comment's own documented blessing for the standing ~21
+ * pre-trailer probes). The router lib (needs-human-router-lib.ts) routes anything this function
+ * flags to `hold-needs-kevin` instead.
  *
- * v1 of this function scoped to the last TWO non-blank lines, matching parseProbeRouting's own
- * strict window — codex review pass 3 (2026-08-14) found the gap: a well-formed trailer
- * followed by TWO OR MORE stray closing lines (e.g. a model ignoring "nothing after it" and
- * adding a sign-off) pushes the actual `ROUTING:`/`NEEDS-KEVIN:` text outside that fixed
- * 2-line window, so the malformed attempt was missed and silently defaulted to same-repo —
- * exactly the case this function exists to catch.
+ * Two checks, both needed (history in this doc comment because each was a real, live-found gap
+ * across three codex review passes — Rule #401, a "the corpus says X" claim earns a citation):
  *
- * Fixed here by keying off structure instead of a fixed line count: everything strictly AFTER
- * the LAST "## "-prefixed heading is the tail region a trailer (or a botched attempt at one)
- * can live in — that region is unbounded in length, so any number of stray trailing lines after
- * a real or attempted trailer still gets scanned. This also stays immune to the original
- * false-positive concern (the diagnosis's own pre-existing "## NEEDS-KEVIN" prose heading)
- * WITHOUT needing to guess a safe line count: buildSystemPrompt's mandated section order always
- * places "## Confidence + what would falsify this" AFTER "## NEEDS-KEVIN", so "## NEEDS-KEVIN"
- * can never itself be the LAST heading in a well-formed diagnosis — its own prose is therefore
- * always excluded from the scanned region, regardless of how short the Confidence section is.
+ * 1. Region-after-anchor scan for `ROUTING:`/`NEEDS-KEVIN:`. v1 scanned only the last two
+ *    non-blank lines (matching parseProbeRouting's strict adjacency check) — pass 3 found that a
+ *    well-formed trailer followed by 2+ stray closing lines (a model ignoring "nothing after
+ *    it") escapes a fixed 2-line window. Widened to "everything after the LAST markdown '## '
+ *    heading" — which pass 4 then found ALSO breaks if the model appends a stray heading (e.g.
+ *    `## Notes`) after the trailer: the "last heading" becomes that stray one, and the scan
+ *    starts AFTER it, skipping straight past the real trailer sitting just before it. Fixed by
+ *    anchoring on the specific, fixed, mandated `FINAL_MANDATED_HEADING` text instead of
+ *    "whatever heading happens to be last" — that heading can only appear once, as the actual
+ *    final of the 5 sections buildSystemPrompt requires, so scanning everything after its LAST
+ *    occurrence is immune to extra headings the model adds afterward. Still immune to the
+ *    original false-positive concern (the diagnosis's own "## NEEDS-KEVIN" prose heading)
+ *    because that heading always precedes `FINAL_MANDATED_HEADING` in the mandated order.
+ *
+ * 2. Missing-anchor fallback: if `FINAL_MANDATED_HEADING` does not appear at all, the response
+ *    was cut short before even reaching the last mandated section (pass 4's max_tokens
+ *    truncation concern) — a genuinely legacy comment (written under the pre-trailer prompt,
+ *    which already required this same section) always has it, so its absence is itself
+ *    evidence of an incomplete NEW-format response, regardless of whether any trailer-like text
+ *    exists anywhere. Treated as an attempted-and-failed case, not legacy.
+ *
+ * KNOWN RESIDUAL GAP (documented, not silently ignored — Rule #158): a response that completes
+ * `FINAL_MANDATED_HEADING`'s own section in full and is THEN truncated at the exact boundary
+ * before emitting even one trailer character is indistinguishable from genuinely legacy by text
+ * alone (both have the heading present and zero trailer-like text after it). Closing this
+ * fully would need the API response's `stop_reason` threaded through from needs-human-probe.ts
+ * into the rendered comment (out of chip-A scope — that file isn't part of this chip's
+ * deliverables) — left as a follow-up, not fixed here. Given `PROBE_MAX_TOKENS = 2500` and
+ * typical diagnosis lengths, exact-boundary truncation is a narrow case, and its worst outcome
+ * (an incomplete diagnosis auto-routes to the ordinary backlog instead of holding) is bounded
+ * and recoverable, not silent/permanent — a human working the backlog still sees the truncated
+ * diagnosis and can escalate by hand.
  */
 export function looksLikeAttemptedTrailer(commentBody: string): boolean {
   const deBolded = commentBody.replace(/\*\*/g, "");
   const lines = deBolded.split("\n").map((l) => l.trim());
-  let lastHeadingIdx = -1;
+  let anchorIdx = -1;
   for (let i = 0; i < lines.length; i++) {
-    if (lines[i]?.startsWith("## ")) lastHeadingIdx = i;
+    if (lines[i] === FINAL_MANDATED_HEADING) anchorIdx = i;
   }
-  const tail = lines.slice(lastHeadingIdx + 1).filter((l) => l.length > 0);
+  if (anchorIdx === -1) return true; // never reached the final mandated section -- looks truncated
+  const tail = lines.slice(anchorIdx + 1).filter((l) => l.length > 0);
   return tail.some((l) => l.includes("ROUTING:") || l.includes("NEEDS-KEVIN:"));
 }
 

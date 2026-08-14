@@ -122,9 +122,12 @@ describe("routeDisposition — main per-issue pass", () => {
     expect(out).toEqual({ kind: "close-rejected" });
   });
 
-  // Step 4: legacy default.
+  // Step 4: legacy default. Realistic fixture (codex pass 4): a genuinely legacy comment always
+  // has "## Confidence + what would falsify this" verbatim, since that section predates the
+  // trailer requirement — see needs-human-probe-lib.ts's looksLikeAttemptedTrailer, which
+  // treats a MISSING final-mandated-heading as "looks truncated", not legacy.
   it("legacy null-parse (no trailer at all) -> route-same-repo (the documented default)", () => {
-    const legacyBody = ["## Culprit hypothesis", "the sync filter", "## NEEDS-KEVIN", "no"].join("\n");
+    const legacyBody = ["## Culprit hypothesis", "the sync filter", "## NEEDS-KEVIN", "no", "## Confidence + what would falsify this", "high"].join("\n");
     expect(routeDisposition(base({ probeCommentBody: legacyBody }))).toEqual({ kind: "route-same-repo" });
   });
 

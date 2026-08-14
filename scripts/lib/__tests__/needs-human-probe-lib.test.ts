@@ -195,16 +195,36 @@ describe("parseProbeRouting (ops-pipeline#66 machine trailer)", () => {
   });
 });
 
-describe("looksLikeAttemptedTrailer (codex pass 2 P2 — malformed vs genuinely-legacy null-parse)", () => {
-  // Negative controls first (Rule #322).
+describe("looksLikeAttemptedTrailer (codex pass 2/3/4 P2 — malformed/incomplete vs genuinely-legacy null-parse)", () => {
+  // Negative controls first (Rule #322). Realistic fixture: a genuinely legacy comment ALWAYS
+  // has "## Confidence + what would falsify this" verbatim (it predates the trailer — see
+  // buildSystemPrompt) — a shortened "## Confidence" heading is not a real legacy shape.
   it("false for a genuinely legacy comment (no trailer attempted at all)", () => {
-    const body = ["## Culprit hypothesis", "the sync filter", "", "## NEEDS-KEVIN", "no — mechanical fix", "## Confidence", "high"].join("\n");
+    const body = [
+      "## Culprit hypothesis",
+      "the sync filter",
+      "",
+      "## NEEDS-KEVIN",
+      "no — mechanical fix",
+      "## Confidence + what would falsify this",
+      "high",
+    ].join("\n");
     expect(looksLikeAttemptedTrailer(body)).toBe(false);
   });
 
-  it("false for empty/whitespace-only body", () => {
-    expect(looksLikeAttemptedTrailer("")).toBe(false);
-    expect(looksLikeAttemptedTrailer("  \n  ")).toBe(false);
+  // codex review pass 4 (2026-08-14): the final mandated heading missing entirely means the
+  // response never got that far -- looks truncated (e.g. hit max_tokens), not legacy. An empty
+  // body is the extreme case of this (never reachable from a real probe comment in practice --
+  // needs-human-probe.ts refuses to post an empty diagnosis -- but the function's answer should
+  // still be the conservative one if it ever somehow occurs).
+  it("true for empty/whitespace-only body (never reaches the final mandated section -- looks truncated, not legacy)", () => {
+    expect(looksLikeAttemptedTrailer("")).toBe(true);
+    expect(looksLikeAttemptedTrailer("  \n  ")).toBe(true);
+  });
+
+  it("true when the final mandated heading is missing entirely, even with well-formed-looking earlier sections (truncated before reaching it)", () => {
+    const body = ["## Culprit hypothesis", "the filter", "## Evidence (quoted from context)", "quote", "## NEEDS-KEVIN", "no"].join("\n");
+    expect(looksLikeAttemptedTrailer(body)).toBe(true);
   });
 
   it("false for a well-formed trailer too (parseProbeRouting already handles that case — this predicate is only consulted on a null parse)", () => {
@@ -256,6 +276,25 @@ describe("looksLikeAttemptedTrailer (codex pass 2 P2 — malformed vs genuinely-
       "NEEDS-KEVIN: no",
       "Thanks for reading!",
       "Let me know if anything changes.",
+    ].join("\n");
+    expect(parseProbeRouting(body)).toBeNull(); // confirm it's actually a null-parse case
+    expect(looksLikeAttemptedTrailer(body)).toBe(true);
+  });
+
+  // codex review pass 4 (2026-08-14): a stray markdown heading AFTER the trailer used to defeat
+  // the "scan after the LAST heading" version of this function -- the stray heading itself
+  // became the anchor, and the scan started after IT, skipping past the real trailer sitting
+  // just before it. Anchoring on the specific FINAL_MANDATED_HEADING text instead of "whatever
+  // heading is last" fixes it: the trailer is still found because it sits after that fixed
+  // anchor, regardless of what the model appends afterward.
+  it("true when the model appends a stray heading AFTER a well-formed trailer (defeated the old 'last heading' anchor)", () => {
+    const body = [
+      "## Confidence + what would falsify this",
+      "high",
+      "ROUTING: same-repo",
+      "NEEDS-KEVIN: no",
+      "## Notes",
+      "some extra thoughts",
     ].join("\n");
     expect(parseProbeRouting(body)).toBeNull(); // confirm it's actually a null-parse case
     expect(looksLikeAttemptedTrailer(body)).toBe(true);
