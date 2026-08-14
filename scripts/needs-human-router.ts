@@ -110,10 +110,14 @@ function recallCloseRejectedReceipt(): string {
   return "🚫 Closed as rejected — an authorized 👎 arrived after this issue was already auto-routed (found via the recall sweep, since routing removes the `needs-human` label). Reopen if this was a mistake. _(ops-pipeline#66 router, recall pass)_";
 }
 
+// hold-needs-kevin fires for two distinct reasons (codex review pass 2 P2, 2026-08-14: a
+// malformed trailer attempt is held rather than defaulted to same-repo — see
+// needs-human-router-lib.ts's routeDisposition) — this text is deliberately hedged so it never
+// overclaims which one actually happened (Rule #412: a receipt's prose is a claim to keep honest).
 function holdNeedsKevinReceipt(): string {
   return [
     HOLD_RECEIPT_MARKER,
-    "⏸️ **Held for Kevin decision** — the probe's trailer flagged `NEEDS-KEVIN: yes` (locked semantics, pricing, credentials, customer-facing behavior, or a Kevin-gated rule).",
+    "⏸️ **Held for Kevin decision** — either the probe's trailer explicitly flagged `NEEDS-KEVIN: yes` (locked semantics, pricing, credentials, customer-facing behavior, or a Kevin-gated rule), or its machine trailer didn't parse cleanly (in which case auto-routing would mean trusting a broken signal). Either way, this needs a human look.",
     "",
     "The `needs-human` label stays; this will NOT auto-route. React 👎 here to close as rejected. _(ops-pipeline#66 router)_",
   ].join("\n");
@@ -245,9 +249,19 @@ function logMainOutcome(
   const head = `  #${issue.number} "${issue.title}"`;
 
   switch (disposition.kind) {
-    case "skip-already-routed":
-      console.log(`${head}  skip-already-routed`);
+    case "skip-already-routed": {
+      // Self-heal (codex review pass 2 P2, 2026-08-14): this disposition is reached ONLY when
+      // an issue is STILL enumerable via the needs-human label (this main pass's own candidate
+      // set) AND already carries ROUTE_RECEIPT_MARKER. With the comment-then-label ordering
+      // below, that combination can only mean a PRIOR run's removeLabel failed after its
+      // commentIssue already succeeded (a comment succeeding then a label staying is the sole
+      // reachable partial-failure shape). removeLabel is idempotent (a no-op if already gone —
+      // see github-issues.ts), so retrying costs nothing in the normal case and heals the rare
+      // partial-failure one.
+      const result = tryApply(() => removeLabel(repo, issue.number, LABEL), dryRun);
+      logResult(head, "skip-already-routed (label-removal self-heal retry, idempotent)", result);
       return;
+    }
     case "no-probe":
       console.log(`${head}  no-probe (no findings comment yet — nothing to route on)`);
       return;
@@ -258,11 +272,19 @@ function logMainOutcome(
       return;
     }
     case "route-same-repo": {
+      // Receipt FIRST, then label removal (codex review pass 2 P2, 2026-08-14): if
+      // commentIssue failed AFTER removeLabel already succeeded, the issue would be unlabeled
+      // with no durable receipt — invisible to BOTH the main pass (label gone, never
+      // enumerated again) and the recall pass (hasAnyRouterReceipt requires the marker, which
+      // never got posted) — permanently stranded. Comment-first means a failure here leaves
+      // the issue exactly as it was pre-attempt: still labeled, no marker, safely
+      // re-evaluated fresh next run. The skip-already-routed case above self-heals the other
+      // partial-failure direction (comment succeeded, label removal didn't).
       const result = tryApply(() => {
-        removeLabel(repo, issue.number, LABEL);
         commentIssue(repo, issue.number, routeReceipt());
+        removeLabel(repo, issue.number, LABEL);
       }, dryRun);
-      logResult(head, "route-same-repo (remove label + post receipt)", result);
+      logResult(head, "route-same-repo (post receipt + remove label)", result);
       if (result !== "capped") actionedThisRun.add(issue.number);
       return;
     }
