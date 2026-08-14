@@ -184,8 +184,15 @@ async function main(): Promise<void> {
   const baselineFile = loadBaseline();
   const { repos: liveRepos, hitCap } = listLiveRepos();
   if (hitCap) {
-    console.warn(
-      `repo-hygiene: live enumeration returned exactly the ${LIVE_ENUMERATION_LIMIT}-repo cap (Rule #331) — the org may have grown past it and the tail may be silently truncated. Raise LIVE_ENUMERATION_LIMIT in repo-hygiene-worker.ts.`,
+    // codex review (2026-08-14, ops#101 PR pass 1, P2): a mere warning was insufficient —
+    // continuing to diff a TRUNCATED live list would make every baseline repo past the cap
+    // read as `baseline-repo-gone` (a false "deleted or transferred") purely because the
+    // enumeration page never reached it, and the issue body would hand a human a wrong
+    // "remove this line" instruction for a repo that still exists. Rule #331: the cap is a
+    // safety bound, not a paging mechanism — a full final page means "stop and say so,"
+    // never "silently proceed on a partial picture." Fail the whole run loud instead.
+    throw new Error(
+      `live enumeration returned exactly the ${LIVE_ENUMERATION_LIMIT}-repo cap — the org has grown to/past it, so this run cannot see the full fleet and refuses to diff a truncated list (a partial diff would falsely report real repos past the cap as baseline-repo-gone). Raise LIVE_ENUMERATION_LIMIT in repo-hygiene-worker.ts and re-run.`,
     );
   }
 

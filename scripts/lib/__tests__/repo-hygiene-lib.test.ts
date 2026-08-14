@@ -118,13 +118,36 @@ describe("diffFleet — archived-flip", () => {
     expect(flip!.detail).toContain("baseline=true, live=false");
   });
 
-  it("baselineEdit is an UPDATE line carrying every OTHER field unchanged", () => {
+  it("baselineEdit is an UPDATE line reflecting the repo's full LIVE state (not a patch over the stale baseline entry)", () => {
     const entry = baselineEntry({ archived: false, visibility: "PRIVATE", pushedAtAtSeed: "2026-08-01T00:00:00Z" });
-    const findings = diffFleet(baseline([entry]), [liveRepo({ isArchived: true, visibility: "PRIVATE" })]);
+    const findings = diffFleet(baseline([entry]), [liveRepo({ isArchived: true, visibility: "PRIVATE", pushedAt: "2026-08-14T00:00:00Z" })]);
     const flip = findings.find((f) => f.class === "archived-flip")!;
+    // pushedAtAtSeed refreshes to the LIVE pushedAt, not the stale baseline seed date —
+    // this line is built from live state end to end, never `{...entry, oneField}`.
     expect(flip.baselineEdit).toBe(
-      'UPDATE its "repos" line to: {"name":"acuops-pipeline","archived":true,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-01T00:00:00Z"}',
+      'UPDATE its "repos" line to: {"name":"acuops-pipeline","archived":true,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-14T00:00:00Z"}',
     );
+  });
+
+  // codex review (2026-08-14, ops#101 PR pass 1, P2 — THE regression this fixes): before
+  // the fix, this exact fixture produced an archived-flip resolve line carrying the OLD
+  // (baseline) visibility and a visibility-flip resolve line carrying the OLD (baseline)
+  // archived state — applying either alone would silently revert the OTHER field, and the
+  // monitor would keep reporting drift forever no matter which one a human applied.
+  it("when BOTH archived and visibility change simultaneously, both findings' resolve lines are IDENTICAL and fully correct", () => {
+    const entry = baselineEntry({ name: "dual-flip-repo", archived: false, visibility: "PUBLIC" });
+    const findings = diffFleet(baseline([entry]), [
+      liveRepo({ name: "dual-flip-repo", isArchived: true, visibility: "PRIVATE", pushedAt: "2026-08-14T00:00:00Z" }),
+    ]);
+    const archivedFlip = findings.find((f) => f.class === "archived-flip")!;
+    const visibilityFlip = findings.find((f) => f.class === "visibility-flip")!;
+    expect(archivedFlip.baselineEdit).toBeDefined();
+    expect(visibilityFlip.baselineEdit).toBeDefined();
+    // Identical — safe to apply either one, or both, with the same end state.
+    expect(archivedFlip.baselineEdit).toBe(visibilityFlip.baselineEdit);
+    // And both fields are LIVE-correct in that one shared line — neither is stale.
+    expect(archivedFlip.baselineEdit).toContain('"archived":true');
+    expect(archivedFlip.baselineEdit).toContain('"visibility":"PRIVATE"');
   });
 });
 

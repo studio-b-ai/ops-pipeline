@@ -165,6 +165,11 @@ function formatBaselineEntry(e: BaselineEntry): string {
   return JSON.stringify({ name: e.name, archived: e.archived, visibility: e.visibility, pushedAtAtSeed: e.pushedAtAtSeed });
 }
 
+/** What `repo`'s baseline entry would be if its CURRENT live state were fully accepted — every field, not just whichever one triggered a given finding. `pushedAtAtSeed` refreshes to the live `pushedAt` (harmless: this field is never itself diffed, and refreshing it reflects "current as of this accepted edit"). */
+function liveEntrySnapshot(repo: LiveRepo): BaselineEntry {
+  return { name: repo.name, archived: repo.isArchived, visibility: repo.visibility, pushedAtAtSeed: repo.pushedAt };
+}
+
 /**
  * Diffs a live org enumeration against the committed baseline, producing findings for
  * exactly the five v1 classes, grouped in `FINDING_CLASSES` order and sorted by repo name
@@ -190,7 +195,7 @@ export function diffFleet(baseline: BaselineFile, live: LiveRepo[]): Finding[] {
       class: "new-unmapped-repo",
       repo: repo.name,
       detail: `\`${repo.name}\` is live but absent from the baseline (archived=${repo.isArchived}, visibility=${repo.visibility}, pushedAt=${repo.pushedAt}).`,
-      baselineEdit: `ADD to "repos": ${formatBaselineEntry({ name: repo.name, archived: repo.isArchived, visibility: repo.visibility, pushedAtAtSeed: repo.pushedAt })}`,
+      baselineEdit: `ADD to "repos": ${formatBaselineEntry(liveEntrySnapshot(repo))}`,
     });
   }
 
@@ -208,23 +213,37 @@ export function diffFleet(baseline: BaselineFile, live: LiveRepo[]): Finding[] {
   // 3 + 4: archived-flip / visibility-flip — present in both, one field differs. Visibility
   // compares case-insensitively (defensive only — `gh` itself always reports uppercase; a
   // hand-edited baseline typo like "public" must not read as live drift).
+  //
+  // codex review (2026-08-14, ops#101 PR pass 1, P2): each flip's resolve line MUST be
+  // built from the repo's FULL current live state, not `{...entry, <onlyThisField>:
+  // newValue}` — a repo that changes BOTH archived and visibility in the same run used to
+  // get two DIFFERENT resolve lines, each correct on its own changed field but carrying
+  // the OTHER field's STALE baseline value. Applying either one alone (the natural
+  // reading of "resolve THIS finding") would silently revert the other field, and the
+  // monitor would keep reporting drift forever. `liveEntrySnapshot` makes both flip
+  // findings on the same repo emit the IDENTICAL, fully-correct line — safe to apply
+  // either one, or both, with the same end state either way.
   for (const entry of [...baseline.repos].sort(byName)) {
     const repo = liveByName.get(entry.name);
     if (!repo) continue;
-    if (entry.archived !== repo.isArchived) {
+    const archivedDiffers = entry.archived !== repo.isArchived;
+    const visibilityDiffers = entry.visibility.toUpperCase() !== repo.visibility.toUpperCase();
+    if (!archivedDiffers && !visibilityDiffers) continue;
+    const fullLiveLine = `UPDATE its "repos" line to: ${formatBaselineEntry(liveEntrySnapshot(repo))}`;
+    if (archivedDiffers) {
       findings.push({
         class: "archived-flip",
         repo: entry.name,
         detail: `\`${entry.name}\` archived state differs: baseline=${entry.archived}, live=${repo.isArchived}.`,
-        baselineEdit: `UPDATE its "repos" line to: ${formatBaselineEntry({ ...entry, archived: repo.isArchived })}`,
+        baselineEdit: fullLiveLine,
       });
     }
-    if (entry.visibility.toUpperCase() !== repo.visibility.toUpperCase()) {
+    if (visibilityDiffers) {
       findings.push({
         class: "visibility-flip",
         repo: entry.name,
         detail: `\`${entry.name}\` visibility differs: baseline=${entry.visibility}, live=${repo.visibility}.`,
-        baselineEdit: `UPDATE its "repos" line to: ${formatBaselineEntry({ ...entry, visibility: repo.visibility })}`,
+        baselineEdit: fullLiveLine,
       });
     }
   }
