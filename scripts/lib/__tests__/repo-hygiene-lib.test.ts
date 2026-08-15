@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   BASELINE_RULES_VERSION,
+  alertWorthyCount,
   computeBotChurnSample,
   diffFleet,
   isBotAuthoredCommit,
@@ -482,5 +483,51 @@ describe("planIssueAction — single stable-title issue reconcile", () => {
 
   it("closes when findings clear and an issue is open", () => {
     expect(planIssueAction(0, true)).toBe("close");
+  });
+});
+
+// ───────────────────────────── alertWorthyCount (codex pass 2, P2) ─────────────────────────────
+
+describe("alertWorthyCount", () => {
+  // Negative controls first.
+  it("is 0 with zero findings and no systemic bot-churn failure", () => {
+    expect(alertWorthyCount([], false)).toBe(0);
+  });
+
+  it("does not double-count — real findings alone, no systemic flag", () => {
+    const findings: Finding[] = [{ class: "new-unmapped-repo", repo: "a", detail: "d", baselineEdit: "e" }];
+    expect(alertWorthyCount(findings, false)).toBe(1);
+  });
+
+  it("adds exactly 1 for a systemic bot-churn failure, independent of the real findings count", () => {
+    expect(alertWorthyCount([], true)).toBe(1);
+    const findings: Finding[] = [
+      { class: "new-unmapped-repo", repo: "a", detail: "d", baselineEdit: "e" },
+      { class: "archived-flip", repo: "b", detail: "d", baselineEdit: "e" },
+    ];
+    expect(alertWorthyCount(findings, true)).toBe(3);
+  });
+});
+
+// THE regression codex pass 2 caught: `planIssueAction(findings.length, ...)` alone let a
+// fully-broken bot-churn leg (real findings genuinely zero) plan "none" and exit green
+// forever — the degradation note in the body was written but never reached, because no
+// issue ever opened to carry it. `alertWorthyCount` composed into `planIssueAction` fixes
+// it; this test proves the exact wiring, not just each piece in isolation.
+describe("alertWorthyCount + planIssueAction — the systemic bot-churn regression", () => {
+  it("a fleet with ZERO real drift still OPENS the issue when bot-churn is systemically broken", () => {
+    expect(planIssueAction(alertWorthyCount([], true), false)).toBe("open");
+  });
+
+  it("...and UPDATES (not closes) an already-open issue while the systemic failure persists, even with zero real findings", () => {
+    expect(planIssueAction(alertWorthyCount([], true), true)).toBe("update");
+  });
+
+  it("only CLOSES once both real findings AND the systemic failure clear (negative control on the fix itself)", () => {
+    expect(planIssueAction(alertWorthyCount([], false), true)).toBe("close");
+  });
+
+  it("does NOT open when both are clear and no issue exists (the ordinary quiet steady state)", () => {
+    expect(planIssueAction(alertWorthyCount([], false), false)).toBe("none");
   });
 });

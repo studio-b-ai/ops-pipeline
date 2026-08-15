@@ -376,6 +376,27 @@ export function renderDriftIssueBody(findings: Finding[], meta: DriftMeta): stri
 export type IssueAction = "open" | "update" | "close" | "none";
 
 /**
+ * What counts as "alert-worthy" for the SINGLE aggregate issue's open/close decision —
+ * real findings, OR the bot-churn-freshness leg being systemically broken (see
+ * `DriftMeta.botChurnSystemicFailure`'s doc comment).
+ *
+ * codex review (2026-08-14, ops#101 PR pass 2, P2): without this, a run with ZERO real
+ * drift findings but every bot-churn commit fetch failing (the fleet App's documented
+ * current Contents:read gap) computed `planIssueAction(0, ...)` → `"none"` and exited
+ * green — forever, in production today. The degradation note `renderDriftIssueBody`
+ * writes into the body (`botChurnSystemicFailure`) was correctly RENDERED but never
+ * REACHED, because no issue ever opened to carry it: the only trace was a workflow-log
+ * line nobody is expected to watch (Rule #8 — "anything that needs my attention must push
+ * to me directly"). Folding the systemic-failure flag into this count means the aggregate
+ * issue opens (or stays open, carrying the note) until Contents:read is granted and the
+ * leg starts succeeding again — the SAME issue-based channel as every other finding,
+ * never a silent log-only degradation.
+ */
+export function alertWorthyCount(findings: Finding[], botChurnSystemicFailure: boolean): number {
+  return findings.length + (botChurnSystemicFailure ? 1 : 0);
+}
+
+/**
  * Unlike the fleet's per-entity multi-issue monitors (credential-expiry-monitor.ts,
  * railway-volume-monitor.ts — one issue per entity, title carries severity, reconciled via
  * `gateway-token-reconcile.ts`'s `reconcileCondition` / `severity-issue-reconcile.ts`'s
@@ -385,8 +406,12 @@ export type IssueAction = "open" | "update" | "close" | "none";
  * active/clear: an already-open issue with findings still present must have its body
  * refreshed ("update"), not silently left stale (Rule #412) and not duplicated (Rules
  * #292/#358).
+ *
+ * `alertCount` is normally `findings.length`, but the caller should pass
+ * `alertWorthyCount(findings, systemicFailure)` instead so a fully-broken bot-churn leg
+ * keeps the issue open even at zero real findings (see that function's doc comment).
  */
-export function planIssueAction(findingsCount: number, issueOpen: boolean): IssueAction {
-  if (findingsCount > 0) return issueOpen ? "update" : "open";
+export function planIssueAction(alertCount: number, issueOpen: boolean): IssueAction {
+  if (alertCount > 0) return issueOpen ? "update" : "open";
   return issueOpen ? "close" : "none";
 }

@@ -70,6 +70,7 @@ import { fileURLToPath } from "node:url";
 import {
   diffFleet,
   planIssueAction,
+  alertWorthyCount,
   renderDriftIssueBody,
   summarizeFindings,
   computeBotChurnSample,
@@ -218,7 +219,13 @@ async function main(): Promise<void> {
   // one never existed or one closed long ago.
   const openIssues = listIssuesByLabel(REPO, LABEL, "open");
   const existing = openIssues.find((i) => i.title === TITLE && i.state === "OPEN");
-  const action = planIssueAction(findings.length, Boolean(existing));
+  // codex review (2026-08-14, ops#101 PR pass 2, P2): `findings.length` alone would let a
+  // fully-broken bot-churn leg (findings.length === 0 whenever no OTHER drift exists) plan
+  // "none" and exit green forever, in production today — see alertWorthyCount's doc
+  // comment. The issue stays open (carrying the degradation note) until Contents:read is
+  // granted and bot-churn starts succeeding again, exactly like any other finding.
+  const alertCount = alertWorthyCount(findings, Boolean(botChurnSystemic));
+  const action = planIssueAction(alertCount, Boolean(existing));
 
   const body = renderDriftIssueBody(findings, {
     org: ORG,
@@ -234,6 +241,7 @@ async function main(): Promise<void> {
   console.log(`Org: ${ORG} · Baseline: ${baselineFile.repos.length} repos (rulesVersion ${baselineFile.rulesVersion}, seeded ${baselineFile.seededAt}) · Live: ${liveRepos.length} repos${hitCap ? " (AT ENUMERATION CAP)" : ""}`);
   console.log(`bot-churn: attempted ${botChurnOutcome.attempted}, failed ${botChurnOutcome.failed}${botChurnSystemic ? " (SYSTEMIC — see warning above)" : ""}`);
   console.log(`Existing aggregate issue: ${existing ? `#${existing.number} OPEN` : "none open"}`);
+  console.log(`Findings: ${findings.length} · alert-worthy count (incl. systemic bot-churn failure): ${alertCount}`);
   console.log(`Planned action: ${action.toUpperCase()}`);
   console.log(summary);
 
@@ -256,10 +264,13 @@ async function main(): Promise<void> {
     // without a named helper.
     gh(["issue", "edit", String(existing!.number), "--repo", REPO, "--body", body]);
   } else if (action === "close") {
+    // Only reachable at alertCount === 0, which requires BOTH zero real findings AND no
+    // systemic bot-churn failure this run (Rule #412 — the close comment says what was
+    // actually verified, not just "no drift").
     closeIssue(
       REPO,
       existing!.number,
-      `Fleet is clean vs the committed baseline — 0 findings this run. Auto-closed by the repo-hygiene worker.\n\n${summary}.`,
+      `Fleet is clean vs the committed baseline — 0 findings this run, and bot-churn commit checks ran successfully (no systemic failure). Auto-closed by the repo-hygiene worker.\n\n${summary}.`,
     );
   }
 
