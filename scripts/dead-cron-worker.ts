@@ -5,8 +5,10 @@
  * decision lives here.
  *
  * What it does, per run (weekly, as a second step in .github/workflows/repo-hygiene.yml):
- *   1. Enumerate live NON-ARCHIVED org repos (fleet App token — same mint as the
- *      repo-hygiene step; archived repos' workflows can't run and never flag).
+ *   1. Enumerate live NON-ARCHIVED, NON-TEMPLATE org repos (fleet App token — same mint
+ *      as the repo-hygiene step; archived repos' workflows can't run and never flag;
+ *      TEMPLATE repos are blueprints, not services — skipped by policy, but an open
+ *      dead-cron issue on one is closed with the policy comment; lib `TEMPLATE_POLICY`).
  *   2. Per repo: list Actions workflows; per real workflow file, read its YAML for
  *      `on.schedule` crons (Contents read); for schedule-bearing workflows, fetch the
  *      last RUN_WINDOW scheduled-trigger runs (`event=schedule`) TWICE with different
@@ -46,11 +48,15 @@ import {
   classifyWorkflow,
   isSystemic,
   mergeRunWindows,
+  partitionRepos,
   renderDeadCronIssueBody,
+  renderTemplatePolicyCloseComment,
   renderDegradationBody,
   summarizeDeadCron,
   type DeadCronFinding,
   type DegradationReport,
+  type LiveRepoRow,
+  type RepoPartition,
   type ScheduledRun,
   type WorkflowMeta,
 } from "./lib/dead-cron-classify.js";
@@ -73,14 +79,13 @@ const LIVE_ENUMERATION_LIMIT = 300;
 
 // ───────────────────────────── enumeration ─────────────────────────────
 
-interface GhRepoListRow {
-  name: string;
-  isArchived: boolean;
-}
-
-function listLiveRepoNames(): string[] {
-  const raw = gh(["repo", "list", ORG, "--limit", String(LIVE_ENUMERATION_LIMIT), "--json", "name,isArchived"]);
-  const rows = JSON.parse(raw) as GhRepoListRow[];
+/**
+ * Live org repos partitioned into scannable / template (policy-skipped, close-eligible) /
+ * archived — see `partitionRepos` + `TEMPLATE_POLICY` in the lib.
+ */
+function listLiveRepos(): RepoPartition {
+  const raw = gh(["repo", "list", ORG, "--limit", String(LIVE_ENUMERATION_LIMIT), "--json", "name,isArchived,isTemplate"]);
+  const rows = JSON.parse(raw) as LiveRepoRow[];
   if (rows.length === LIVE_ENUMERATION_LIMIT) {
     // Same contract as the sibling worker: a full final page means the enumeration may be
     // truncated — refuse to run on a partial fleet picture (the close sweep would treat
@@ -88,7 +93,7 @@ function listLiveRepoNames(): string[] {
     // silently claim fleet-wide reach it doesn't have — Rule #401).
     throw new Error(`live enumeration returned exactly the ${LIVE_ENUMERATION_LIMIT}-repo cap — raise LIVE_ENUMERATION_LIMIT and re-run.`);
   }
-  return rows.filter((r) => !r.isArchived).map((r) => r.name);
+  return partitionRepos(rows);
 }
 
 // ───────────────────────────── per-repo reads ─────────────────────────────
@@ -304,10 +309,15 @@ async function main(): Promise<void> {
 
   console.log(`=== dead-cron-worker${dryRun ? " --dry-run (real reads, NO issue mutations)" : ""}${repoFilter ? ` --repo ${repoFilter}` : ""} ===`);
 
-  const allRepos = listLiveRepoNames();
+  const live = listLiveRepos();
+  const allRepos = live.scannable;
+  // Template repos: skipped by policy (blueprints, not services — lib `TEMPLATE_POLICY`),
+  // but any open dead-cron issue on one is close-eligible below with the policy comment.
+  const templateRepos = repoFilter ? live.templates.filter((r) => r === repoFilter) : live.templates;
   const scannedRepos = repoFilter ? allRepos.filter((r) => r === repoFilter) : allRepos;
-  if (repoFilter && scannedRepos.length === 0) throw new Error(`--repo ${repoFilter}: not a live non-archived repo in ${ORG}`);
-  console.log(`Scanning ${scannedRepos.length} non-archived repo(s) of ${allRepos.length} live.`);
+  if (repoFilter && scannedRepos.length === 0 && templateRepos.length === 0) throw new Error(`--repo ${repoFilter}: not a live non-archived repo in ${ORG}`);
+  console.log(`Scanning ${scannedRepos.length} non-archived non-template repo(s) of ${allRepos.length + live.templates.length} live (${live.archived.length} archived out of scope).`);
+  if (templateRepos.length > 0) console.log(`Template repo(s) skipped by policy (blueprints, not services; close-eligible): ${templateRepos.join(", ")}`);
 
   const workflowsList: FetchCounter = { attempted: 0, failed: 0, firstError: null };
   const contentReads: FetchCounter = { attempted: 0, failed: 0, firstError: null };
@@ -395,11 +405,33 @@ async function main(): Promise<void> {
     }
   }
 
+  // One org-wide search feeds both close paths below (null = search failed → both skip loudly).
+  const openRepos = searchOpenDeadCronRepos();
+
+  // ── template-policy closes — INDEPENDENT of read degradation (codex P2, 2026-08-15):
+  // template status comes from repo ENUMERATION (metadata — which even the permission-
+  // gapped fleet App has), not from the Actions/Contents reads the degradation guard
+  // protects. A template's open issue is out of scope by construction, so a blind run may
+  // still close it; the comment says exactly why. ──
+  if (openRepos !== null) {
+    const templateSet = new Set(templateRepos);
+    for (const repoName of openRepos.filter((r) => templateSet.has(r))) {
+      const fullRepo = `${ORG}/${repoName}`;
+      const existing = listIssuesByLabel(fullRepo, LABEL, "open").find((i) => i.title === TITLE);
+      if (!existing) continue;
+      if (dryRun) {
+        console.log(`[dry-run] ${fullRepo}: TEMPLATE repo — would CLOSE dead-cron issue #${existing.number} by policy.`);
+        continue;
+      }
+      closeIssue(fullRepo, existing.number, renderTemplatePolicyCloseComment());
+      console.log(`${fullRepo}: CLOSED dead-cron issue #${existing.number} (template policy).`);
+    }
+  }
+
   // ── close sweep — only on a NON-degraded run (a blind run must not close what it could not re-confirm) ──
   if (anySystemic) {
     console.warn("dead-cron: systemic degradation this run — close sweep SKIPPED (open issues stay open; see the self-issue).");
   } else {
-    const openRepos = searchOpenDeadCronRepos();
     if (openRepos !== null) {
       const scanned = new Set(scannedRepos);
       const excludedInconclusive = openRepos.filter((r) => inconclusiveRepos.has(r));

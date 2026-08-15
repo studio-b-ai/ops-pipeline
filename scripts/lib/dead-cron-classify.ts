@@ -387,6 +387,56 @@ export function classifyWorkflow(input: WorkflowObservation, nowIso: string): De
 // ───────────────────────────── summary (Rule #465) ─────────────────────────────
 
 /** Every class with its count, including 0 — same string feeds the worker console AND issue bodies, so they can never disagree (the repo-hygiene-lib pattern). */
+// ───────────────────────────── repo scope policy ─────────────────────────────
+
+export interface LiveRepoRow {
+  name: string;
+  isArchived: boolean;
+  isTemplate: boolean;
+}
+
+export interface RepoPartition {
+  /** Non-archived, non-template — the repos this leg classifies. */
+  scannable: string[];
+  /** Non-archived TEMPLATE repos — skipped by policy (see `TEMPLATE_POLICY`), but close-eligible. */
+  templates: string[];
+  /** Archived — out of scope entirely (their workflows cannot run and never flag). */
+  archived: string[];
+}
+
+/**
+ * Template-repo policy (2026-08-15, ops-template#1 + studiob-test-template#1 — two of the
+ * first fleet firing's findings were GitHub TEMPLATE repos): a template's workflow files
+ * are BLUEPRINTS copied into spawned repos, not services that run on the template itself.
+ * A cron on the template is therefore never a service-health signal — it fires (or is
+ * auto-disabled for the template's natural dormancy, `disabled_inactivity`, which it will
+ * re-trip forever) against nothing. Templates are excluded from classification; SPAWNED
+ * repos are classified normally. A template repo carrying an open dead-cron issue is
+ * close-eligible with `renderTemplatePolicyCloseComment` (else the exclusion would orphan
+ * the issue behind the "only scanned repos get closed" rule).
+ */
+export const TEMPLATE_POLICY = "template repos are blueprints, not services — skipped by policy; spawned repos are classified normally";
+
+export function partitionRepos(rows: LiveRepoRow[]): RepoPartition {
+  const scannable: string[] = [];
+  const templates: string[] = [];
+  const archived: string[] = [];
+  for (const r of rows) {
+    if (r.isArchived) archived.push(r.name);
+    else if (r.isTemplate) templates.push(r.name);
+    else scannable.push(r.name);
+  }
+  return { scannable, templates, archived };
+}
+
+export function renderTemplatePolicyCloseComment(): string {
+  return [
+    "This repository is a GitHub **template** (`is_template=true`): its workflow files are blueprints copied into spawned repos, not services that run here — a cron firing (or being auto-disabled for the template's natural dormancy) on the template itself is never a service-health signal.",
+    `The dead-cron detector now skips template repos by policy (${TEMPLATE_POLICY}); spawned repos are still classified normally, so a broken cron in a spawn is caught there.`,
+    "Auto-closed by the dead-cron detector.",
+  ].join("\n\n");
+}
+
 export function summarizeDeadCron(findings: DeadCronFinding[]): string {
   const counts = new Map<DeadCronClass, number>(DEAD_CRON_CLASSES.map((c) => [c, 0]));
   for (const f of findings) counts.set(f.class, (counts.get(f.class) ?? 0) + 1);

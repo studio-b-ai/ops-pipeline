@@ -8,6 +8,9 @@ import {
   isSystemic,
   mergeRunWindows,
   observedPeriodDays,
+  partitionRepos,
+  renderTemplatePolicyCloseComment,
+  TEMPLATE_POLICY,
   renderDeadCronIssueBody,
   renderDegradationBody,
   resolveCronPeriodDays,
@@ -389,5 +392,37 @@ describe("mergeRunWindows (two differently-shaped reads → union)", () => {
     expect(mergeRunWindows([], sec)).toEqual({ runs: sec, added: 3, addedNewer: 3 });
     const prim = weeklyRuns(3);
     expect(mergeRunWindows(prim, [])).toEqual({ runs: prim, added: 0, addedNewer: 0 });
+  });
+});
+
+// ───────────────────────────── template-repo policy (ops-template#1 / studiob-test-template#1) ─────────────────────────────
+
+describe("partitionRepos (template repos are blueprints, not services)", () => {
+  it("splits scannable / templates / archived, preserving order; archived wins over template", () => {
+    const p = partitionRepos([
+      { name: "bolt-wms", isArchived: false, isTemplate: false },
+      { name: "ops-template", isArchived: false, isTemplate: true },
+      { name: "hubspot-configs", isArchived: true, isTemplate: false },
+      { name: "studiob-test-template", isArchived: false, isTemplate: true },
+      { name: "old-template", isArchived: true, isTemplate: true },
+      { name: "wasala", isArchived: false, isTemplate: false },
+    ]);
+    expect(p.scannable).toEqual(["bolt-wms", "wasala"]);
+    expect(p.templates).toEqual(["ops-template", "studiob-test-template"]);
+    expect(p.archived).toEqual(["hubspot-configs", "old-template"]);
+  });
+
+  it("empty input → three empty lists", () => {
+    expect(partitionRepos([])).toEqual({ scannable: [], templates: [], archived: [] });
+  });
+});
+
+describe("renderTemplatePolicyCloseComment", () => {
+  it("names the template mechanism, the policy, and that spawns are still classified", () => {
+    const c = renderTemplatePolicyCloseComment();
+    expect(c).toContain("is_template=true");
+    expect(c).toContain(TEMPLATE_POLICY);
+    expect(c).toContain("spawned repos are still classified");
+    expect(c).toContain("Auto-closed by the dead-cron detector");
   });
 });
