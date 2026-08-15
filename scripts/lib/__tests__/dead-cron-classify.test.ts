@@ -6,11 +6,13 @@ import {
   cronPeriodDays,
   failureStreak,
   isSystemic,
+  mergeRunWindows,
   observedPeriodDays,
   renderDeadCronIssueBody,
   renderDegradationBody,
   resolveCronPeriodDays,
   resolvePeriodDays,
+  sortRunsNewestFirst,
   streakThresholdK,
   summarizeDeadCron,
   DEAD_CRON_CLASSES,
@@ -291,5 +293,101 @@ describe("degradation (Rule #464 — the leg must say when it is blind)", () => 
     expect(body).toContain("ops#104");
     expect(body).toContain("MUST NOT be read as \"fleet healthy\"");
     expect(body).not.toContain("Workflow-file reads dead");
+  });
+});
+
+// ───────────────────────────── transient-read guard (ui-test-suite#44, 2026-08-15) ─────────────────────────────
+
+/** Weekly Monday runs, newest-first, ending 8/10 — the real tighten-sync-baseline shape (18 runs 4/13→8/10). */
+function weeklyRuns(n: number, conclusion = "success", newestIso = "2026-08-10T04:51:56Z"): ScheduledRun[] {
+  const base = Date.parse(newestIso);
+  return Array.from({ length: n }, (_, i) => run({ id: 1000 - i, conclusion, createdAt: new Date(base - i * 7 * 86_400_000).toISOString() }));
+}
+
+const WEEKLY_OBS = (runs: ScheduledRun[]): WorkflowObservation =>
+  obs({
+    repo: "ui-test-suite",
+    workflow: { name: "Tighten Sync Baseline", path: ".github/workflows/tighten-sync-baseline.yml", state: "active", createdAt: "2026-04-09T16:10:20Z" },
+    crons: ["30 5 * * 1"],
+    runs,
+  });
+
+describe("sortRunsNewestFirst", () => {
+  it("orders newest-first regardless of input order, stable, unparseable last", () => {
+    const a = run({ id: 1, createdAt: "2026-08-01T00:00:00Z" });
+    const b = run({ id: 2, createdAt: "2026-08-10T00:00:00Z" });
+    const c = run({ id: 3, createdAt: "2026-08-05T00:00:00Z" });
+    const bad = run({ id: 4, createdAt: "not-a-date" });
+    expect(sortRunsNewestFirst([a, bad, c, b]).map((r) => r.id)).toEqual([2, 3, 1, 4]);
+  });
+
+  it("does not mutate its input", () => {
+    const input = [run({ id: 1, createdAt: "2026-08-01T00:00:00Z" }), run({ id: 2, createdAt: "2026-08-10T00:00:00Z" })];
+    sortRunsNewestFirst(input);
+    expect(input.map((r) => r.id)).toEqual([1, 2]);
+  });
+});
+
+describe("classifyWorkflow never trusts input order (the runs[0]-as-newest assumption)", () => {
+  it("a mis-ordered healthy weekly window (6/22 first, 8/10 buried) is NOT silent", () => {
+    const healthy = weeklyRuns(18); // newest 8/10 → 5d silent, threshold 14d
+    const misordered = [healthy[7], ...healthy.slice(0, 7), ...healthy.slice(8)]; // 6/22 run first, exactly the #44 response shape
+    expect(misordered[0].createdAt.startsWith("2026-06-22")).toBe(true);
+    expect(classifyWorkflow(WEEKLY_OBS(healthy), NOW)).toBeNull();
+    expect(classifyWorkflow(WEEKLY_OBS(misordered), NOW)).toBeNull();
+  });
+
+  it("a mis-ordered window cannot fake a failure streak either (newest success buried under older failures)", () => {
+    const runs = [...dailyRuns(10, "failure").slice(1), run({ conclusion: "success", createdAt: "2026-08-14T08:30:00Z" })]; // success is the TRUE newest but listed last
+    expect(classifyWorkflow(obs({ runs }), NOW)).toBeNull();
+    // and reversed (oldest-first) input classifies identically to newest-first input
+    const newestFirst = dailyRuns(25, "failure");
+    expect(classifyWorkflow(obs({ runs: [...newestFirst].reverse() }), NOW)).toEqual(classifyWorkflow(obs({ runs: newestFirst }), NOW));
+  });
+
+  it("the #44 primary shape alone (window truncated at 6/22 — 7 newest runs missing) DOES flag silent — the merge is what saves it", () => {
+    const truncated = weeklyRuns(18).slice(7); // newest = 6/22, 54d silent at NOW
+    const finding = classifyWorkflow(WEEKLY_OBS(truncated), NOW);
+    expect(finding?.class).toBe("scheduled-but-silent");
+    expect(finding?.detail).toContain("2026-06-22");
+  });
+});
+
+describe("mergeRunWindows (two differently-shaped reads → union)", () => {
+  it("adds runs the primary missed and reports how many were NEWER than primary's newest", () => {
+    const full = weeklyRuns(18);
+    const primary = full.slice(7); // truncated at 6/22
+    const secondary = full.slice(0, 13); // created>=90d read: 8/10 back to 5/18
+    const merged = mergeRunWindows(primary, secondary);
+    expect(merged.added).toBe(7);
+    expect(merged.addedNewer).toBe(7);
+    expect(merged.runs.map((r) => r.id)).toEqual(full.map((r) => r.id)); // union == the real 18, newest-first
+    expect(classifyWorkflow(WEEKLY_OBS(merged.runs), NOW)).toBeNull(); // and it classifies healthy
+  });
+
+  it("dedupes by id, and by createdAt+status+conclusion when ids are absent", () => {
+    const withIds = weeklyRuns(5);
+    expect(mergeRunWindows(withIds, withIds).added).toBe(0);
+    const noIds = dailyRuns(5, "failure");
+    const m = mergeRunWindows(noIds, [...noIds, run({ conclusion: "failure", createdAt: "2026-08-15T00:00:00Z" })]);
+    expect(m.added).toBe(1);
+    expect(m.addedNewer).toBe(1);
+  });
+
+  it("caps to the window newest-first, and an older-only addition is added but not addedNewer", () => {
+    const primary = weeklyRuns(25);
+    const older = weeklyRuns(30).slice(25); // 5 runs older than anything in primary
+    const m = mergeRunWindows(primary, older, 25);
+    expect(m.added).toBe(5);
+    expect(m.addedNewer).toBe(0);
+    expect(m.runs).toHaveLength(25);
+    expect(m.runs[0].id).toBe(primary[0].id);
+  });
+
+  it("empty primary: everything from the secondary counts as newer; empty secondary: primary unchanged", () => {
+    const sec = weeklyRuns(3);
+    expect(mergeRunWindows([], sec)).toEqual({ runs: sec, added: 3, addedNewer: 3 });
+    const prim = weeklyRuns(3);
+    expect(mergeRunWindows(prim, [])).toEqual({ runs: prim, added: 0, addedNewer: 0 });
   });
 });
