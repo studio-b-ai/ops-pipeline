@@ -14,6 +14,20 @@ Two-oracle GL reconciliation: Heritage + Ferncrest income vs AR-posted (the
 Dec) additionally check trailing-3-month GL total vs the LOW-path quarter —
 below the floor prints an ESCALATION-CANDIDATE block; machinery never
 auto-escalates prose (seat action required).
+
+CashSale revenue stream (#106): folded into the SAME bucket structure the
+Invoice stream uses, AFTER the pure-invoice RECONCILE assert (so that gate
+keeps validating the Invoice stream alone, unchanged). Each Income-type
+CashSale Detail line is classified independently at LINE grain — the doc's
+CustomerID (+ resolved class) for the named-list rules, the LINE's own Branch
+(not the doc's — CashSale has no doc-level Branch) for the branch rule — via
+the same unmodified classify_doc(). Non-income lines (cash movements, e.g.
+Milberg 1240-000 factoring wires) are never silently dropped: they are summed
+into an "excluded cash-movement lines" figure rendered in the brief every
+month, zero or not. No Type-based sign flip (Cash Sale vs Cash Return) — the
+raw Detail Amount is the seat-verified convention (202606 target $151,137.32
+includes a recurring +$1,500 Cash Return line as a positive contribution;
+BI-ARInvoices' NEG_TYPES convention does not apply to this entity).
 """
 import argparse, collections, json, os, sys
 
@@ -31,6 +45,67 @@ LABEL = {
 V2_REF_SHARES = {"leg1": 73.2, "leg6": 21.0}
 LOW_PATH_ANNUAL = {2026: 12.5e6, 2027: 16.5e6, 2028: 21.8e6, 2029: 28.7e6, 2030: 37.9e6, 2031: 50.0e6}
 UNPOSTED_STATUSES = {"ON HOLD", "BALANCED"}
+
+# Fail-loud VALIDATION floor only (#106 spec) — NEVER used to drive
+# classification (income_accounts_from_chart() always derives membership from
+# the fetched chart). If the chart-derived Income set doesn't contain these
+# five, the chart pull is broken/incomplete and we stop loud rather than
+# silently compute a wrong CSL income total.
+KNOWN_INCOME_ACCOUNTS_FLOOR = {"3010-000", "3210-000", "3212-000", "3213-000", "3214"}
+
+
+def income_accounts_from_chart(chart_rows):
+    """AccountCD set where Type == 'Income' (normalized, non-empty). Pure,
+    importable — no I/O. See KNOWN_INCOME_ACCOUNTS_FLOOR for the validation-only
+    fail-loud check."""
+    out = set()
+    for row in chart_rows:
+        if (row.get("Type") or "").strip() == "Income":
+            cd = (row.get("AccountCD") or "").strip()
+            if cd:
+                out.add(cd)
+    missing = KNOWN_INCOME_ACCOUNTS_FLOOR - out
+    if missing:
+        raise SystemExit(
+            f"CSL INCOME-ACCOUNT VALIDATION FAIL: chart-derived Income accounts missing "
+            f"expected floor {sorted(missing)} — Account chart pull is broken or incomplete (#106)"
+        )
+    return out
+
+
+def classify_csl_income(csl_docs, income_accts, classify_doc_fn):
+    """Line-grain CashSale processing (#106). For every Detail line on an
+    Income-type account, builds a synthetic classify_doc() input from the
+    DOC's CustomerID (+ resolved class, doc['_cls'] as pulled) and the LINE's
+    own Branch, and classifies it through the unmodified ruleset. Non-income
+    lines are summed separately and never dropped. No sign flip by doc Type.
+
+    Returns (bucket_deltas, income_total, excluded_total, excluded_lines) where
+    bucket_deltas is {bucket: {"net": float, "docs": int, "custs": set}} —
+    "docs" here counts income LINES (a CashSale Detail line is the atomic
+    classified unit for this stream, not the parent document).
+    """
+    bucket_deltas = collections.defaultdict(lambda: {"net": 0.0, "docs": 0, "custs": set()})
+    income_total = 0.0
+    excluded_total = 0.0
+    excluded_lines = 0
+    for d in csl_docs:
+        cust = (d.get("CustomerID") or "").strip().upper()
+        cls = (d.get("_cls") or "").strip().upper()
+        for line in d.get("Details", []) or []:
+            acct = (line.get("Account") or "").strip()
+            amt = float(line.get("Amount") or 0)
+            if acct in income_accts:
+                branch = (line.get("Branch") or "").strip().upper()
+                b, rule, tag, note = classify_doc_fn({"cust": cust, "cls": cls, "branch": branch})
+                bucket_deltas[b]["net"] += amt
+                bucket_deltas[b]["docs"] += 1
+                bucket_deltas[b]["custs"].add(cust)
+                income_total += amt
+            else:
+                excluded_total += amt
+                excluded_lines += 1
+    return bucket_deltas, round(income_total, 2), round(excluded_total, 2), excluded_lines
 
 def ym_to_period(ym):
     return ym[4:6] + ym[0:4]
@@ -83,6 +158,29 @@ def main():
     total = round(sum(b["net"] for b in buckets.values()), 2)
     assert total == expected, f"RECONCILE FAIL: {total} != {expected}"
 
+    # ---- CashSale revenue stream (#106) — folded in AFTER the pure-invoice
+    # RECONCILE assert above, so that gate keeps validating the Invoice stream
+    # alone, byte-for-byte unchanged. Required files: pull_month.py always
+    # writes both alongside ar-invoices-<ym>.jsonl now.
+    csl_path = os.path.join(wd, f"cashsale-{ym}.json")
+    chart_path = os.path.join(wd, "account-chart.json")
+    if not os.path.exists(csl_path) or not os.path.exists(chart_path):
+        raise SystemExit(
+            f"CSL FILES MISSING: expected {csl_path} and {chart_path} — "
+            f"run pull_month.py first (#106)"
+        )
+    csl_docs = json.load(open(csl_path))
+    chart_rows = json.load(open(chart_path))
+    income_accts = income_accounts_from_chart(chart_rows)
+    csl_deltas, csl_income_total, csl_excluded_total, csl_excluded_lines = classify_csl_income(
+        csl_docs, income_accts, r.classify_doc
+    )
+    for b, delta in csl_deltas.items():
+        buckets[b]["net"] += delta["net"]
+        buckets[b]["docs"] += delta["docs"]
+        buckets[b]["custs"] |= delta["custs"]
+    total = round(sum(b["net"] for b in buckets.values()), 2)  # recompute post-CSL-fold
+
     tag_net = round(sum(d["net"] for d, b in tagged), 2)
     h2_gross = round(sum(abs(d["net"]) for d in docs if bucket_of[(d["ttype"], d["ref"])] == "H2_unclassified"), 2)
     unposted = round(sum(row["net"] for row in rows
@@ -113,6 +211,18 @@ def main():
         ref = f"{V2_REF_SHARES[k]:.1f}%" if k in V2_REF_SHARES else "—"
         w(f"| {LABEL[k]} | {b['net']:,.2f} | {b['docs']} | {len(b['custs'])} | {pct:.1f}% | {ref} |")
     w(f"| **TOTAL** | **{total:,.2f}** | {sum(b['docs'] for b in buckets.values())} | | 100.0% | |")
+    w("")
+    if csl_income_total:
+        for b in ORDER:
+            delta = csl_deltas.get(b)
+            if delta and delta["net"]:
+                w(f"**cash-sale stream: ${delta['net']:,.2f} ({b})** — folded into the bucket above "
+                  f"({delta['docs']} income line{'s' if delta['docs'] != 1 else ''}).")
+    else:
+        w("**cash-sale stream: $0.00** — no in-month CashSale income-account activity.")
+    w(f"Excluded cash-movement lines (non-income CashSale accounts, e.g. Milberg 1240-000 "
+      f"factoring wires): ${csl_excluded_total:,.2f} ({csl_excluded_lines} line"
+      f"{'s' if csl_excluded_lines != 1 else ''}) — never in revenue, never silent.")
     w("")
     w(f"**Two-oracle (leg 6 forever checks both ledgers):** AR leg-6 ${leg6_ar:,.2f} · "
       f"Ferncrest GL income ${fern_gl:,.2f} · Heritage GL ${gp['OTHER']:,.2f} · "
@@ -172,6 +282,7 @@ def main():
     print(json.dumps({"ym": ym, "total": total, "gl_total": gl_total, "residual": residual,
                       "leg6_ar": leg6_ar, "fern_gl": fern_gl, "tag_net": tag_net,
                       "h2_gross": h2_gross,
+                      "csl_income_total": csl_income_total, "csl_excluded_total": csl_excluded_total,
                       "buckets": {k: round(buckets.get(k, {'net': 0.0})["net"], 2) for k in ORDER}}))
 
 if __name__ == "__main__":
