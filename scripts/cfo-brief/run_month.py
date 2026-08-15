@@ -179,6 +179,17 @@ def main():
         buckets[b]["net"] += delta["net"]
         buckets[b]["docs"] += delta["docs"]
         buckets[b]["custs"] |= delta["custs"]
+
+    # Re-run the H9 fail-closed check (codex #106 review, P2): the assert at
+    # line ~155 above only covers the invoice stream — a CSL income line CAN
+    # classify_doc() to H9_UNMAPPED (blank line Branch, or a novel customer
+    # class on a non-FERNCREST branch) and, unchecked, would silently pass as
+    # unmapped revenue instead of failing loud.
+    h9_post_csl = buckets.get("H9_UNMAPPED", {"net": 0.0, "docs": 0, "custs": set()})
+    assert h9_post_csl["docs"] == 0 and not h9_post_csl["custs"], (
+        f"H9 NOT EMPTY AFTER CSL FOLD: {h9_post_csl} — a CashSale income line hit H9_UNMAPPED"
+    )
+
     total = round(sum(b["net"] for b in buckets.values()), 2)  # recompute post-CSL-fold
 
     tag_net = round(sum(d["net"] for d, b in tagged), 2)

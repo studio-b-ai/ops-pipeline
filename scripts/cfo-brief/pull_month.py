@@ -170,10 +170,20 @@ def main():
     # Chart of accounts (#106): fetched once so run_month.py can filter CashSale
     # Detail lines to Income-type accounts without hardcoding the account list
     # into classification logic (a hardcoded list is fail-loud VALIDATION only).
+    # FAIL LOUD (not a warn-and-proceed like the CashSale/Invoice population
+    # caps above) if this hits the page cap: unlike an undercounted revenue
+    # pull — which the two-oracle GL check would eventually surface as a
+    # growing residual — a TRUNCATED chart silently MISCLASSIFIES real Income
+    # account lines as excluded cash movements (codex #106 review, P2). A
+    # truncated chart is never safe to classify revenue against.
     chart_raw = fetch("query/Account", {"select": "AccountCD,Type", "top": 500})
     if len(chart_raw) >= 500:
-        print("[pull] **WARN: Account chart returned >= 500 rows — possible truncation, "
-              "widen top or add paging (#331)**", flush=True)
+        raise SystemExit(
+            "CHART PULL FAIL: Account query hit the 500-row cap — the chart may be "
+            "truncated, and classifying CashSale revenue against a partial chart risks "
+            "silently miscategorizing real Income accounts as excluded (#106). Widen "
+            "top or add paging before re-running."
+        )
     chart_path = os.path.join(a.workdir, "account-chart.json")
     json.dump(chart_raw, open(chart_path, "w"))
     print(f"[pull] Account chart: {len(chart_raw)} accounts -> {chart_path}", flush=True)
