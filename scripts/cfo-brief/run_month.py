@@ -81,11 +81,14 @@ def classify_csl_income(csl_docs, income_accts, classify_doc_fn):
     lines are summed separately and never dropped. No sign flip by doc Type.
 
     Returns (bucket_deltas, income_total, excluded_total, excluded_lines) where
-    bucket_deltas is {bucket: {"net": float, "docs": int, "custs": set}} —
+    bucket_deltas is {bucket: {"net": float, "gross": float, "docs": int, "custs": set}} —
     "docs" here counts income LINES (a CashSale Detail line is the atomic
-    classified unit for this stream, not the parent document).
+    classified unit for this stream, not the parent document); "gross" is the
+    abs-sum companion to "net" (mirrors classify_legs_v1_1's gross_abs()) so
+    callers computing materiality gates (e.g. H2) off gross can include the
+    CSL contribution without re-deriving it from net (codex #106 review, P2).
     """
-    bucket_deltas = collections.defaultdict(lambda: {"net": 0.0, "docs": 0, "custs": set()})
+    bucket_deltas = collections.defaultdict(lambda: {"net": 0.0, "gross": 0.0, "docs": 0, "custs": set()})
     income_total = 0.0
     excluded_total = 0.0
     excluded_lines = 0
@@ -99,6 +102,7 @@ def classify_csl_income(csl_docs, income_accts, classify_doc_fn):
                 branch = (line.get("Branch") or "").strip().upper()
                 b, rule, tag, note = classify_doc_fn({"cust": cust, "cls": cls, "branch": branch})
                 bucket_deltas[b]["net"] += amt
+                bucket_deltas[b]["gross"] += abs(amt)
                 bucket_deltas[b]["docs"] += 1
                 bucket_deltas[b]["custs"].add(cust)
                 income_total += amt
@@ -193,7 +197,12 @@ def main():
     total = round(sum(b["net"] for b in buckets.values()), 2)  # recompute post-CSL-fold
 
     tag_net = round(sum(d["net"] for d, b in tagged), 2)
-    h2_gross = round(sum(abs(d["net"]) for d in docs if bucket_of[(d["ttype"], d["ref"])] == "H2_unclassified"), 2)
+    # H2 materiality gross must include any CSL H2_unclassified lines (codex
+    # #106 review, P2) — otherwise the gate can silently pass a combined H2
+    # bucket that exceeds H2_ABS_LIMIT because it only ever summed invoice docs.
+    h2_gross_invoice = round(sum(abs(d["net"]) for d in docs if bucket_of[(d["ttype"], d["ref"])] == "H2_unclassified"), 2)
+    h2_gross_csl = round(csl_deltas.get("H2_unclassified", {"gross": 0.0})["gross"], 2)
+    h2_gross = round(h2_gross_invoice + h2_gross_csl, 2)
     unposted = round(sum(row["net"] for row in rows
                          if (row.get("status") or "").strip().upper() in UNPOSTED_STATUSES), 2)
 
