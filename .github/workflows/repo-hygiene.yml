@@ -1,0 +1,96 @@
+name: Repo Hygiene
+
+# ops-pipeline#101 (design comment: CTO seat, 2026-08-14) — the recurring flags-only
+# fleet-drift-vs-baseline worker. Full design lives in scripts/repo-hygiene-worker.ts's
+# and scripts/lib/repo-hygiene-lib.ts's header comments; this workflow only mints the
+# fleet App token (needs-human-crossrepo.yml's pattern, copied verbatim per ops#88) and
+# runs the worker with it.
+#
+# Why minting is required here (most of this repo's other monitors use the ambient
+# GITHUB_TOKEN directly — see credential-expiry-monitor.yml / gateway-token-watch.yml):
+# this worker enumerates EVERY repo in the studio-b-ai org (`gh repo list studio-b-ai`) —
+# a repo-scoped ambient token structurally cannot do that, it can only see the one repo
+# the workflow is running in. The `studiob-fleet-bot` App (App ID 4595770, installed
+# org-wide — see ops-pipeline#88) is what makes an org-wide read possible; its
+# installation-level `issues:write` is also what lets this workflow open/update/close the
+# aggregate drift issue in THIS repo with no job-level `issues: write` permission of its
+# own.
+#
+# ⚠️ Live-verified 2026-08-14 (`gh api /orgs/studio-b-ai/installations`): the fleet App's
+# CURRENT installation permissions are exactly `issues:write` + `metadata:read` — no
+# `contents:read`. That's enough for the org enumeration leg (Metadata covers `GET
+# /orgs/{org}/repos`) but NOT the bot-churn commit-history leg (`GET
+# /repos/{owner}/{repo}/commits` requires Contents:read per GitHub's own
+# permissions-required-for-github-apps docs). The worker degrades gracefully and says so
+# loudly (both in this workflow's run log and in the issue body) rather than silently
+# reporting 0 bot-churn findings forever — see repo-hygiene-worker.ts's file header for
+# the full account. Granting Contents:read is an org-owner-UI-only action (no API path,
+# mirrors Rule #78's `workflows:` permission story) and is OUT OF SCOPE for this PR —
+# flagged as a top-level follow-up (Rule #6).
+#
+# Flags-only (the issue's own "Law" section): this workflow, and the worker it runs,
+# never mutate a repo, never archive anything, never touch repo-baseline.json. Baseline
+# updates are human — the issue body carries the exact line(s) to edit.
+
+on:
+  schedule:
+    - cron: "0 9 * * 5" # weekly, Friday 09:00 UTC (GH Actions cron is UTC-only — Rule #94)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real reads throughout (org enumeration, per-repo commit fetch, issue list) — zero issue mutations, preview only"
+        required: false
+        type: boolean
+        default: false
+
+# Job-level permissions cover ONLY this job's own checkout via the ambient GITHUB_TOKEN.
+# Every actual mutation (issue open/edit/close in THIS repo) rides the MINTED fleet
+# installation token (GH_TOKEN below), never this ambient token — if the mint step ever
+# failed silently and a later step fell back to `github.token`, that token has no issues
+# permission at all here, so every `gh` call would fail loud rather than quietly mutate
+# under the wrong identity.
+permissions:
+  contents: read
+
+concurrency:
+  group: repo-hygiene
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: "Fleet drift vs baseline (fleet App token)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted UNCONDITIONALLY — including on a dry run: Rule #376, a dry run that reads
+      # nothing proves nothing, and every read this worker does (org repo enumeration,
+      # per-repo commit fetch, issue list) needs real org-wide access the ambient
+      # GITHUB_TOKEN structurally cannot provide.
+      - name: Mint fleet installation token
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: Fail loud if the fleet token did not mint
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token — check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
+          exit 1
+
+      - name: Run repo-hygiene worker
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+        run: npx tsx repo-hygiene-worker.ts ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
