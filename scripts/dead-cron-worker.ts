@@ -405,30 +405,38 @@ async function main(): Promise<void> {
     }
   }
 
+  // One org-wide search feeds both close paths below (null = search failed → both skip loudly).
+  const openRepos = searchOpenDeadCronRepos();
+
+  // ── template-policy closes — INDEPENDENT of read degradation (codex P2, 2026-08-15):
+  // template status comes from repo ENUMERATION (metadata — which even the permission-
+  // gapped fleet App has), not from the Actions/Contents reads the degradation guard
+  // protects. A template's open issue is out of scope by construction, so a blind run may
+  // still close it; the comment says exactly why. ──
+  if (openRepos !== null) {
+    const templateSet = new Set(templateRepos);
+    for (const repoName of openRepos.filter((r) => templateSet.has(r))) {
+      const fullRepo = `${ORG}/${repoName}`;
+      const existing = listIssuesByLabel(fullRepo, LABEL, "open").find((i) => i.title === TITLE);
+      if (!existing) continue;
+      if (dryRun) {
+        console.log(`[dry-run] ${fullRepo}: TEMPLATE repo — would CLOSE dead-cron issue #${existing.number} by policy.`);
+        continue;
+      }
+      closeIssue(fullRepo, existing.number, renderTemplatePolicyCloseComment());
+      console.log(`${fullRepo}: CLOSED dead-cron issue #${existing.number} (template policy).`);
+    }
+  }
+
   // ── close sweep — only on a NON-degraded run (a blind run must not close what it could not re-confirm) ──
   if (anySystemic) {
     console.warn("dead-cron: systemic degradation this run — close sweep SKIPPED (open issues stay open; see the self-issue).");
   } else {
-    const openRepos = searchOpenDeadCronRepos();
     if (openRepos !== null) {
       const scanned = new Set(scannedRepos);
       const excludedInconclusive = openRepos.filter((r) => inconclusiveRepos.has(r));
       if (excludedInconclusive.length > 0) {
         console.warn(`dead-cron: ${excludedInconclusive.length} repo(s) with open issues excluded from the close sweep — reads incomplete this run (codex P2): ${excludedInconclusive.join(", ")}`);
-      }
-      // Template repos with an open issue: close by POLICY (never scanned, so they can't be
-      // "clean this run" — they are out of scope by construction; the comment says so).
-      const templateSet = new Set(templateRepos);
-      for (const repoName of openRepos.filter((r) => templateSet.has(r))) {
-        const fullRepo = `${ORG}/${repoName}`;
-        const existing = listIssuesByLabel(fullRepo, LABEL, "open").find((i) => i.title === TITLE);
-        if (!existing) continue;
-        if (dryRun) {
-          console.log(`[dry-run] ${fullRepo}: TEMPLATE repo — would CLOSE dead-cron issue #${existing.number} by policy.`);
-          continue;
-        }
-        closeIssue(fullRepo, existing.number, renderTemplatePolicyCloseComment());
-        console.log(`${fullRepo}: CLOSED dead-cron issue #${existing.number} (template policy).`);
       }
       const closeCandidates = openRepos.filter((r) => scanned.has(r) && !findingsByRepo.has(r) && !inconclusiveRepos.has(r));
       for (const repoName of closeCandidates) {
