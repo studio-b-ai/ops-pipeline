@@ -73,25 +73,37 @@ def income_accounts_from_chart(chart_rows):
     return out
 
 
-def classify_csl_income(csl_docs, income_accts, classify_doc_fn):
+def classify_csl_income(csl_docs, income_accts, classify_doc_fn, tag_set=None):
     """Line-grain CashSale processing (#106). For every Detail line on an
     Income-type account, builds a synthetic classify_doc() input from the
     DOC's CustomerID (+ resolved class, doc['_cls'] as pulled) and the LINE's
     own Branch, and classifies it through the unmodified ruleset. Non-income
     lines are summed separately and never dropped. No sign flip by doc Type.
 
-    Returns (bucket_deltas, income_total, excluded_total, excluded_lines) where
-    bucket_deltas is {bucket: {"net": float, "gross": float, "docs": int, "custs": set}} —
-    "docs" here counts income LINES (a CashSale Detail line is the atomic
-    classified unit for this stream, not the parent document); "gross" is the
-    abs-sum companion to "net" (mirrors classify_legs_v1_1's gross_abs()) so
-    callers computing materiality gates (e.g. H2) off gross can include the
-    CSL contribution without re-deriving it from net (codex #106 review, P2).
+    tag_set (optional, e.g. classify_legs_v1_1.MAKER_SHAPED_TAG): if a line's
+    CustomerID is in it, its amount is folded into tagged_net (so the brief's
+    "Maker-shaped tag" reporting series doesn't silently underreport CSL
+    income from a tagged account — codex #106 review, P2) and, if the line
+    did NOT land in leg1, the (cust, bucket, amt) triple is recorded in
+    tagged_offtag so callers can enforce the same TAG-IN-LEG1 invariant the
+    invoice stream already checks (mirrors run_month.py's bad_tag check).
+
+    Returns (bucket_deltas, income_total, excluded_total, excluded_lines,
+    tagged_net, tagged_offtag). bucket_deltas is {bucket: {"net": float,
+    "gross": float, "docs": int, "custs": set}} — "docs" here counts income
+    LINES (a CashSale Detail line is the atomic classified unit for this
+    stream, not the parent document); "gross" is the abs-sum companion to
+    "net" (mirrors classify_legs_v1_1's gross_abs()) so callers computing
+    materiality gates (e.g. H2) off gross can include the CSL contribution
+    without re-deriving it from net (codex #106 review, P2).
     """
+    tag_set = tag_set or set()
     bucket_deltas = collections.defaultdict(lambda: {"net": 0.0, "gross": 0.0, "docs": 0, "custs": set()})
     income_total = 0.0
     excluded_total = 0.0
     excluded_lines = 0
+    tagged_net = 0.0
+    tagged_offtag = []
     for d in csl_docs:
         cust = (d.get("CustomerID") or "").strip().upper()
         cls = (d.get("_cls") or "").strip().upper()
@@ -106,10 +118,15 @@ def classify_csl_income(csl_docs, income_accts, classify_doc_fn):
                 bucket_deltas[b]["docs"] += 1
                 bucket_deltas[b]["custs"].add(cust)
                 income_total += amt
+                if cust in tag_set:
+                    tagged_net += amt
+                    if b != "leg1":
+                        tagged_offtag.append((cust, b, amt))
             else:
                 excluded_total += amt
                 excluded_lines += 1
-    return bucket_deltas, round(income_total, 2), round(excluded_total, 2), excluded_lines
+    return (bucket_deltas, round(income_total, 2), round(excluded_total, 2), excluded_lines,
+            round(tagged_net, 2), tagged_offtag)
 
 def ym_to_period(ym):
     return ym[4:6] + ym[0:4]
@@ -176,8 +193,9 @@ def main():
     csl_docs = json.load(open(csl_path))
     chart_rows = json.load(open(chart_path))
     income_accts = income_accounts_from_chart(chart_rows)
-    csl_deltas, csl_income_total, csl_excluded_total, csl_excluded_lines = classify_csl_income(
-        csl_docs, income_accts, r.classify_doc
+    (csl_deltas, csl_income_total, csl_excluded_total, csl_excluded_lines,
+     csl_tagged_net, csl_tagged_offtag) = classify_csl_income(
+        csl_docs, income_accts, r.classify_doc, tag_set=r.MAKER_SHAPED_TAG
     )
     for b, delta in csl_deltas.items():
         buckets[b]["net"] += delta["net"]
@@ -193,10 +211,17 @@ def main():
     assert h9_post_csl["docs"] == 0 and not h9_post_csl["custs"], (
         f"H9 NOT EMPTY AFTER CSL FOLD: {h9_post_csl} — a CashSale income line hit H9_UNMAPPED"
     )
+    # Same TAG-IN-LEG1 invariant the invoice stream enforces (bad_tag, above),
+    # extended to CSL (codex #106 review, P2 — a tagged CSL line landing
+    # outside leg1 would otherwise go unnoticed).
+    assert not csl_tagged_offtag, f"CSL TAGGED LINES OUTSIDE LEG1: {csl_tagged_offtag}"
 
     total = round(sum(b["net"] for b in buckets.values()), 2)  # recompute post-CSL-fold
 
-    tag_net = round(sum(d["net"] for d, b in tagged), 2)
+    # tag_net folds in any CSL income from a MAKER_SHAPED_TAG customer (codex
+    # #106 review, P2) — without this, the brief's "Maker-shaped tag" series
+    # would silently underreport whenever a tagged account has CSL income.
+    tag_net = round(sum(d["net"] for d, b in tagged) + csl_tagged_net, 2)
     # H2 materiality gross must include any CSL H2_unclassified lines (codex
     # #106 review, P2) — otherwise the gate can silently pass a combined H2
     # bucket that exceeds H2_ABS_LIMIT because it only ever summed invoice docs.

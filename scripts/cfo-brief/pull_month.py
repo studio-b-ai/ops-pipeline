@@ -154,10 +154,20 @@ def main():
     # CashSale revenue stream (#106): ONE unfiltered call (no PostPeriod filter
     # exists on this entity — top=1000 covers the ~130-doc lifetime population
     # with room to spare), sliced client-side to the target month + Closed-only.
+    # FAIL LOUD (not warn-and-proceed) on hitting the cap: the downstream run
+    # consumes this file as the authoritative in-month CashSale set, and a
+    # truncated pull would silently UNDERREPORT CSL revenue for any in-month
+    # docs past the cut page — the two-oracle GL check might eventually flag
+    # the resulting residual, but there is no reason to ship a known-truncated
+    # pull when the fix is to widen top or add a skip-paging ladder (codex
+    # #106 review pass 3, P2).
     csl_raw = fetch("query/CashSale", {"expand": "Details", "top": 1000})
     if len(csl_raw) >= 1000:
-        print("[pull] **WARN: CashSale returned >= 1000 rows — possible truncation, "
-              "widen top or add paging (#331)**", flush=True)
+        raise SystemExit(
+            "CASHSALE PULL FAIL: query hit the 1000-row cap — the lifetime population may "
+            "have outgrown the single-call assumption (#106); widen top or add skip-paging "
+            "before re-running rather than shipping a truncated in-month slice."
+        )
     csl_docs = slice_cashsale(csl_raw, a.ym)
     for d in csl_docs:
         cid = (d.get("CustomerID") or "").strip()

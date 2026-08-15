@@ -92,8 +92,8 @@ def check_a_june_full_pipeline(failures):
     for d in sliced_june:
         d["_cls"] = ""  # all real income lines are FERNCREST-branch; class never consulted (R7 wins)
 
-    deltas, income_total, excluded_total, excluded_lines = rm.classify_csl_income(
-        sliced_june, income_accts, r.classify_doc
+    deltas, income_total, excluded_total, excluded_lines, tagged_net, tagged_offtag = rm.classify_csl_income(
+        sliced_june, income_accts, r.classify_doc, tag_set=r.MAKER_SHAPED_TAG
     )
     if income_total != CSL_202606_INCOME_TOTAL:
         failures.append(f"A: CSL income total (direct probe): got {income_total} want {CSL_202606_INCOME_TOTAL}")
@@ -101,6 +101,11 @@ def check_a_june_full_pipeline(failures):
         failures.append(f"A: CSL excluded total (direct probe): got {excluded_total} want 0.00")
     if excluded_lines != 0:
         failures.append(f"A: CSL excluded lines (direct probe): got {excluded_lines} want 0")
+    if tagged_net != 0.00:
+        failures.append(f"A: 202606 has no MAKER_SHAPED_TAG customers in CSL data — "
+                         f"tagged_net: got {tagged_net} want 0.00")
+    if tagged_offtag:
+        failures.append(f"A: unexpected CSL tagged lines outside leg1: {tagged_offtag}")
     leg6_delta = deltas.get("leg6", {"net": 0.0})["net"]
     if round(leg6_delta, 2) != CSL_202606_INCOME_TOTAL:
         failures.append(f"A: all 202606 CSL income should land leg6 (all FERNCREST-branch): "
@@ -178,8 +183,8 @@ def check_b_august_exclusion(failures):
         if "1240-000" in income_accts:
             failures.append("B: 1240-000 (Milberg) is classified as an Income account — should be Asset")
 
-    deltas, income_total, excluded_total, excluded_lines = rm.classify_csl_income(
-        sliced_aug, income_accts, r.classify_doc
+    deltas, income_total, excluded_total, excluded_lines, tagged_net, tagged_offtag = rm.classify_csl_income(
+        sliced_aug, income_accts, r.classify_doc, tag_set=r.MAKER_SHAPED_TAG
     )
     if income_total != 0.00:
         failures.append(f"B: 202508 CSL income total: got {income_total} want 0.00 "
@@ -190,6 +195,8 @@ def check_b_august_exclusion(failures):
         failures.append(f"B: 202508 excluded line count: got {excluded_lines} want 6")
     if deltas:
         failures.append(f"B: 202508 should route ZERO docs to any leg bucket (all excluded): got {dict(deltas)}")
+    if tagged_net != 0.00 or tagged_offtag:
+        failures.append(f"B: unexpected tagged CSL activity in 202508: net={tagged_net} offtag={tagged_offtag}")
 
     # Milberg-only subtotal, sanity-anchored against the issue's own estimate.
     milberg_only = round(sum(
@@ -215,13 +222,15 @@ def check_c_july_zero_csl(failures):
 
     chart_rows = load_chart_rows()
     income_accts = rm.income_accounts_from_chart(chart_rows)
-    deltas, income_total, excluded_total, excluded_lines = rm.classify_csl_income(
-        sliced_july, income_accts, r.classify_doc
+    deltas, income_total, excluded_total, excluded_lines, tagged_net, tagged_offtag = rm.classify_csl_income(
+        sliced_july, income_accts, r.classify_doc, tag_set=r.MAKER_SHAPED_TAG
     )
     if income_total != 0.00:
         failures.append(f"C: 202607 CSL income total: got {income_total} want 0.00")
     if excluded_total != 0.00 or excluded_lines != 0:
         failures.append(f"C: 202607 CSL excluded: got total={excluded_total} lines={excluded_lines} want 0/0")
+    if tagged_net != 0.00 or tagged_offtag:
+        failures.append(f"C: unexpected tagged CSL activity in 202607: net={tagged_net} offtag={tagged_offtag}")
 
 
 def main():
