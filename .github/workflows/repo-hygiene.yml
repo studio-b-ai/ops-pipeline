@@ -94,3 +94,23 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
         run: npx tsx repo-hygiene-worker.ts ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+
+      # ops-pipeline#112 — the dead-cron detector leg (scripts/dead-cron-worker.ts; design
+      # in scripts/lib/dead-cron-classify.ts's header). Separate step, separate failure
+      # domain: `!cancelled()` (Rule #320 — a bare sequential step inherits an implicit
+      # success(), so a fleet-drift failure above would otherwise silently skip this leg;
+      # tonight's whole triage exists because exactly that class of skip went unwatched).
+      # If the mint step failed, GH_TOKEN is empty and this fails loud — never quietly
+      # mutates under the ambient token (which has no issues permission here anyway).
+      #
+      # ⚠️ Until the ops#104 grant (Actions:read + Contents:read on the fleet App), this
+      # step's reads 403 systemically in CI — by design it then files/refreshes ONE
+      # degradation self-issue on ops-pipeline naming the gap, and skips the close sweep.
+      # It does NOT fail the job: a documented-degraded run is the honest steady state
+      # until the grant, not an error (Rule #464 — the blindness is loud, not silent).
+      - name: Run dead-cron worker
+        if: ${{ !cancelled() }}
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+        run: npx tsx dead-cron-worker.ts ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}

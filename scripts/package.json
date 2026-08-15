@@ -10,6 +10,7 @@
     "drift:check": "tsx drift-check.ts",
     "monitor:credentials": "tsx credential-expiry-monitor.ts",
     "monitor:railway-volumes": "tsx railway-volume-monitor.ts",
+    "monitor:dead-cron": "tsx dead-cron-worker.ts",
     "gate:pr-automerge": "tsx pr-automerge-gate.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run"
