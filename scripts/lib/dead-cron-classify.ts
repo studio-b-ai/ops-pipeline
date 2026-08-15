@@ -396,10 +396,12 @@ export interface LiveRepoRow {
 }
 
 export interface RepoPartition {
-  /** Non-archived, non-template — the repos this leg classifies. */
+  /** Non-archived, not policy-skipped — the repos this leg classifies (INCLUDES template-flagged live repos, see `templateFlaggedLive`). */
   scannable: string[];
-  /** Non-archived TEMPLATE repos — skipped by policy (see `TEMPLATE_POLICY`), but close-eligible. */
+  /** Non-archived repos matching the FULL template policy (`is_template` AND a `*template*` name) — skipped from classification, close-eligible. */
   templates: string[];
+  /** Non-archived repos carrying `is_template=true` WITHOUT a template name — live repos using GitHub's flag for "Use this template" convenience (2026-08-15: client-asthetik, acuops-pipeline). Classified normally; surfaced so the flag's oddity stays visible. */
+  templateFlaggedLive: string[];
   /** Archived — out of scope entirely (their workflows cannot run and never flag). */
   archived: string[];
 }
@@ -417,16 +419,36 @@ export interface RepoPartition {
  */
 export const TEMPLATE_POLICY = "template repos are blueprints, not services — skipped by policy; spawned repos are classified normally";
 
+/**
+ * The policy needs BOTH signals. GitHub's `is_template` flag alone is NOT a safe proxy for
+ * "blueprint, not a service": the first dry-run of this policy (2026-08-15) listed
+ * client-asthetik and acuops-pipeline as templates — live, actively-pushed repos that carry
+ * the flag for "Use this template" convenience — and would have policy-closed
+ * client-asthetik#219, a REAL finding. Rule #425 caught it in the dry-run (#465: a policy
+ * keyed on a metadata flag inherits the flag's semantics, not the intent). Studio B's own
+ * naming convention (`*-template`: ops-template, studiob-test-template) is the
+ * discriminator that actually holds; the flag confirms it.
+ */
+export const TEMPLATE_NAME_PATTERN = /template/i;
+
+export function isPolicyTemplate(row: LiveRepoRow): boolean {
+  return row.isTemplate && TEMPLATE_NAME_PATTERN.test(row.name);
+}
+
 export function partitionRepos(rows: LiveRepoRow[]): RepoPartition {
   const scannable: string[] = [];
   const templates: string[] = [];
+  const templateFlaggedLive: string[] = [];
   const archived: string[] = [];
   for (const r of rows) {
     if (r.isArchived) archived.push(r.name);
-    else if (r.isTemplate) templates.push(r.name);
-    else scannable.push(r.name);
+    else if (isPolicyTemplate(r)) templates.push(r.name);
+    else {
+      scannable.push(r.name);
+      if (r.isTemplate) templateFlaggedLive.push(r.name);
+    }
   }
-  return { scannable, templates, archived };
+  return { scannable, templates, templateFlaggedLive, archived };
 }
 
 export function renderTemplatePolicyCloseComment(): string {

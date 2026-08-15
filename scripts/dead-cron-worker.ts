@@ -317,7 +317,8 @@ async function main(): Promise<void> {
   const scannedRepos = repoFilter ? allRepos.filter((r) => r === repoFilter) : allRepos;
   if (repoFilter && scannedRepos.length === 0 && templateRepos.length === 0) throw new Error(`--repo ${repoFilter}: not a live non-archived repo in ${ORG}`);
   console.log(`Scanning ${scannedRepos.length} non-archived non-template repo(s) of ${allRepos.length + live.templates.length} live (${live.archived.length} archived out of scope).`);
-  if (templateRepos.length > 0) console.log(`Template repo(s) skipped by policy (blueprints, not services; close-eligible): ${templateRepos.join(", ")}`);
+  if (templateRepos.length > 0) console.log(`Template repo(s) skipped by policy (is_template AND a *template* name — blueprints, not services; close-eligible): ${templateRepos.join(", ")}`);
+  if (live.templateFlaggedLive.length > 0) console.log(`Template-FLAGGED live repo(s) (is_template=true but not named as a template — "Use this template" convenience on a real repo): classified normally: ${live.templateFlaggedLive.join(", ")}`);
 
   const workflowsList: FetchCounter = { attempted: 0, failed: 0, firstError: null };
   const contentReads: FetchCounter = { attempted: 0, failed: 0, firstError: null };
