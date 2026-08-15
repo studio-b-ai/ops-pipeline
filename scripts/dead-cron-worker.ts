@@ -136,8 +136,20 @@ function readCrons(repoName: string, path: string, counter: FetchCounter): strin
     const b64 = gh(["api", `repos/${ORG}/${repoName}/contents/${path}`, "--jq", ".content"]);
     text = Buffer.from(b64.replace(/\s/g, ""), "base64").toString("utf-8");
   } catch (err) {
-    const msg = recordFailure(counter, err);
-    console.warn(`dead-cron: content read failed for ${repoName}/${path}: ${msg}`);
+    const msg = err instanceof Error ? `${(err as NodeJS.ErrnoException & { stderr?: string }).stderr ?? ""}\n${err.message}` : String(err);
+    if (msg.includes("HTTP 404")) {
+      // Definitive, not inconclusive: the FILE is gone but GitHub keeps the workflow
+      // record after deletion (live-verified 2026-08-15: 3 such residues in the fleet). A
+      // deleted file has no schedule and its cron cannot fire — treat as not-scheduled,
+      // and do NOT count toward the permission-gap (systemic) counter: a 404 would both
+      // pollute that signal and (codex P2's cousin) permanently block the repo's
+      // close-sweep eligibility for a residue that never clears.
+      counter.attempted -= 1;
+      console.warn(`dead-cron: ${repoName}/${path} — workflow record exists but the file 404s (deleted file, lingering record); treating as not scheduled.`);
+      return [];
+    }
+    recordFailure(counter, err);
+    console.warn(`dead-cron: content read failed for ${repoName}/${path}: ${msg.trim()}`);
     return null;
   }
   try {
@@ -176,18 +188,39 @@ function fetchScheduledRuns(repoName: string, workflowId: number): ScheduledRun[
 // ───────────────────────────── close-sweep candidates ─────────────────────────────
 
 /**
- * Repo names (bare, no org prefix) with an OPEN dead-cron-labeled issue, via ONE org-wide
- * search call. Search-index lag tolerance: a just-opened issue missing from search only
- * delays its close-sweep consideration to next week's run — the OPEN/UPDATE path never
- * relies on search (it lists the target repo's issues authoritatively). Search failure →
- * null: the caller skips the close sweep loudly rather than treating "search broke" as
- * "nothing is open anywhere" (Rule #322 — a broken instrument's zero is not a result).
+ * Repo names (bare, no org prefix) with an OPEN dead-cron-labeled issue, via one org-wide
+ * search (paginated — codex review P3, 2026-08-15: the default single page caps at 30
+ * items, so a fleet with more open dead-cron issues than that would leave recovered repos
+ * past the first page stale indefinitely; `--paginate` + line-per-item jq mirrors
+ * lib/github-issues.ts's listIssueComments pattern). Search-index lag tolerance: a
+ * just-opened issue missing from search only delays its close-sweep consideration to next
+ * week's run — the OPEN/UPDATE path never relies on search (it lists the target repo's
+ * issues authoritatively). Search failure → null: the caller skips the close sweep loudly
+ * rather than treating "search broke" as "nothing is open anywhere" (Rule #322 — a broken
+ * instrument's zero is not a result).
  */
 function searchOpenDeadCronRepos(): string[] | null {
   try {
-    const raw = gh(["api", "-X", "GET", "search/issues", "-f", `q=org:${ORG} label:${LABEL} state:open is:issue`, "--jq", "[.items[].repository_url]"]);
-    const urls = JSON.parse(raw) as string[];
-    return [...new Set(urls.map((u) => u.split("/").pop() ?? "").filter((n) => n.length > 0))];
+    const raw = gh([
+      "api",
+      "-X",
+      "GET",
+      "search/issues",
+      "-f",
+      `q=org:${ORG} label:${LABEL} state:open is:issue`,
+      "-F",
+      "per_page=100",
+      "--paginate",
+      "--jq",
+      ".items[].repository_url",
+    ]);
+    const names = raw
+      .split("\n")
+      .map((l) => l.trim().replace(/^"|"$/g, ""))
+      .filter((l) => l.length > 0)
+      .map((u) => u.split("/").pop() ?? "")
+      .filter((n) => n.length > 0);
+    return [...new Set(names)];
   } catch (err) {
     console.warn(`dead-cron: org-wide open-issue search failed — SKIPPING the close sweep this run (open issues stay open, re-evaluated next week): ${err instanceof Error ? err.message : String(err)}`);
     return null;
@@ -214,6 +247,12 @@ async function main(): Promise<void> {
   const workflowsList: FetchCounter = { attempted: 0, failed: 0, firstError: null };
   const contentReads: FetchCounter = { attempted: 0, failed: 0, firstError: null };
   const findingsByRepo = new Map<string, DeadCronFinding[]>();
+  // codex review P2 (2026-08-15): a repo with ANY per-repo read failure this run was not
+  // fully re-confirmed — it must never be close-sweep-eligible on this run's evidence
+  // (Rule #465 at repo granularity: the systemic guard covers all-fail, this covers the
+  // partial/transient case). Open/update paths are unaffected — positive findings from
+  // the reads that DID succeed are still real.
+  const inconclusiveRepos = new Set<string>();
   let scheduleBearing = 0;
 
   for (const repoName of scannedRepos) {
@@ -223,7 +262,8 @@ async function main(): Promise<void> {
       workflows = listWorkflows(repoName);
     } catch (err) {
       const msg = recordFailure(workflowsList, err);
-      console.warn(`dead-cron: workflows list failed for ${repoName}, skipping repo this run: ${msg}`);
+      inconclusiveRepos.add(repoName);
+      console.warn(`dead-cron: workflows list failed for ${repoName}, skipping repo this run (close-ineligible): ${msg}`);
       continue;
     }
 
@@ -232,6 +272,7 @@ async function main(): Promise<void> {
       if (!wf.path.startsWith(".github/workflows/")) continue;
 
       const crons = readCrons(repoName, wf.path, contentReads);
+      if (crons === null) inconclusiveRepos.add(repoName); // read FAILED (404s return [] and don't land here)
       // Definitive no-schedule answer — skip without a runs fetch.
       if (crons !== null && crons.length === 0) continue;
 
@@ -239,7 +280,8 @@ async function main(): Promise<void> {
       try {
         runs = fetchScheduledRuns(repoName, wf.id);
       } catch (err) {
-        console.warn(`dead-cron: scheduled-runs fetch failed for ${repoName}/${wf.path}, skipping workflow this run (no finding without evidence): ${err instanceof Error ? err.message : String(err)}`);
+        inconclusiveRepos.add(repoName);
+        console.warn(`dead-cron: scheduled-runs fetch failed for ${repoName}/${wf.path}, skipping workflow this run (no finding without evidence; repo close-ineligible): ${err instanceof Error ? err.message : String(err)}`);
         continue;
       }
       // Content unreadable AND no scheduled runs → cannot even tell a schedule exists; classify() would return null anyway.
@@ -295,7 +337,11 @@ async function main(): Promise<void> {
     const openRepos = searchOpenDeadCronRepos();
     if (openRepos !== null) {
       const scanned = new Set(scannedRepos);
-      const closeCandidates = openRepos.filter((r) => scanned.has(r) && !findingsByRepo.has(r));
+      const excludedInconclusive = openRepos.filter((r) => inconclusiveRepos.has(r));
+      if (excludedInconclusive.length > 0) {
+        console.warn(`dead-cron: ${excludedInconclusive.length} repo(s) with open issues excluded from the close sweep — reads incomplete this run (codex P2): ${excludedInconclusive.join(", ")}`);
+      }
+      const closeCandidates = openRepos.filter((r) => scanned.has(r) && !findingsByRepo.has(r) && !inconclusiveRepos.has(r));
       for (const repoName of closeCandidates) {
         const fullRepo = `${ORG}/${repoName}`;
         const existing = listIssuesByLabel(fullRepo, LABEL, "open").find((i) => i.title === TITLE);
