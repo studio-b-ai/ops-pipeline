@@ -45,6 +45,22 @@
  * Cadence honesty (Rule #448): the worker runs WEEKLY (repo-hygiene.yml, Fri 09:00Z) —
  * detection latency is up to 7 days plus the condition's own threshold. This leg makes
  * no per-run freshness claims; `renderDeadCronIssueBody`'s footer says exactly that.
+ *
+ * Transient-read guard (2026-08-15, ui-test-suite#44 — the detector's FIRST false
+ * positive, ~13h after its first live fire): the 04:07Z run's one-shot read of a
+ * workflow's scheduled-run window came back with the 6/22 run as its NEWEST entry — the
+ * seven weekly successes 6/29→8/10 were absent or mis-ordered in that single response
+ * (the identical query 13h later returned all 18, newest-first; a 30-workflow fleet
+ * ordering check found 30/30 newest-first). The classifier trusted `runs[0]` as newest
+ * and flagged "silent 53d". Two defenses now:
+ *   • this file NEVER trusts input order — `classifyWorkflow` sorts newest-first itself
+ *     (`sortRunsNewestFirst`), so a mis-ordered page can't fake silence or a streak;
+ *   • the worker reads the window TWICE with different query shapes (the plain window +
+ *     a `created>=now-90d` filter) and classifies on the UNION (`mergeRunWindows`) — a
+ *     run missing from one response is caught if the other has it (#322/#465: an
+ *     absence claim needs a second instrument). Residual: a backend that drops the same
+ *     runs from BOTH shapes still fools it — the weekly re-evaluation + auto-close is
+ *     the self-heal (that is exactly what closed #44).
  */
 
 // ───────────────────────────── constants ─────────────────────────────
@@ -86,6 +102,8 @@ export interface WorkflowMeta {
 }
 
 export interface ScheduledRun {
+  /** GitHub run id — the dedupe key when two window reads are merged (`mergeRunWindows`). Optional so hand-built fixtures stay terse. */
+  id?: number;
   /** "completed" | "in_progress" | "queued" | ... */
   status: string;
   /** null while not completed; else "success" | "failure" | "cancelled" | "timed_out" | "startup_failure" | "skipped" | "neutral" | ... */
@@ -190,6 +208,57 @@ export function streakThresholdK(periodDays: number | null): number {
 
 // ───────────────────────────── run-history reads ─────────────────────────────
 
+function runTime(run: ScheduledRun): number {
+  const t = new Date(run.createdAt).getTime();
+  return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY; // unparseable dates sort LAST (oldest)
+}
+
+/**
+ * Newest-first copy of `runs` (stable; unparseable dates last). Every reader in this file
+ * assumes newest-first — this is what makes that assumption TRUE regardless of what the
+ * API handed back (the ui-test-suite#44 transient-read class, see file header).
+ */
+export function sortRunsNewestFirst(runs: ScheduledRun[]): ScheduledRun[] {
+  return [...runs].sort((a, b) => runTime(b) - runTime(a));
+}
+
+function runKey(run: ScheduledRun): string {
+  return run.id !== undefined ? `id:${run.id}` : `t:${run.createdAt}|${run.status}|${run.conclusion ?? ""}`;
+}
+
+export interface MergedRunWindow {
+  /** Union of both reads, newest-first, capped to `window`. */
+  runs: ScheduledRun[];
+  /** Runs present in `secondary` but absent from `primary` (any age). */
+  added: number;
+  /** Subset of `added` STRICTLY newer than primary's newest run (or all of `added` when primary was empty) — the transient-read signature: the plain window read missed recent activity. */
+  addedNewer: number;
+}
+
+/**
+ * Union of two reads of the same workflow's scheduled-run window (dedupe by run id, else
+ * by createdAt+status+conclusion), newest-first, capped to `window`. The worker's
+ * transient-read guard: classification runs on the union, so a run dropped or mis-placed
+ * in ONE response is still seen if the OTHER response has it. `addedNewer > 0` is the
+ * observable that the primary read was stale — the worker logs it loudly.
+ */
+export function mergeRunWindows(primary: ScheduledRun[], secondary: ScheduledRun[], window: number = RUN_WINDOW): MergedRunWindow {
+  const seen = new Set(primary.map(runKey));
+  const primaryNewest = primary.length > 0 ? Math.max(...primary.map(runTime)) : Number.NEGATIVE_INFINITY;
+  let added = 0;
+  let addedNewer = 0;
+  const union = [...primary];
+  for (const run of secondary) {
+    const key = runKey(run);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    union.push(run);
+    added += 1;
+    if (runTime(run) > primaryNewest) addedNewer += 1;
+  }
+  return { runs: sortRunsNewestFirst(union).slice(0, window), added, addedNewer };
+}
+
 function completedRuns(runs: ScheduledRun[]): ScheduledRun[] {
   return runs.filter((r) => r.status === "completed");
 }
@@ -239,7 +308,10 @@ export interface DeadCronFinding {
  * history) — this function additionally guards on that itself so a stray non-scheduled
  * workflow can never produce a finding.
  */
-export function classifyWorkflow(obs: WorkflowObservation, nowIso: string): DeadCronFinding | null {
+export function classifyWorkflow(input: WorkflowObservation, nowIso: string): DeadCronFinding | null {
+  // Never trust input order (file header, transient-read guard): everything below reads
+  // `obs.runs[0]` as newest — make that true here, whatever the API returned.
+  const obs: WorkflowObservation = { ...input, runs: sortRunsNewestFirst(input.runs) };
   const { workflow } = obs;
   const hasScheduleEvidence = obs.crons.length > 0 || obs.runs.length > 0;
   if (!hasScheduleEvidence) return null;

@@ -9,7 +9,9 @@
  *      repo-hygiene step; archived repos' workflows can't run and never flag).
  *   2. Per repo: list Actions workflows; per real workflow file, read its YAML for
  *      `on.schedule` crons (Contents read); for schedule-bearing workflows, fetch the
- *      last RUN_WINDOW scheduled-trigger runs (`event=schedule`) and classify.
+ *      last RUN_WINDOW scheduled-trigger runs (`event=schedule`) TWICE with different
+ *      query shapes (plain window + `created>=now-90d`), classify on the UNION
+ *      (transient-read guard, ui-test-suite#44 — see the lib header).
  *   3. Per repo with findings: open/update ONE auto-reconciled `[dead-cron]` issue ON THE
  *      OWNING REPO (Rule #165 amended — the open-issue set is the dedup state). Repos
  *      whose issue is open but came back clean this run: auto-close with a comment.
@@ -43,6 +45,7 @@ import {
   RUN_WINDOW,
   classifyWorkflow,
   isSystemic,
+  mergeRunWindows,
   renderDeadCronIssueBody,
   renderDegradationBody,
   summarizeDeadCron,
@@ -172,20 +175,79 @@ function readCrons(repoName: string, path: string, counter: FetchCounter): strin
 }
 
 interface RunRow {
+  id: number;
   status: string;
   conclusion: string | null;
   createdAt: string;
 }
 
-/** Last RUN_WINDOW scheduled-trigger runs, newest-first (the API's default sort). Throws on failure — caller decides per-workflow skip vs systemic. */
-function fetchScheduledRuns(repoName: string, workflowId: number): ScheduledRun[] {
-  const raw = gh([
-    "api",
-    `repos/${ORG}/${repoName}/actions/workflows/${workflowId}/runs?event=schedule&per_page=${RUN_WINDOW}`,
-    "--jq",
-    "[.workflow_runs[] | {status, conclusion, createdAt: .created_at}]",
-  ]);
-  return (JSON.parse(raw) as RunRow[]).map((r) => ({ status: r.status, conclusion: r.conclusion, createdAt: r.createdAt }));
+const RUN_ROW_JQ = "[.workflow_runs[] | {id, status, conclusion, createdAt: .created_at}]";
+
+/**
+ * How far back the SECOND (created-filter) window read looks. Covers every threshold the
+ * classifier can apply (silence ≤ 2×31d for monthly crons; streak windows for any K) so
+ * anything the plain window read should have contained is inside this read too.
+ */
+export const SECOND_READ_LOOKBACK_DAYS = 90;
+
+function toRuns(raw: string): ScheduledRun[] {
+  return (JSON.parse(raw) as RunRow[]).map((r) => ({ id: r.id, status: r.status, conclusion: r.conclusion, createdAt: r.createdAt }));
+}
+
+/** Plain window read: last RUN_WINDOW scheduled-trigger runs (API default sort, newest-first — but never trusted as such, see classifyWorkflow). Throws on failure. */
+function fetchScheduledRunsWindow(repoName: string, workflowId: number): ScheduledRun[] {
+  return toRuns(gh(["api", `repos/${ORG}/${repoName}/actions/workflows/${workflowId}/runs?event=schedule&per_page=${RUN_WINDOW}`, "--jq", RUN_ROW_JQ]));
+}
+
+/** Second-shape read of the same window: `created>=<now-90d>` via GET form fields (gh URL-encodes the `>=`). Throws on failure. */
+function fetchScheduledRunsSince(repoName: string, workflowId: number, sinceDate: string): ScheduledRun[] {
+  return toRuns(
+    gh([
+      "api",
+      "-X",
+      "GET",
+      `repos/${ORG}/${repoName}/actions/workflows/${workflowId}/runs`,
+      "-f",
+      "event=schedule",
+      "-f",
+      `created=>=${sinceDate}`,
+      "-F",
+      `per_page=${RUN_WINDOW}`,
+      "--jq",
+      RUN_ROW_JQ,
+    ]),
+  );
+}
+
+/**
+ * Scheduled-run window for one workflow = the UNION of two differently-shaped reads
+ * (transient-read guard, 2026-08-15 — ui-test-suite#44 was a false positive produced by
+ * ONE window read that came back missing/mis-ordering its 7 newest runs; see the lib
+ * header). The plain window read is authoritative for failures (throws → caller marks the
+ * repo inconclusive, as before). The second read is additive: if IT fails, we classify on
+ * the plain window alone and say so (primary evidence stands; the guard just didn't get
+ * its second opinion). If it surfaces runs newer than the primary's newest, that IS the
+ * transient-read signature — logged loudly, and the union is what gets classified.
+ */
+function fetchScheduledRuns(repoName: string, workflowPath: string, workflowId: number, nowIso: string): ScheduledRun[] {
+  const primary = fetchScheduledRunsWindow(repoName, workflowId);
+  const sinceDate = new Date(new Date(nowIso).getTime() - SECOND_READ_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  let secondary: ScheduledRun[];
+  try {
+    secondary = fetchScheduledRunsSince(repoName, workflowId, sinceDate);
+  } catch (err) {
+    console.warn(
+      `dead-cron: ${repoName}/${workflowPath} — second (created>=${sinceDate}) window read failed; classifying on the plain window alone (transient-read guard had no second opinion): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return primary;
+  }
+  const merged = mergeRunWindows(primary, secondary, RUN_WINDOW);
+  if (merged.addedNewer > 0) {
+    console.warn(
+      `dead-cron: ${repoName}/${workflowPath} — TRANSIENT-READ GUARD FIRED: the plain window read missed ${merged.addedNewer} scheduled run(s) NEWER than its own newest (${merged.added} added overall from the created>=${sinceDate} read); classifying on the union (the ui-test-suite#44 class, 2026-08-15).`,
+    );
+  }
+  return merged.runs;
 }
 
 // ───────────────────────────── close-sweep candidates ─────────────────────────────
@@ -281,7 +343,7 @@ async function main(): Promise<void> {
 
       let runs: ScheduledRun[];
       try {
-        runs = fetchScheduledRuns(repoName, wf.id);
+        runs = fetchScheduledRuns(repoName, wf.path, wf.id, nowIso);
       } catch (err) {
         inconclusiveRepos.add(repoName);
         console.warn(`dead-cron: scheduled-runs fetch failed for ${repoName}/${wf.path}, skipping workflow this run (no finding without evidence; repo close-ineligible): ${err instanceof Error ? err.message : String(err)}`);
