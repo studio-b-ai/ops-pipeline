@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-LEG-MAPPING RULESET v1.1 — DOC-LEVEL hardening of v1, implementing the codex
+LEG-MAPPING RULESET v1.2 — DOC-LEVEL hardening of v1, implementing the codex
 adversarial-review remediation spec (Kevin, 2026-08-13). Classifies at
 DOCUMENT level straight from the raw line-level substrate
 (ar-invoices-202607.jsonl) instead of the pre-aggregated customer-level
@@ -9,6 +9,10 @@ per-doc net = sum of its lines' net field. In this month's data every (type,
 ref) pair is carried by exactly one JSONL row, so the "sum of lines" collapses
 to a passthrough for July — but the grouping is written generally so a future
 month with true multi-line documents classifies correctly without a rewrite.
+
+v1.2 (2026-08-15): MAKESIDE_NAMED += P/Kaufmann family (C001544/C001574/C001578);
+D4 FAIRE mint comment; RENTAL_INCOME_ACCOUNT flag. Zero fixture-month movement
+— hardening only.
 
 Named-account rules (R1-R6, copied verbatim from v1) still classify ALL of a
 matched customer's docs, exactly as in v1 (customer-level intent, unconditional
@@ -70,14 +74,20 @@ MARKETPLACE_PROGRAM = {  # R4 -> leg 4. D4 RULED 2026-08-13: 3-prong test ratifi
 # D4: Kevin-pre-named PIPELINE programs — dormant until an AR account is born.
 # The candidate detector (d) watches for these name tokens; on first appearance
 # the seat converts the hit to a customer-ID entry in MARKETPLACE_PROGRAM above.
+# D4 activation rider (8/15): on FAIRE account mint, move the entry to MARKETPLACE_PROGRAM keyed by the new C-number IN THE SAME PR; land the account in class RETAILER (Wayfair precedent C000862). Class never drives leg 4 — the named list does (R4 before R9).
 PENDING_PROGRAMS = {
     "FAIRE": "Faire Wholesale — marketplace program, Kevin pre-named 2026-08-13 (D4); no AR account yet",
 }
 HOSPITALITY_DIRECT_SPEC = {}  # R5 -> leg 5 (spec WE hold; D5 pending — none ratified)
 MAKESIDE_NAMED = {  # R6 -> leg 6 (D2 RULED: a real leg, not a hold)
     "C001243": "Medline Industries, LP — cut-make-trim private-label program on customer-supplied cloth",
+    "C001544": "P/kaufmann Inc. — make-side program (CSL-billed Jan–Jun 2026; named 8/15 after 4 surfacings)",
+    "C001574": "P/Kaufmann Home — make-side program (MIXED-BRANCH account: has HERITAGE-branch docs; naming protects against branch-rule misroute)",
+    "C001578": "P/KAUFMANN CONTRACT — make-side program (born Jul 2026 from the P/K split)",
 }
 MAKESIDE_BRANCH = "FERNCREST"  # R7 -> leg 6, now PER-DOC (spec #1)
+
+RENTAL_INCOME_ACCOUNT = "3214"  # Casa Flora C001550 pays Ferncrest RENT via CashSale docs (~$27K T12M, immaterial); rides leg 6 today by R6/R7. Flagged micro-cell for a future ruleset rev — property income, not make-side services. No routing change in v1.2.
 
 # D3 TAG — maker-shaped accounts INSIDE leg 1 (reporting dimension, not a bucket).
 MAKER_SHAPED_TAG = {
@@ -221,10 +231,19 @@ def self_test():
     bb, rb, _, _ = classify_doc(blank_branch)
     assert bb == "H9_UNMAPPED" and rb == "R0_SCHEMA", f"BLANK-BRANCH CONTROL FAILED: {bb}/{rb}"
 
+    # v1.2 control: P/Kaufmann mixed-branch — C001574 on HERITAGE branch (not
+    # FERNCREST) MUST still land leg6 via the NAMED rule R6, not fall through
+    # to R8/R9/H2 — this is the whole point of naming a mixed-branch account
+    # instead of leaving it to the R7 branch heuristic.
+    pk_mixed = mk("C001574", "TBD", "HERITAGE")
+    bpk, rpk, _, _ = classify_doc(pk_mixed)
+    assert bpk == "leg6" and rpk == "R6", f"P/K MIXED-BRANCH CONTROL FAILED (want leg6/R6): {bpk}/{rpk}"
+
     print("CONTROLS (#322, doc-level): known-bad->H9/R10 OK | JOBBER->leg1 untagged OK | "
           "DISTRIBUTOR->leg1 OK | CONTRACTOR->leg1 (D1) OK | FERNCREST->leg6 (D2) OK | "
           "HORIZON->leg1+TAG (D3) OK | mixed-branch split (FERNCREST leg6 / HERITAGE leg1) OK | "
-          "novel-class WORKROOM->H9 OK | blank-branch->H9/R0_SCHEMA OK")
+          "novel-class WORKROOM->H9 OK | blank-branch->H9/R0_SCHEMA OK | "
+          "P/Kaufmann C001574 on HERITAGE->leg6/R6 named (not R7) OK")
 
 
 def load_docs():
