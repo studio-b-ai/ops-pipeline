@@ -397,7 +397,7 @@ describe("mergeRunWindows (two differently-shaped reads → union)", () => {
 
 // ───────────────────────────── template-repo policy (ops-template#1 / studiob-test-template#1) ─────────────────────────────
 
-describe("partitionRepos (template repos are blueprints, not services)", () => {
+describe("partitionRepos (template repos are blueprints, not services — is_template AND a template NAME)", () => {
   it("splits scannable / templates / archived, preserving order; archived wins over template", () => {
     const p = partitionRepos([
       { name: "bolt-wms", isArchived: false, isTemplate: false },
@@ -409,11 +409,24 @@ describe("partitionRepos (template repos are blueprints, not services)", () => {
     ]);
     expect(p.scannable).toEqual(["bolt-wms", "wasala"]);
     expect(p.templates).toEqual(["ops-template", "studiob-test-template"]);
+    expect(p.templateFlaggedLive).toEqual([]);
     expect(p.archived).toEqual(["hubspot-configs", "old-template"]);
   });
 
-  it("empty input → three empty lists", () => {
-    expect(partitionRepos([])).toEqual({ scannable: [], templates: [], archived: [] });
+  it("the 2026-08-15 near-miss: is_template on a LIVE repo without a template name is NOT policy-skipped — it is scanned and surfaced", () => {
+    const p = partitionRepos([
+      { name: "client-asthetik", isArchived: false, isTemplate: true },
+      { name: "acuops-pipeline", isArchived: false, isTemplate: true },
+      { name: "ops-template", isArchived: false, isTemplate: true },
+      { name: "not-a-template-but-named", isArchived: false, isTemplate: false }, // name alone is not enough either
+    ]);
+    expect(p.scannable).toEqual(["client-asthetik", "acuops-pipeline", "not-a-template-but-named"]);
+    expect(p.templateFlaggedLive).toEqual(["client-asthetik", "acuops-pipeline"]);
+    expect(p.templates).toEqual(["ops-template"]);
+  });
+
+  it("empty input → four empty lists", () => {
+    expect(partitionRepos([])).toEqual({ scannable: [], templates: [], templateFlaggedLive: [], archived: [] });
   });
 });
 
