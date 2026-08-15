@@ -12,6 +12,19 @@ pulled UNFILTERED and sliced client-side); 429 honors Retry-After once (#437);
 other failures wait 60s and retry ONCE, then exit loudly (#161); exact-page
 continuation with a hard page cap that WARNS instead of silently truncating
 (#331). Sign law: net = (Amount - TaxTotal), negated for credit types.
+
+CashSale (issue #106): the CashSale entity has NO filterable PostPeriod, so it
+is pulled with ONE unfiltered call (expand=Details; the set is ~130 docs
+lifetime — no paging ladder needed) and sliced client-side to the target month
+by the doc's Date field. Date-period is a SLICING PROXY for GL PostPeriod, not
+the real period field — the two-oracle GL check in run_month.py absorbs any
+misperiodization drift this proxy introduces. Only Status == 'Closed' docs are
+kept (unreleased docs are not in GL). The chart of accounts (AccountCD, Type)
+is pulled once alongside it so run_month.py can filter CashSale Detail lines to
+Income-type accounts without ever hardcoding the account list into classification
+logic. NEVER use the BI-ARInvoices GI TranType to detect cash sales — it
+mislabels CSL docs as INV (proven: INV010267-72); the CashSale entity is the
+only CSL enumeration source.
 """
 import argparse, json, os, random, sys, time, urllib.parse, urllib.request
 
@@ -67,6 +80,29 @@ def pull_all(entity, select, flt):
     print(f"[pull] **WARN: {entity} hit the {PAGE_CAP}-page cap — population may be truncated (#331)**", flush=True)
     return rows
 
+def slice_cashsale(raw_docs, ym):
+    """Client-side month + status slice for CashSale docs (#106).
+
+    PostPeriod is not filterable on the CashSale entity, so pull_all() cannot
+    do the narrowing server-side the way it does for Invoice. Instead the
+    single unfiltered CashSale pull is sliced HERE by the doc's Date field
+    (YYYY-MM == target month). Date-period is a SLICING PROXY, not the real
+    GL period — the two-oracle GL reconciliation in run_month.py absorbs any
+    drift this proxy introduces. Unreleased (non-Closed) docs are dropped —
+    they are not in the GL yet. Pure function: no I/O, directly testable
+    against a fixture covering many months (test_csl_regression.py exercises
+    202606/202508/202607 off ONE fixture this way).
+    """
+    target = f"{ym[0:4]}-{ym[4:6]}"
+    out = []
+    for d in raw_docs:
+        if (d.get("Date") or "")[:7] != target:
+            continue
+        if (d.get("Status") or "").strip() != "Closed":
+            continue
+        out.append(d)
+    return out
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--period", required=True, help="MMYYYY, e.g. 072026")
@@ -114,6 +150,50 @@ def main():
     gl_path = os.path.join(a.workdir, "gl-all-periods.json")
     json.dump(gl_rows, open(gl_path, "w"))
     print(f"[pull] GL oracle: {len(gl_rows)} rows (all periods, unfiltered) -> {gl_path}", flush=True)
+
+    # CashSale revenue stream (#106): ONE unfiltered call (no PostPeriod filter
+    # exists on this entity — top=1000 covers the ~130-doc lifetime population
+    # with room to spare), sliced client-side to the target month + Closed-only.
+    # FAIL LOUD (not warn-and-proceed) on hitting the cap: the downstream run
+    # consumes this file as the authoritative in-month CashSale set, and a
+    # truncated pull would silently UNDERREPORT CSL revenue for any in-month
+    # docs past the cut page — the two-oracle GL check might eventually flag
+    # the resulting residual, but there is no reason to ship a known-truncated
+    # pull when the fix is to widen top or add a skip-paging ladder (codex
+    # #106 review pass 3, P2).
+    csl_raw = fetch("query/CashSale", {"expand": "Details", "top": 1000})
+    if len(csl_raw) >= 1000:
+        raise SystemExit(
+            "CASHSALE PULL FAIL: query hit the 1000-row cap — the lifetime population may "
+            "have outgrown the single-call assumption (#106); widen top or add skip-paging "
+            "before re-running rather than shipping a truncated in-month slice."
+        )
+    csl_docs = slice_cashsale(csl_raw, a.ym)
+    for d in csl_docs:
+        cid = (d.get("CustomerID") or "").strip()
+        d["_cls"] = custs.get(cid, {}).get("cls", "")
+    csl_path = os.path.join(a.workdir, f"cashsale-{a.ym}.json")
+    json.dump(csl_docs, open(csl_path, "w"))
+    print(f"[pull] CashSale {a.ym}: {len(csl_docs)} in-month Closed docs (of {len(csl_raw)} "
+          f"lifetime) -> {csl_path}", flush=True)
+
+    # Chart of accounts (#106): fetched once so run_month.py can filter CashSale
+    # Detail lines to Income-type accounts without hardcoding the account list
+    # into classification logic (a hardcoded list is fail-loud VALIDATION only).
+    # Uses the SAME paged pull_all() ladder as Invoice/Customer above (not a
+    # single top=500 call): a hard single-page cap once either blocked every
+    # scheduled run for a tenant whose real chart legitimately has >=500
+    # accounts, or (before that) silently truncated it — codex #106 review
+    # went through both wrong extremes (pass 1: warn-and-proceed risked
+    # silently misclassifying real Income accounts as excluded cash
+    # movements; pass 4: a flat SystemExit at exactly 500 blocked legitimate
+    # runs). Paging removes the false tradeoff — WARNs (never silently
+    # truncates) only at the 10-page/10,000-row cap, a bound no real chart of
+    # accounts approaches.
+    chart_raw = pull_all("Account", "AccountCD,Type", None)
+    chart_path = os.path.join(a.workdir, "account-chart.json")
+    json.dump(chart_raw, open(chart_path, "w"))
+    print(f"[pull] Account chart: {len(chart_raw)} accounts -> {chart_path}", flush=True)
 
     missing_cls = sum(1 for r in out if not r["cls"])
     if out and missing_cls == len(out):

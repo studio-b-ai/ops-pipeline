@@ -98,3 +98,12 @@ jobs:
       # holds that role) but red here blocks merge by fleet convention.
       - name: "July fixture must reproduce the adopted totals"
         run: python3 scripts/cfo-brief/test_july_regression.py
+
+      # CashSale revenue stream (#106): the June 2026 CSL-bearing month must
+      # reproduce the seat-verified authoritative totals exactly (income,
+      # combined leg6, combined grand total), the August 2025 exclusion
+      # mechanism must never silently drop a non-income cash-movement line,
+      # and July's CSL slice must stay empty (the reason its fixture alone
+      # never caught this class). Python stdlib only.
+      - name: "CashSale fixtures must reproduce the adopted totals"
+        run: python3 scripts/cfo-brief/test_csl_regression.py
