@@ -57,7 +57,10 @@ import { ensureLabel, listIssuesByLabel, openIssue, closeIssue, gh } from "./lib
 const ORG = "studio-b-ai";
 const SELF_REPO = "studio-b-ai/ops-pipeline";
 const LABEL = "dead-cron";
-const LABEL_DESCRIPTION = "dead-cron detector alert state (open = a scheduled workflow here is failing or silent — auto-reconciled weekly by ops-pipeline's repo-hygiene run)";
+// ≤100 chars — GitHub hard-caps label descriptions (HTTP 422 past it); caught by the
+// FIRST live label create, invisible to tests/dry-run/codex (dry-run gates mutations by
+// design, so the mutation leg's own validity was unproven until the live firing — #464).
+const LABEL_DESCRIPTION = "dead-cron detector: open = a scheduled workflow here is failing or silent (auto-reconciled weekly)";
 const LABEL_COLOR = "D93F0B";
 const TITLE = "[dead-cron] scheduled workflows failing or silent";
 const SELF_TITLE = "[dead-cron] detector leg structurally degraded — fleet App permission gap";
