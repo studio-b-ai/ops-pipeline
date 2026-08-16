@@ -62,7 +62,7 @@ import { ensureLabel, listIssuesByLabel, openIssue, closeIssue, commentIssue, re
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = join(HERE, "backlog-managers.yaml");
 const SELF_REPO = "studio-b-ai/ops-pipeline";
-const LABEL_DESCRIPTION = "backlog-staleness LANES rule 17 fleet instrument (open = a manager has stale/unranked/headless backlog; auto-reconciled per manager)";
+const LABEL_DESCRIPTION = "LANES rule 17 instrument: open = manager has stale/unranked/headless backlog (auto-reconciled)"; // ≤100 chars (GitHub cap, guarded in ensureLabel)
 const LABEL_COLOR = "FBCA04";
 
 /** Safety bound, not a paging mechanism (Rule #331) — a full final page is a loud warning, not a silent truncation. */
