@@ -22,8 +22,10 @@
  *      open) / retitle+comment with the fresh table (findings>0, one already open) / close
  *      with a counts comment (findings==0, one open) — Rule #165's auto-reconciled-issue
  *      pattern; `planIssueAction` is reused as-is from repo-hygiene-lib.ts (its
- *      open/update/close/none shape is exactly this leg's shape too — "update" means
- *      "retitle+comment" here, not "edit body in place").
+ *      open/update/close/none shape is exactly this leg's shape too — "update" here means
+ *      retitle + REWRITE THE BODY to the current table + comment: the body must never lag the
+ *      title (ops#146 on 2026-08-16 read "1 findings" over an 8-row body — Rule #355/#412); the
+ *      comment stream keeps prior tables as history).
  *
  * A manager is NEVER auto-closed off partial data: if ANY of a manager's configured repos
  * failed to read this run, that manager's close path is skipped (its issue, if open, stays
@@ -57,7 +59,7 @@ import { parse as parseYaml } from "yaml";
 import { classify, render, LABEL, type Finding, type IssueInput, type Thresholds } from "./lib/backlog-staleness-lib.js";
 import { parseSeverityTitle } from "./lib/severity-issue-reconcile.js";
 import { planIssueAction } from "./lib/repo-hygiene-lib.js";
-import { ensureLabel, listIssuesByLabel, openIssue, closeIssue, commentIssue, retitleIssue, gh } from "./lib/github-issues.js";
+import { ensureLabel, listIssuesByLabel, openIssue, closeIssue, commentIssue, retitleIssue, editIssueBody, gh } from "./lib/github-issues.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = join(HERE, "backlog-managers.yaml");
@@ -278,9 +280,10 @@ async function main(): Promise<void> {
     } else if (action === "update") {
       ensureLabel(SELF_REPO, LABEL, LABEL_DESCRIPTION, LABEL_COLOR);
       retitleIssue(SELF_REPO, existingNum!, title);
+      editIssueBody(SELF_REPO, existingNum!, body); // body = CURRENT table (Rule #355/#412); the comment below keeps history
       commentIssue(SELF_REPO, existingNum!, body);
       updated += 1;
-      console.log(`UPDATED (retitle+comment) backlog-staleness issue #${existingNum} for ${manager} (${findings.length} finding(s)).`);
+      console.log(`UPDATED (retitle+body+comment) backlog-staleness issue #${existingNum} for ${manager} (${findings.length} finding(s)).`);
     } else if (action === "close") {
       closeIssue(
         SELF_REPO,
