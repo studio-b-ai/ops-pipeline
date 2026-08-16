@@ -106,6 +106,17 @@ export function retitleIssue(repo: string, num: number, title: string): void {
 }
 
 /**
+ * Rewrite an open issue's BODY in place — the third leg of an in-place update alongside
+ * `retitleIssue` + `commentIssue`. Without it a reconciled aggregate keeps its FIRST-run body
+ * forever while the title moves ("CTO — 1 findings" over a body still listing 8) — a
+ * write-time scope claim that reads as current state (Rule #355/#412; seen live on
+ * ops-pipeline#146, 2026-08-16). The comment stream still keeps every prior table as history.
+ */
+export function editIssueBody(repo: string, num: number, body: string): void {
+  gh(["issue", "edit", String(num), "--repo", repo, "--body", body]);
+}
+
+/**
  * Remove a label from an issue — additive for ops-pipeline#66 (the needs-human router): a
  * same-repo auto-route REMOVES `needs-human` so the issue re-enters the owning lane's ordinary
  * (unlabeled-issue) re-entry folds. `gh issue edit --remove-label` is idempotent — removing an

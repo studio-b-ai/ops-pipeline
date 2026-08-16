@@ -39,3 +39,20 @@ describe("worker label-description literals stay under GitHub's cap", () => {
     expect(text.length).toBeLessThanOrEqual(GITHUB_LABEL_DESCRIPTION_MAX);
   });
 });
+
+/**
+ * Regression guard (ops-pipeline#146, 2026-08-16): an in-place UPDATE that only retitles +
+ * comments leaves the issue BODY at its first-run table forever — a stale scope claim that reads
+ * as current (Rule #355/#412). Every worker that retitles an open aggregate in place must also
+ * rewrite its body in the same branch.
+ */
+describe("in-place issue updates rewrite the body, not just the title", () => {
+  it("backlog-staleness-worker's update branch calls editIssueBody alongside retitleIssue", () => {
+    const src = readFileSync(join(SCRIPTS_DIR, "backlog-staleness-worker.ts"), "utf8");
+    const retitleAt = src.indexOf("retitleIssue(SELF_REPO, existingNum!, title)");
+    expect(retitleAt).toBeGreaterThan(-1);
+    const window = src.slice(retitleAt, retitleAt + 400);
+    expect(window).toMatch(/editIssueBody\(SELF_REPO, existingNum!, body\)/);
+    expect(window).toMatch(/commentIssue\(SELF_REPO, existingNum!, body\)/);
+  });
+});
