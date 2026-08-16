@@ -101,6 +101,58 @@ gh repo create studio-b-ai/<role>-ops --template studio-b-ai/ops-template --publ
 
 Detailed runbook in [`studio-b-ai/marketing-ops/docs/runbooks/sync-mirrors.md`](https://github.com/studio-b-ai/marketing-ops/blob/main/docs/runbooks/sync-mirrors.md).
 
+## Fleet monitors
+
+Recurring GitHub Actions workers (distinct from the reusable `sync.yml`/`drift-check.yml`
+workflows above) that read live fleet state and open/retitle/close ONE auto-reconciled
+issue per finding-holder — the open-issue set IS the dedup state (Rule #165) — rather than
+posting to a channel nobody reads (#60).
+
+### `backlog-staleness` (ops-pipeline#136)
+
+Daily instrument for LANES rule 17(d)'s per-manager backlog stall check. Reads every open
+issue on each repo listed in `scripts/backlog-managers.yaml`, classifies it against that
+file's `thresholds:`, and groups findings by the owning manager (CTO/CoS/CMO/COO/…).
+
+**What it measures**, per repo:
+- `p0p1-stale` — a P0/P1 issue untouched (by `updatedAt`) longer than `p0p1_days` (default 2)
+- `p2-stale` — a P2 issue untouched longer than `p2_days` (default 14)
+- `unranked` — an issue carrying none of P0–P3, open longer than `unranked_days` (default 3)
+- `headless` — the repo has ranked (P0–P3) issues but none carries `next`
+- `multi-next` — more than one issue carries `next` ("a head is one item")
+- `labels-missing` — informational: the repo has open issues but P0–P3 don't exist as
+  labels there at all
+
+An issue carrying a `machinery_labels:` label (e.g. `bug`, `credential-monitor`) is
+excluded from all of the above **only if it also carries no P0–P3 label** — once a human
+prioritizes a monitor-opened issue with a P-label, it's ranked backlog like anything else.
+
+**How a manager clears a finding:** re-rank it, escalate to the CoS with a recommendation,
+or apply the missing label — the same rule-17 remedy line every finding's table row
+carries. This worker never touches the finding's own issue (flags-only); it only
+opens/retitles+comments/closes ITS OWN per-manager aggregate issue on
+`studio-b-ai/ops-pipeline`, labeled `backlog-staleness`.
+
+**Plant recipe** (Rules #464/#471 — verify both verdicts before trusting a "clean" run):
+
+```bash
+cd scripts
+# known-bad: full fleet, force every currently-fresh P0-P2 to read as stale
+npx tsx backlog-staleness-worker.ts --dry-run --now 2026-12-01T00:00:00Z
+# known-good: full fleet, the real clock — reflects today's actual backlog-staleness state
+npx tsx backlog-staleness-worker.ts --dry-run
+# single-repo negative control: a repo scoped run against its manager's FULL repo set shows
+# the real "would OPEN/UPDATE/CLOSE/NONE" preview; a PARTIAL scope for that manager instead
+# prints "SKIPPING <action>" (codex pass-2 P2 guard — a partial --repos view must never mutate
+# a manager's aggregate, since unscanned repos for that manager could still carry findings)
+npx tsx backlog-staleness-worker.ts --dry-run --repos studio-b-ai/ops-pipeline
+```
+
+`--repos <csv>` scopes a run to a subset of the configured repos (useful for local testing
+without a fleet App token — `gh`'s own ambient auth is enough for a single-repo dry run). Any
+name absent from `backlog-managers.yaml` throws. A NON-dry-run scoped run additionally skips
+mutating any manager whose scope is only partial — see the guard above.
+
 ## Why this exists
 
 Operations repos are canonical, but the surfaces ops people use day-to-day (Slack canvases, HubSpot UI) drift the moment the repo changes without manual mirror updates. This pipeline makes drift impossible (sync-on-push) and auditable (weekly drift-check) — without sacrificing the GitOps workflow that makes the repo trustworthy in the first place.

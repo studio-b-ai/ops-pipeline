@@ -1,0 +1,61 @@
+# backlog-managers.yaml — ops-pipeline#136 (backlog-staleness leg, LANES rule 17 fleet
+# instrument, CTO seat → CoS, Kevin word 2026-08-16). Consumed by
+# scripts/backlog-staleness-worker.ts (read-only — this file is committed config, never
+# written by the worker itself).
+#
+# `repos:` maps each fleet repo the leg scans to the SEAT/LANE that owns its backlog
+# (rule-15 map, initial pass) — managers may correct rows by PR later; getting the map
+# imperfect on day one is fine, the leg's job is to make a missed rule-17(d) stall check
+# VISIBLE, not to be the source of truth on ownership itself. An unmapped repo simply isn't
+# scanned (no "unmapped repo" finding class in v1 — out of scope, see ops#136).
+#
+# `thresholds:` — the rule-17 staleness bounds (days). `machinery_labels:` — labels that
+# mark an issue as auto-reconciled MONITOR OUTPUT rather than lane backlog (Rule #165); an
+# issue carrying one of these is excluded from ranking checks ONLY when it ALSO carries no
+# P0–P3 label (a machinery-labeled issue a human has since prioritized with a P-label is
+# real backlog again — see scripts/lib/backlog-staleness-lib.ts's header for the exact
+# predicate and the credential-monitor+P1 worked example).
+
+repos:
+  - repo: "studio-b-ai/ops-pipeline"
+    manager: "CTO"
+  - repo: "studio-b-ai/webhook-router"
+    manager: "CTO"
+  - repo: "studio-b-ai/client-asthetik"
+    manager: "CTO"
+    note: "Acumatica lane"
+  - repo: "studio-b-ai/acuops-pipeline"
+    manager: "CTO"
+  - repo: "studio-b-ai/acudev"
+    manager: "CTO"
+  - repo: "studio-b-ai/clients"
+    manager: "CTO"
+  - repo: "studio-b-ai/bolt-wms"
+    manager: "CoS"
+    note: "shared repo; the CoS re-routes per its 8/16 split"
+  - repo: "studio-b-ai/studiob"
+    manager: "CoS"
+  - repo: "studio-b-ai/brain"
+    manager: "CMO"
+  - repo: "studio-b-ai/studiob-price-sync"
+    manager: "CMO"
+    note: "Shopify lane"
+  - repo: "studio-b-ai/asthetik-trade-theme"
+    manager: "CMO"
+    note: "Shopify lane"
+  - repo: "studio-b-ai/asthetik-portal"
+    manager: "COO"
+  - repo: "studio-b-ai/asthetik-marketing"
+    manager: "CMO"
+
+thresholds:
+  p0p1_days: 2
+  p2_days: 14
+  unranked_days: 3
+
+machinery_labels:
+  - "bug"
+  - "dead-cron"
+  - "needs-human"
+  - "backlog-staleness"
+  - "credential-monitor"
