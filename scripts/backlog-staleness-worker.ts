@@ -100,11 +100,17 @@ interface GhIssueRow {
   createdAt: string;
 }
 
+// Codex pass-1 P2: a cap hit is treated exactly like a read FAILURE (throw, not warn-and-
+// proceed) — Rule #331's "loud warning" alone still let the caller classify() against a
+// silently-truncated list. Throwing routes both functions through the SAME catch block in
+// main()'s per-repo loop as any other gh failure: skip this repo this run, mark the manager
+// read-incomplete (close-ineligible, Rule #465), and fold into the run's non-zero exit
+// (below) — a truncated picture is exactly as untrustworthy as a missing one.
 function listOpenIssues(repo: string): IssueInput[] {
   const raw = gh(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(ISSUE_LIST_LIMIT), "--json", "number,title,labels,updatedAt,createdAt"]);
   const rows = JSON.parse(raw) as GhIssueRow[];
   if (rows.length === ISSUE_LIST_LIMIT) {
-    console.warn(`backlog-staleness: ${repo} returned exactly the ${ISSUE_LIST_LIMIT}-issue cap — this run may be scanning a truncated list (Rule #331).`);
+    throw new Error(`${repo} returned exactly the ${ISSUE_LIST_LIMIT}-issue cap — this run may be scanning a truncated list (Rule #331); refusing to classify against a possibly-incomplete picture.`);
   }
   return rows.map((r) => ({ number: r.number, title: r.title, labels: r.labels.map((l) => l.name), updatedAt: r.updatedAt, createdAt: r.createdAt }));
 }
@@ -115,7 +121,11 @@ interface GhLabelRow {
 
 function listRepoLabels(repo: string): string[] {
   const raw = gh(["label", "list", "--repo", repo, "--limit", String(LABEL_LIST_LIMIT), "--json", "name"]);
-  return (JSON.parse(raw) as GhLabelRow[]).map((r) => r.name);
+  const rows = JSON.parse(raw) as GhLabelRow[];
+  if (rows.length === LABEL_LIST_LIMIT) {
+    throw new Error(`${repo} returned exactly the ${LABEL_LIST_LIMIT}-label cap — this run may be scanning a truncated label list (Rule #331); refusing to classify labels-missing against a possibly-incomplete picture.`);
+  }
+  return rows.map((r) => r.name);
 }
 
 // ───────────────────────────── main ─────────────────────────────
@@ -136,10 +146,19 @@ async function main(): Promise<void> {
   console.log(`=== backlog-staleness-worker${dryRun ? " --dry-run (real reads, NO issue mutations)" : ""} now=${now}${reposFilter ? ` --repos ${reposFilter.join(",")}` : ""} ===`);
 
   const config = loadConfig();
-  const entries = reposFilter ? config.repos.filter((e) => reposFilter.includes(e.repo)) : config.repos;
-  if (reposFilter && entries.length === 0) {
-    throw new Error(`--repos ${reposFilter.join(",")}: none of these match a "repo:" row in ${CONFIG_FILE}`);
+  // Codex pass-1 P3: reject ANY --repos entry absent from config, not just an all-miss list —
+  // a typo'd repo mixed with valid ones used to silently scope itself out with no signal.
+  const configRepoNames = new Set(config.repos.map((e) => e.repo));
+  if (reposFilter) {
+    if (reposFilter.length === 0) {
+      throw new Error("--repos parsed to zero repo names (check for stray commas/whitespace)");
+    }
+    const unknown = reposFilter.filter((r) => !configRepoNames.has(r));
+    if (unknown.length > 0) {
+      throw new Error(`--repos names repo(s) not present in ${CONFIG_FILE}: ${unknown.join(", ")}. Known repos: ${[...configRepoNames].sort().join(", ")}`);
+    }
   }
+  const entries = reposFilter ? config.repos.filter((e) => reposFilter.includes(e.repo)) : config.repos;
 
   const findingsByManager = new Map<string, Finding[]>();
   const managerReadFailed = new Set<string>();
@@ -237,6 +256,18 @@ async function main(): Promise<void> {
   }
 
   console.log(`[backlog-staleness] managers=${managers.length} findings=${totalFindings} opened=${opened} updated=${updated} closed=${closed} dry_run=${dryRun}`);
+
+  // Codex pass-1 P1: a per-repo read failure used to be a console.warn only — if the affected
+  // manager had no pre-existing open issue, the run still exited 0 with no durable signal
+  // anywhere (Rule #412/#465: a leg that can go blind must SAY so, loudly, not just log it).
+  // Every open/update/close possible from the repos that DID read already ran above — this
+  // throw only flips the process exit code so the GH Actions job itself goes red, which is
+  // the one signal that survives beyond a log line nobody's reading (Rule #8/#60).
+  if (managerReadFailed.size > 0) {
+    throw new Error(
+      `repo read failed for manager(s) ${[...managerReadFailed].sort().join(", ")} this run — see the warnings above for which repo(s) and why. The next scheduled run retries; this run's findings for those managers are incomplete.`,
+    );
+  }
 }
 
 main().catch((err) => {

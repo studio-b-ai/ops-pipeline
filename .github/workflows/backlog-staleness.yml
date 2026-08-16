@@ -82,16 +82,31 @@ jobs:
           echo "::error::actions/create-github-app-token produced no token -- check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
           exit 1
 
+      # Codex pass-1 P1: the previous version interpolated ${{ inputs.now }} / ${{ inputs.repos
+      # }} (free-text workflow_dispatch strings) DIRECTLY into this run: block's shell source
+      # via format(...) -- GitHub Actions substitutes ${{ }} expressions into the script TEXT
+      # before the shell ever runs, so a dispatcher-supplied value containing `$(...)`,
+      # backticks, or `;` would execute as shell syntax with the just-minted fleet App token
+      # live in GH_TOKEN. Untrusted string inputs now travel through env: (real OS-level env
+      # vars, never text-substituted into the script) and are referenced quoted ("$NOW_INPUT")
+      # -- a variable's VALUE is inert data to the shell even if that value itself looks like
+      # shell syntax. `dry_run` stays a direct ${{ }} substitution because it's a boolean-typed
+      # input -- GitHub Actions can only ever produce the literal string '--dry-run' or '' from
+      # that expression, so there's no attacker-controlled text flowing through it.
       - name: "Run backlog-staleness worker"
         id: run_worker
         working-directory: scripts
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
+          DRY_RUN_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+          NOW_INPUT: ${{ inputs.now }}
+          REPOS_INPUT: ${{ inputs.repos }}
         run: |
-          npx tsx backlog-staleness-worker.ts \
-            ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }} \
-            ${{ (github.event_name == 'workflow_dispatch' && inputs.now != '') && format('--now {0}', inputs.now) || '' }} \
-            ${{ (github.event_name == 'workflow_dispatch' && inputs.repos != '') && format('--repos {0}', inputs.repos) || '' }}
+          args=()
+          if [ -n "$DRY_RUN_FLAG" ]; then args+=("--dry-run"); fi
+          if [ -n "$NOW_INPUT" ]; then args+=(--now "$NOW_INPUT"); fi
+          if [ -n "$REPOS_INPUT" ]; then args+=(--repos "$REPOS_INPUT"); fi
+          npx tsx backlog-staleness-worker.ts "${args[@]}"
 
       # Rule #356: a timeout kill reports "cancelled" SILENTLY unless a SEPARATE if: always()
       # step names the terminal status explicitly.
