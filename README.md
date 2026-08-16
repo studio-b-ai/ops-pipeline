@@ -137,14 +137,21 @@ opens/retitles+comments/closes ITS OWN per-manager aggregate issue on
 
 ```bash
 cd scripts
-# known-bad: force every currently-fresh P1 to read as stale
-npx tsx backlog-staleness-worker.ts --dry-run --now 2026-12-01T00:00:00Z --repos studio-b-ai/ops-pipeline
-# known-good: the real clock, same repo — should show none of them stale
+# known-bad: full fleet, force every currently-fresh P0-P2 to read as stale
+npx tsx backlog-staleness-worker.ts --dry-run --now 2026-12-01T00:00:00Z
+# known-good: full fleet, the real clock — reflects today's actual backlog-staleness state
+npx tsx backlog-staleness-worker.ts --dry-run
+# single-repo negative control: a repo scoped run against its manager's FULL repo set shows
+# the real "would OPEN/UPDATE/CLOSE/NONE" preview; a PARTIAL scope for that manager instead
+# prints "SKIPPING <action>" (codex pass-2 P2 guard — a partial --repos view must never mutate
+# a manager's aggregate, since unscanned repos for that manager could still carry findings)
 npx tsx backlog-staleness-worker.ts --dry-run --repos studio-b-ai/ops-pipeline
 ```
 
 `--repos <csv>` scopes a run to a subset of the configured repos (useful for local testing
-without a fleet App token — `gh`'s own ambient auth is enough for a single-repo dry run).
+without a fleet App token — `gh`'s own ambient auth is enough for a single-repo dry run). Any
+name absent from `backlog-managers.yaml` throws. A NON-dry-run scoped run additionally skips
+mutating any manager whose scope is only partial — see the guard above.
 
 ## Why this exists
 

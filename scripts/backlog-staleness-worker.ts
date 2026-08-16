@@ -30,12 +30,20 @@
  * open and unmodified this run) — mirrors dead-cron-worker.ts's inconclusive-repo guard
  * (Rule #465: never close on evidence you didn't fully reconfirm). open/update still run on
  * whatever repos DID read successfully — partial alerting beats silently swallowing it.
+ * Separately: a manager is also NEVER mutated (open/update/close, all three) when --repos
+ * DELIBERATELY scopes the run to only some of that manager's configured repos — a clean
+ * single-repo scoped run must never close (or undercount-update) an aggregate while other,
+ * unscanned repos for that manager still carry real findings (codex pass-2 finding on
+ * ops#136). Unlike a read failure, a scoped run isn't a run-level error — the exit code is
+ * unaffected; only that manager's mutation is skipped.
  *
  * `--dry-run`: real reads throughout (every configured repo's issue list + label list,
  * Rule #376), zero issue mutations on ops-pipeline.
  * `--now <ISO>`: overrides the clock (the #464/#471 plant ladder) — omit for the real time.
  * `--repos <csv>`: scope to a comma-separated subset of backlog-managers.yaml's repo rows
- *   (targeted testing without a fleet App token locally — see the ship gate in ops#136).
+ *   (targeted testing without a fleet App token locally — see the ship gate in ops#136). Any
+ *   name not present in the config throws (codex pass-1 P3). A manager only partially covered
+ *   by this scope has its mutations skipped this run (see above).
  *
  * Flags-only for every OTHER repo's issues (never re-labels/re-ranks/closes a MANAGED
  * issue) — the only issues this worker ever mutates are its own per-manager aggregates on
@@ -160,6 +168,23 @@ async function main(): Promise<void> {
   }
   const entries = reposFilter ? config.repos.filter((e) => reposFilter.includes(e.repo)) : config.repos;
 
+  // Codex pass-2 P2: a manager whose --repos scope covers only SOME of its configured repos
+  // must never mutate that manager's aggregate — a clean single-repo scoped run could close
+  // (or undercount-update) an issue while OTHER, unscanned repos for that manager still carry
+  // real findings, presenting a partial picture as the manager's complete current state.
+  // Managers entirely OUTSIDE the scope never reach `managers` below (nothing to guard); this
+  // only fires for a non-empty-but-partial intersection. Unlike managerReadFailed (a genuine
+  // failure), a deliberate --repos narrowing is intentional — it gates mutations, not the run's
+  // exit code.
+  const managerScopeIncomplete = new Set<string>();
+  if (reposFilter) {
+    for (const manager of new Set(config.repos.map((e) => e.manager))) {
+      const fullCount = config.repos.filter((e) => e.manager === manager).length;
+      const scopedCount = entries.filter((e) => e.manager === manager).length;
+      if (scopedCount > 0 && scopedCount < fullCount) managerScopeIncomplete.add(manager);
+    }
+  }
+
   const findingsByManager = new Map<string, Finding[]>();
   const managerReadFailed = new Set<string>();
   let totalFindings = 0;
@@ -222,6 +247,15 @@ async function main(): Promise<void> {
     if (action === "close" && managerReadFailed.has(manager)) {
       console.warn(
         `backlog-staleness: ${manager} would CLOSE #${existingNum} but at least one of its repos failed to read this run — SKIPPING close (never close on incomplete data, Rule #465). Issue stays open, unmodified.`,
+      );
+      continue;
+    }
+
+    // Codex pass-2 P2 — checked BEFORE the dry-run branch so a dry-run preview under a partial
+    // --repos scope accurately shows "SKIPPED", not a would-be action a real run would refuse.
+    if (action !== "none" && managerScopeIncomplete.has(manager)) {
+      console.warn(
+        `backlog-staleness: ${manager} would ${action.toUpperCase()} but --repos scoped this run to only some of its configured repos — SKIPPING ${action} (a partial scope must never present itself as this manager's complete state). Re-run without --repos (or with this manager's full repo set) to mutate its aggregate.`,
       );
       continue;
     }
