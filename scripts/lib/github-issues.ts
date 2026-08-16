@@ -53,7 +53,29 @@ export function listIssuesByLabel(repo: string, label: string, state: "open" | "
 }
 
 /** Idempotent (`--force` updates in place) — safe to call every run. Label ops ride the `issues: write` permission. */
+/**
+ * GitHub rejects label descriptions over 100 characters with HTTP 422 ("description is too
+ * long") — and because every worker only reaches ensureLabel on its MUTATING path, a too-long
+ * description passes every dry run and every unit test and fails only on the first live
+ * firing (ops-pipeline#136's first real run, 2026-08-16: 53 real findings read fine, then the
+ * label create 422'd and the run exited 1 with nothing opened — Rule #464's exact class).
+ * Guarded here at the shared choke point (Rule #159) so the failure is a typecheck-time /
+ * test-time constant check, never a live 422.
+ */
+export const GITHUB_LABEL_DESCRIPTION_MAX = 100;
+
+export function assertLabelDescription(description: string): string {
+  if (description.length > GITHUB_LABEL_DESCRIPTION_MAX) {
+    throw new Error(
+      `label description is ${description.length} chars; GitHub's maximum is ${GITHUB_LABEL_DESCRIPTION_MAX} ` +
+        `(would 422 at \`gh label create\`): ${JSON.stringify(description.slice(0, 60))}…`,
+    );
+  }
+  return description;
+}
+
 export function ensureLabel(repo: string, label: string, description: string, color: string): void {
+  assertLabelDescription(description);
   gh(["label", "create", label, "--repo", repo, "--force", "--description", description, "--color", color]);
 }
 
