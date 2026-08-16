@@ -31,12 +31,16 @@ repos:
   - repo: "studio-b-ai/clients"
     manager: "CTO"
   - repo: "studio-b-ai/bolt-wms"
-    manager: "CoS"
-    note: "shared repo; the CoS re-routes per its 8/16 split"
+    manager: "COO"
+    shared: true
+    note: "multi-lane repo (Pricing · Wayfair · CD · Zoom Workspace · Procurement Hub …); the COO is the largest owner and routes the rest (CoS remap 2026-08-16); one `next` per lane is legitimate → multi-next not evaluated"
   - repo: "studio-b-ai/studiob"
-    manager: "CoS"
+    manager: "CTO"
+    shared: true
+    note: "studiob-api/gateway = fleet (CTO); zoom-intake questions belong to the Zoom Workspace lane (CTO-managed) — CoS remap 2026-08-16"
   - repo: "studio-b-ai/brain"
-    manager: "CMO"
+    manager: "CoS"
+    note: "the vault — CoS remap 2026-08-16"
   - repo: "studio-b-ai/studiob-price-sync"
     manager: "CMO"
     note: "Shopify lane"
@@ -53,9 +57,18 @@ thresholds:
   p2_days: 14
   unranked_days: 3
 
+# Entries may carry ONE leading or trailing `*` (see labelMatchesPattern in the lib) so whole
+# monitor families are exempt without enumerating each label — CoS refinement 2026-08-16 after
+# the first live firing flagged auto-reconciled monitor issues (bolt#1413/#1414/#1578) as backlog.
 machinery_labels:
   - "bug"
   - "dead-cron"
   - "needs-human"
   - "backlog-staleness"
   - "credential-monitor"
+  - "machinery"
+  - "machinery-alert"
+  - "*-health"
+  - "*-failed-sync"
+  - "so-import-rescue"
+  - "awaiting-approval"

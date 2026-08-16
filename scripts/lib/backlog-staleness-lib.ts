@@ -100,8 +100,16 @@ export interface ClassifyInput {
   /** This repo's OPEN issues only (the worker fetches with `--state open`). */
   issues: IssueInput[];
   thresholds: Thresholds;
-  /** `backlog-managers.yaml`'s `machinery_labels:` list, verbatim. */
+  /** `backlog-managers.yaml`'s `machinery_labels:` list, verbatim (exact names or single-`*` patterns, see `labelMatchesPattern`). */
   machineryLabels: string[];
+  /**
+   * `backlog-managers.yaml` `shared: true` — a repo several LANES work in (bolt-wms, studiob),
+   * where one `next` PER LANE is legitimate (Pricing/Wayfair/CD/Zoom each carry their own head in
+   * bolt-wms). For such repos the `multi-next` class is NOT evaluated (CoS refinement 2026-08-16);
+   * per-lane scoping waits for a lane-label convention. `headless` still applies (any ranked pool
+   * with zero `next` is still headless).
+   */
+  sharedRepo?: boolean;
   /**
    * ALL labels defined in the repo (`gh label list`), not merely labels currently applied to
    * open issues — this is what distinguishes "no P0–P3 issues open right now" (healthy;
@@ -132,13 +140,31 @@ function hasAnyLabel(labels: string[], targets: readonly string[]): boolean {
   return targets.some((t) => labels.includes(t));
 }
 
+/**
+ * Machinery-label PATTERN match (CoS refinement 2026-08-16, after the first live firing):
+ * `machinery_labels:` entries may carry a single leading or trailing `*` (`*-health`,
+ * `*-failed-sync`, `machinery-*`) so every auto-reconciled monitor family (Rule #165) is exempt
+ * without enumerating each label; entries without `*` match exactly. P-labels never glob.
+ */
+export function labelMatchesPattern(label: string, pattern: string): boolean {
+  if (!pattern.includes("*")) return label === pattern;
+  if (pattern.startsWith("*") && pattern.endsWith("*") && pattern.length > 2) return label.includes(pattern.slice(1, -1));
+  if (pattern.startsWith("*")) return label.endsWith(pattern.slice(1));
+  if (pattern.endsWith("*")) return label.startsWith(pattern.slice(0, -1));
+  return label === pattern; // an interior `*` is treated literally — no such entry exists; keep exact
+}
+
+function hasAnyMachineryLabel(labels: string[], machineryLabels: readonly string[]): boolean {
+  return machineryLabels.some((pat) => labels.some((l) => labelMatchesPattern(l, pat)));
+}
+
 function hasPLabel(labels: string[]): boolean {
   return hasAnyLabel(labels, P_LABELS);
 }
 
 /** backlog-managers.yaml's own rule, verbatim: "excluded only if it has a machinery label AND no P0–P3 label." */
 function isMachineryExcluded(labels: string[], machineryLabels: string[]): boolean {
-  return hasAnyLabel(labels, machineryLabels) && !hasPLabel(labels);
+  return hasAnyMachineryLabel(labels, machineryLabels) && !hasPLabel(labels);
 }
 
 /** Float days from `fromIso` to `toIso` (`toIso` normally `now`) — never itself reads the clock; both timestamps are caller-supplied. */
@@ -162,7 +188,7 @@ function byIssueNumber(a: IssueInput, b: IssueInput): number {
  * re-run (mirrors repo-hygiene-lib.ts's `diffFleet` determinism contract).
  */
 export function classify(input: ClassifyInput): Finding[] {
-  const { repo, manager, now, issues, thresholds, machineryLabels, repoLabels } = input;
+  const { repo, manager, now, issues, thresholds, machineryLabels, repoLabels, sharedRepo = false } = input;
   const findings: Finding[] = [];
 
   // "excluded from ranking checks" (backlog-managers.yaml) — applies uniformly to every check
@@ -250,7 +276,8 @@ export function classify(input: ClassifyInput): Finding[] {
   }
 
   // 5. multi-next — >1 `next`-labeled issue: one finding PER such issue, each naming its siblings.
-  if (nextIssues.length > 1) {
+  // Skipped for `shared: true` repos (one head per LANE is the norm there — see ClassifyInput.sharedRepo).
+  if (!sharedRepo && nextIssues.length > 1) {
     const numbers = nextIssues.map((i) => i.number);
     for (const issue of nextIssues) {
       const idle = daysBetween(issue.updatedAt, now);
