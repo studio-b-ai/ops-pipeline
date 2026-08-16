@@ -14,6 +14,9 @@ v1.2 (2026-08-15): MAKESIDE_NAMED += P/Kaufmann family (C001544/C001574/C001578)
 D4 FAIRE mint comment; RENTAL_INCOME_ACCOUNT flag. Zero fixture-month movement
 — hardening only.
 
+v1.3 (2026-08-16): D4 activation — FAIRE → MARKETPLACE_PROGRAM keyed C001601;
+PENDING_PROGRAMS emptied. Zero fixture-month movement (no C001601 docs exist yet).
+
 Named-account rules (R1-R6, copied verbatim from v1) still classify ALL of a
 matched customer's docs, exactly as in v1 (customer-level intent, unconditional
 on any one document's data quality). The branch rule (R7) becomes PER-DOC: any
@@ -70,13 +73,16 @@ PEPPER_COHORT = {}  # R3 -> leg 2. D3: Kevin+CMO-ratified NEW-MOTION wins only. 
 MARKETPLACE_PROGRAM = {  # R4 -> leg 4. D4 RULED 2026-08-13: 3-prong test ratified
     # (program contract/integration + platform-driven order flow + program economics).
     "C000862": "WAYFAIR LLC — dropship marketplace program (supplier ID 39803)",
+    "C001601": "FAIRE WHOLESALE, INC. — Faire marketplace payer account (D4 activation 2026-08-16; minted on Kevin's word; class RETAILER; program 3-prong test ratified 8/13)",
 }
 # D4: Kevin-pre-named PIPELINE programs — dormant until an AR account is born.
 # The candidate detector (d) watches for these name tokens; on first appearance
 # the seat converts the hit to a customer-ID entry in MARKETPLACE_PROGRAM above.
-# D4 activation rider (8/15): on FAIRE account mint, move the entry to MARKETPLACE_PROGRAM keyed by the new C-number IN THE SAME PR; land the account in class RETAILER (Wayfair precedent C000862). Class never drives leg 4 — the named list does (R4 before R9).
+# D4 activation rider (8/16): FAIRE activated — moved to MARKETPLACE_PROGRAM keyed
+# C001601 (account minted 2026-08-16). PENDING_PROGRAMS is now empty; the
+# candidate detector (d) still watches this dict's name tokens for future
+# pre-named programs.
 PENDING_PROGRAMS = {
-    "FAIRE": "Faire Wholesale — marketplace program, Kevin pre-named 2026-08-13 (D4); no AR account yet",
 }
 HOSPITALITY_DIRECT_SPEC = {}  # R5 -> leg 5 (spec WE hold; D5 pending — none ratified)
 MAKESIDE_NAMED = {  # R6 -> leg 6 (D2 RULED: a real leg, not a hold)
@@ -239,11 +245,19 @@ def self_test():
     bpk, rpk, _, _ = classify_doc(pk_mixed)
     assert bpk == "leg6" and rpk == "R6", f"P/K MIXED-BRANCH CONTROL FAILED (want leg6/R6): {bpk}/{rpk}"
 
+    # v1.3 control: FAIRE D4 activation — C001601 (class RETAILER) MUST classify
+    # via the named MARKETPLACE_PROGRAM rule R4, landing leg4 — NOT R9/leg1 (class
+    # never drives leg4; the named list does, R4 before R9).
+    faire = mk("C001601", "RETAILER", "HERITAGE")
+    bfa, rfa, _, _ = classify_doc(faire)
+    assert bfa == "leg4" and rfa == "R4", f"FAIRE D4 ACTIVATION CONTROL FAILED (want leg4/R4): {bfa}/{rfa}"
+
     print("CONTROLS (#322, doc-level): known-bad->H9/R10 OK | JOBBER->leg1 untagged OK | "
           "DISTRIBUTOR->leg1 OK | CONTRACTOR->leg1 (D1) OK | FERNCREST->leg6 (D2) OK | "
           "HORIZON->leg1+TAG (D3) OK | mixed-branch split (FERNCREST leg6 / HERITAGE leg1) OK | "
           "novel-class WORKROOM->H9 OK | blank-branch->H9/R0_SCHEMA OK | "
-          "P/Kaufmann C001574 on HERITAGE->leg6/R6 named (not R7) OK")
+          "P/Kaufmann C001574 on HERITAGE->leg6/R6 named (not R7) OK | "
+          "FAIRE C001601 RETAILER->leg4/R4 named (D4 activation) OK")
 
 
 def load_docs():
