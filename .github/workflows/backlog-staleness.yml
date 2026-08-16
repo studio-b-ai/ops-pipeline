@@ -1,0 +1,101 @@
+name: Backlog Staleness
+
+# ops-pipeline#136 (CTO seat -> CoS, LANES rule 17 rollout, Kevin word 2026-08-16) -- the
+# daily fleet instrument for rule 17(d)'s per-manager backlog-staleness stall check. Full
+# design lives in scripts/backlog-staleness-worker.ts's and
+# scripts/lib/backlog-staleness-lib.ts's header comments; this workflow only mints the
+# fleet App token (repo-hygiene.yml's pattern, copied verbatim) and runs the worker with
+# it.
+#
+# Fleet App token required for the SAME reason as repo-hygiene.yml: this worker reads open
+# issues across MULTIPLE org repos (scripts/backlog-managers.yaml's repo list), which a
+# repo-scoped ambient GITHUB_TOKEN structurally cannot do -- it only sees the one repo a
+# workflow runs in. studiob-fleet-bot's installation-level issues:write + metadata:read
+# covers every read (issue list, label list) and every write (open/retitle/comment/close
+# the per-manager aggregate issue, always on studio-b-ai/ops-pipeline itself) this worker
+# performs.
+#
+# Unlike repo-hygiene.yml (which never mutates a REPO), this worker DOES open/retitle/
+# comment/close ISSUES -- but only ever on ops-pipeline itself, never on a manager's own
+# repo (Rule #165 auto-reconciled alerting: the open-issue set per manager IS the dedup
+# state).
+
+on:
+  schedule:
+    - cron: "0 12 * * *" # daily, 12:00 UTC (8 AM ET) -- GH Actions cron is UTC-only (Rule #94)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real reads throughout (every configured repo's issue list + label list) -- zero issue mutations on ops-pipeline, preview only"
+        required: false
+        type: boolean
+        default: true
+      now:
+        description: "ISO 8601 timestamp overriding the clock (the #464/#471 plant ladder) -- omit for the real current time"
+        required: false
+        type: string
+        default: ""
+      repos:
+        description: "Comma-separated repo allowlist (e.g. studio-b-ai/ops-pipeline) to scope this run to a subset of backlog-managers.yaml's repos -- omit for the full fleet"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backlog-staleness
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: "Backlog staleness -- rule 17 instrument (fleet App token)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: "Install deps"
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted UNCONDITIONALLY -- including on a dry run: Rule #376, a dry run that reads
+      # nothing proves nothing, and every read this worker does (per-repo issue list, per-repo
+      # label list) needs real org-wide access the ambient GITHUB_TOKEN structurally cannot
+      # provide.
+      - name: "Mint fleet installation token"
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: "Fail loud if the fleet token did not mint"
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token -- check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
+          exit 1
+
+      - name: "Run backlog-staleness worker"
+        id: run_worker
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+        run: |
+          npx tsx backlog-staleness-worker.ts \
+            ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }} \
+            ${{ (github.event_name == 'workflow_dispatch' && inputs.now != '') && format('--now {0}', inputs.now) || '' }} \
+            ${{ (github.event_name == 'workflow_dispatch' && inputs.repos != '') && format('--repos {0}', inputs.repos) || '' }}
+
+      # Rule #356: a timeout kill reports "cancelled" SILENTLY unless a SEPARATE if: always()
+      # step names the terminal status explicitly.
+      - name: "Report terminal status"
+        if: always()
+        run: |
+          echo "backlog-staleness workflow terminal status: ${{ job.status }} (run_worker outcome: ${{ steps.run_worker.outcome }})"
