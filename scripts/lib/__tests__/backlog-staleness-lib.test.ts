@@ -164,6 +164,32 @@ describe("classify — headless", () => {
     expect(findings.filter((f) => f.class === "headless")).toHaveLength(0);
   });
 
+  // Codex pass-1 P1: `next` on an UNRANKED issue must not count as "having a head" — the
+  // ranked pool still has zero next-carriers. Without this, a stray `next` on a no-P-label
+  // issue silently masks a real headless repo.
+  it("STILL flags when the only `next`-carrier is unranked (no P0–P3 label) — an unranked next is not a head", () => {
+    const findings = run([
+      issue({ number: 36, labels: ["P1"], updatedAt: daysAgo(1) }), // ranked, no next
+      issue({ number: 37, labels: ["next"], createdAt: daysAgo(1) }), // next, but unranked
+    ]);
+    const f = findings.find((x) => x.class === "headless");
+    expect(f).toBeDefined();
+    expect(f!.detail).toContain("1 ranked");
+  });
+
+  // The multi-next class is deliberately NOT narrowed the same way — "more than one issue
+  // claims to be the head" is a labeling-hygiene problem independent of whether each
+  // next-carrier also happens to be ranked (Rule #109 — don't widen the fix past what codex
+  // actually flagged).
+  it("multi-next still counts an unranked next-carrier as a sibling (unchanged, unlike headless)", () => {
+    const findings = run([
+      issue({ number: 38, labels: ["P1", "next"], updatedAt: daysAgo(1) }),
+      issue({ number: 39, labels: ["next"], createdAt: daysAgo(1) }), // unranked, still a next
+    ]);
+    const multi = findings.filter((f) => f.class === "multi-next");
+    expect(multi.map((f) => f.issue).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([38, 39]);
+  });
+
   it("flags a repo with ranked issues but zero next — a repo-level finding (issue: null)", () => {
     const findings = run([
       issue({ number: 33, labels: ["P1"], updatedAt: daysAgo(1) }),

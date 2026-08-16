@@ -226,10 +226,16 @@ export function classify(input: ClassifyInput): Finding[] {
     });
   }
 
-  // 4. headless — ≥1 rankable P0–P3 issue, zero `next` among rankable issues. Repo-level.
+  // 4. headless — ≥1 rankable P0–P3 issue, zero `next` AMONG THE RANKED ONES. Repo-level.
+  // Deliberately narrower than "zero `next` among rankable issues": an unranked (no P0–P3)
+  // issue carrying `next` does NOT count as a head for this check — the ranked pool still has
+  // none. That issue is separately caught by `unranked` (once past unranked_days) and, if it's
+  // the repo's ONLY next-carrier, correctly leaves headless firing too — a next label on an
+  // unranked issue is not a substitute for the ranked pool having a real #1.
   const rankedCount = rankable.filter((i) => hasPLabel(i.labels)).length;
   const nextIssues = rankable.filter((i) => i.labels.includes("next"));
-  if (rankedCount > 0 && nextIssues.length === 0) {
+  const rankedNextIssues = nextIssues.filter((i) => hasPLabel(i.labels));
+  if (rankedCount > 0 && rankedNextIssues.length === 0) {
     findings.push({
       class: "headless",
       repo,
