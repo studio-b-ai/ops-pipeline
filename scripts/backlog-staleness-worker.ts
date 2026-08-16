@@ -73,6 +73,8 @@ interface RepoManagerEntry {
   repo: string;
   manager: string;
   note?: string;
+  /** Multi-lane repo: one `next` per lane is legitimate → `multi-next` not evaluated (CoS 2026-08-16). */
+  shared?: boolean;
 }
 
 interface Config {
@@ -210,6 +212,7 @@ async function main(): Promise<void> {
       thresholds: config.thresholds,
       machineryLabels: config.machinery_labels,
       repoLabels,
+      sharedRepo: entry.shared === true,
     });
     totalFindings += repoFindings.length;
     const list = findingsByManager.get(entry.manager) ?? [];

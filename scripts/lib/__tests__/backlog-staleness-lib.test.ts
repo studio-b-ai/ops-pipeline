@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classify,
+  labelMatchesPattern,
   render,
   LABEL,
   RULE_17_REMEDY,
@@ -400,5 +401,60 @@ describe("FINDING_CLASSES", () => {
     expect([...FINDING_CLASSES].sort()).toEqual(
       ["headless", "labels-missing", "multi-next", "p0p1-stale", "p2-stale", "unranked"].sort(),
     );
+  });
+});
+
+// ───────────────────────────── CoS refinements after the first live firing (2026-08-16) ─────────────────────────────
+
+describe("labelMatchesPattern — machinery-label globs", () => {
+  it("exact entries match exactly (and never as substrings)", () => {
+    expect(labelMatchesPattern("bug", "bug")).toBe(true);
+    expect(labelMatchesPattern("bugfix", "bug")).toBe(false);
+  });
+  it("trailing-* and leading-* patterns", () => {
+    expect(labelMatchesPattern("machinery-alert", "machinery-*")).toBe(true);
+    expect(labelMatchesPattern("squasher-health", "*-health")).toBe(true);
+    expect(labelMatchesPattern("connector-failed-sync", "*-failed-sync")).toBe(true);
+    expect(labelMatchesPattern("health-check", "*-health")).toBe(false); // negative control: suffix only
+    expect(labelMatchesPattern("P1", "*-health")).toBe(false);
+  });
+});
+
+describe("classify — machinery glob exemption + shared-repo multi-next", () => {
+  const GLOB_MACHINERY = [...MACHINERY_LABELS, "machinery", "machinery-alert", "*-health", "*-failed-sync", "so-import-rescue", "awaiting-approval"];
+
+  it("a *-health / so-import-rescue monitor issue with no P-label is NOT unranked (auto-reconciled monitor output, Rule #165)", () => {
+    const monitors = [
+      issue({ number: 1413, labels: ["squasher-health"], createdAt: daysAgo(30), updatedAt: daysAgo(30) }),
+      issue({ number: 1578, labels: ["so-import-rescue"], createdAt: daysAgo(10), updatedAt: daysAgo(10) }),
+    ];
+    const f = run(monitors, ALL_P_LABELS, { machineryLabels: GLOB_MACHINERY });
+    expect(f.filter((x) => x.class === "unranked")).toHaveLength(0);
+  });
+
+  it("the SAME issues without the glob entries ARE unranked (positive control — the exemption is doing the work)", () => {
+    const monitors = [issue({ number: 1413, labels: ["squasher-health"], createdAt: daysAgo(30), updatedAt: daysAgo(30) })];
+    const f = run(monitors, ALL_P_LABELS, { machineryLabels: MACHINERY_LABELS });
+    expect(f.filter((x) => x.class === "unranked")).toHaveLength(1);
+  });
+
+  it("a monitor issue a human has since P-labeled is real backlog again (glob does not override the P-label rule)", () => {
+    const f = run([issue({ number: 7, labels: ["squasher-health", "P1"], updatedAt: daysAgo(5), createdAt: daysAgo(5) })], ALL_P_LABELS, { machineryLabels: GLOB_MACHINERY });
+    expect(f.some((x) => x.class === "p0p1-stale" && x.issue === 7)).toBe(true);
+  });
+
+  it("shared repo: two `next` (one per lane) is NOT multi-next; a non-shared repo with the same issues IS", () => {
+    const twoHeads = [
+      issue({ number: 1775, labels: ["P1", "next"], updatedAt: NOW, createdAt: daysAgo(1) }),
+      issue({ number: 1777, labels: ["P1", "next"], updatedAt: NOW, createdAt: daysAgo(1) }),
+    ];
+    expect(run(twoHeads, ALL_P_LABELS, { sharedRepo: true }).filter((x) => x.class === "multi-next")).toHaveLength(0);
+    expect(run(twoHeads, ALL_P_LABELS, { sharedRepo: false }).filter((x) => x.class === "multi-next")).toHaveLength(2);
+    expect(run(twoHeads, ALL_P_LABELS).filter((x) => x.class === "multi-next")).toHaveLength(2); // default = not shared
+  });
+
+  it("shared repo still reports headless when a ranked pool has zero `next`", () => {
+    const f = run([issue({ number: 1, labels: ["P2"], updatedAt: NOW, createdAt: daysAgo(1) })], ALL_P_LABELS, { sharedRepo: true });
+    expect(f.some((x) => x.class === "headless")).toBe(true);
   });
 });
