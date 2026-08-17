@@ -213,7 +213,10 @@ export interface Stamp {
   kevin: string | null;
 }
 
-const ISO_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}Z)?$/;
+// Optional :SS and .sss — real stamps carry seconds precision (pricing-lane-reentry.md:
+// 2026-08-17T06:20:38Z, live 2026-08-17); HH:MM-only rejected those as unparseable (codex
+// pass-1 P2, ops-pipeline#151).
+const ISO_RE = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?Z)?$/;
 const UNSTAMPED_RE = /^[—-]+$/; // em dash (—) primarily; a bare "-"/"--" tolerated defensively
 
 function isIso(s: string): boolean {

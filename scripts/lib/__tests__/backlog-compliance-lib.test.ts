@@ -223,6 +223,11 @@ describe("parseStampLine", () => {
     expect(parseStampLine("ranked-by: lane 2026-08-17 · manager — · cos — · kevin —")!.manager).toBeNull();
   });
 
+  it("ISO stamps with seconds/milliseconds precision parse (real: pricing-lane-reentry.md's lane stamp is 2026-08-17T06:20:38Z — codex pass-1 P2, ops-pipeline#151)", () => {
+    expect(parseStampLine("ranked-by: lane 2026-08-17T06:20:38Z · manager — · cos — · kevin —")!.lane).toBe("2026-08-17T06:20:38Z");
+    expect(parseStampLine("ranked-by: lane 2026-08-17T06:20:38.123Z · manager — · cos — · kevin —")!.lane).toBe("2026-08-17T06:20:38.123Z");
+  });
+
   it("manager MULTI-WORD seat ('Creative Director', 'General Counsel' — real, live 2026-08-17) stays intact, both stamped and unstamped (codex pass-1 P1, ops-pipeline#151)", () => {
     expect(parseStampLine("ranked-by: lane 2026-08-17 · manager Creative Director 2026-08-17 · cos — · kevin —")!.manager).toEqual({
       seat: "Creative Director",
