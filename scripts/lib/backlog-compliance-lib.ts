@@ -376,19 +376,62 @@ function isFullyStruck(itemText: string): boolean {
   return /^~~[\s\S]*~~$/.test(itemText.trim());
 }
 
+/** Removes `` `…` `` inline-code spans entirely (backticks AND their content) — fold 7a heading
+ * discovery ONLY. A heading whose sole mention of the phrase is inside a backtick-quoted
+ * cross-reference (e.g. `# §4 Next milestones (... the backlog is `## Backlog (ranked)` just
+ * below ...)`) is a forward-reference to the real section, not the section's own heading — the
+ * quoted content is disowned entirely, unlike `stripStampDecoration`, which deletes backtick
+ * CHARACTERS but keeps their content (correct for a stamp value the line legitimately owns).
+ */
+function stripInlineCodeSpans(s: string): string {
+  return s.replace(/`[^`]*`/g, "");
+}
+
+/** An optional leading `§4.`/`§4 `/`4.`/`4 ` numbering prefix on a heading's own text. */
+const HEADING_NUMBERING_RE = /^§?\d+\.?\s*/;
+
 /**
- * Finds the first heading (any `#`-level) whose text contains "Backlog (ranked)", the
- * `ranked-by:` stamp line within the next `STAMP_LOOKAHEAD_LINES` non-blank lines under it (if
- * any — tolerant of `**`/backtick/blockquote/bullet wrapping), and every item between the
- * heading and the next same-or-shallower heading (a deeper sub-heading, e.g. `###` under a
- * `##` backlog heading, stays IN the section) — skipping `<details>…</details>` blocks and
- * struck-through (`~~…~~`) items per the grammar. Lines before/around a stamp that isn't
+ * Finds the REAL `## Backlog (ranked)` section heading — fold 7a, ops-pipeline#151 (live-vault
+ * bug: Deep River's `# §4 Next milestones (... the backlog is `## Backlog (ranked)` just below
+ * ...)` heading, 12 lines above the true one, matched FIRST under the old plain-substring test
+ * and hijacked the whole section — its own stamp/items were never reached). Two-stage: (1)
+ * candidates = headings whose text, AFTER stripping inline-code spans, still contains the
+ * phrase (a backticked mention alone disqualifies a heading); (2) among candidates, prefer the
+ * FIRST whose (inline-code-stripped, hash-prefix-stripped) text — after an optional leading
+ * `§4.`-style numbering — STARTS WITH the phrase, i.e. the section's OWN heading; if none
+ * qualifies, fall back to the first remaining candidate by document order (keeps prior
+ * tolerance for `## Ranked Backlog (ranked) — …`-style variants, where the phrase appears but
+ * not at the very start). Returns -1 when there are no candidates at all.
+ */
+function findBacklogHeadingIndex(lines: string[]): number {
+  const candidates: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (HEADING_RE.test(lines[i]) && stripInlineCodeSpans(lines[i]).includes("Backlog (ranked)")) {
+      candidates.push(i);
+    }
+  }
+  for (const i of candidates) {
+    const prefixLen = HEADING_RE.exec(lines[i])![0].length;
+    const content = stripInlineCodeSpans(lines[i]).slice(prefixLen).replace(HEADING_NUMBERING_RE, "");
+    if (content.startsWith("Backlog (ranked)")) return i;
+  }
+  return candidates.length > 0 ? candidates[0] : -1;
+}
+
+/**
+ * Finds the real `## Backlog (ranked)` section heading (`findBacklogHeadingIndex` — a
+ * backticked cross-reference to the section doesn't count as the section itself), the
+ * `ranked-by:` stamp line within the next `STAMP_LOOKAHEAD_LINES` non-blank, non-comment lines
+ * under it (if any — tolerant of `**`/backtick/blockquote/bullet wrapping), and every item
+ * between the heading and the next same-or-shallower heading (a deeper sub-heading, e.g. `###`
+ * under a `##` backlog heading, stays IN the section) — skipping `<details>…</details>` blocks
+ * and struck-through (`~~…~~`) items per the grammar. Lines before/around a stamp that isn't
  * literally the first line are still scanned for headers/items (only the stamp line itself is
  * excluded from the body).
  */
 export function parseBacklogSection(md: string): ParsedSection {
   const lines = md.split("\n");
-  const headingIdx = lines.findIndex((l) => HEADING_RE.test(l) && l.includes("Backlog (ranked)"));
+  const headingIdx = findBacklogHeadingIndex(lines);
   if (headingIdx === -1) {
     return { found: false, headingLine: null, stamp: null, stampLine: null, items: [], emptyMarker: false };
   }
