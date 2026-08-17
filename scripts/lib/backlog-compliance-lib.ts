@@ -372,9 +372,14 @@ export function parseStampLine(rawLine: string): Stamp | null {
 // ───────────────────────────── item / section parsing ─────────────────────────────
 
 export interface ParsedItem {
-  /** 1-based absolute line number in the brief's full text — the "(line numbers)" the S1 finding text cites. */
+  /** 1-based absolute line number in the brief's full text — the "(line numbers)" the S1 finding
+   * text cites. Always the item's FIRST line, even when continuation lines were joined in (fold
+   * 9, ops-pipeline#155). */
   line: number;
-  /** Item text after stripping the leading `N.`/`Nb.`/`-`/`•` marker. */
+  /** Item text after stripping the leading `N.`/`Nb.`/`-`/`•` marker, single-space-joined with
+   * any immediately-following indented continuation lines (fold 9, ops-pipeline#155 — briefs
+   * hard-wrap at ~72 cols and an item's `owner … · next: … · <date>` tail routinely lands 1-3
+   * lines below the marker line). See `collectContinuationLines`. */
   text: string;
   tier: Tier | null;
   hasOwner: boolean;
@@ -519,6 +524,57 @@ function isTierHeaderLine(trimmedLine: string): boolean {
 
 function isFullyStruck(itemText: string): boolean {
   return /^~~[\s\S]*~~$/.test(itemText.trim());
+}
+
+/** True when a continuation CANDIDATE line (the RAW line, not trimmed) is indented per the
+ * fold-9 grammar (ops-pipeline#155): a leading tab, or at least 2 leading spaces. Anything else
+ * (0-1 leading spaces, no tab) is the next item, a fresh heading, or prose that ends the item. */
+function isContinuationIndented(rawLine: string): boolean {
+  return rawLine.startsWith("\t") || /^ {2,}/.test(rawLine);
+}
+
+/**
+ * Collects an item's hard-wrap continuation lines (fold 9, ops-pipeline#155 — post first live
+ * firing, brain#136: briefs hard-wrap at ~72 cols with indented continuation lines, and the
+ * item's `owner … · next: … · <date>` tail routinely lands 1-3 lines below the numbered/bulleted
+ * marker line, where the pre-fold parser never looked — evaluating tier/owner/clock over the
+ * first line only produced a false S1 on Chief of Staff/Faire/Acumatica). Walks forward from
+ * `itemLineIdx + 1`, consuming each line that is indented (`isContinuationIndented` — so an
+ * indented sub-bullet like `   - foo` counts too; it's a continuation of its parent, never a
+ * separate item), non-blank after trimming, and does not (after trimming) start with `#`
+ * (heading), `|` (table row), `<details` (details block), or `<!--` (HTML comment). Any of those
+ * five conditions — plus hitting `stampIdx` (the stamp line is never body content, wherever it
+ * falls) — ends the scan WITHOUT consuming that line: the outer loop's own next iteration picks
+ * it up and applies its normal heading/table/details/prose handling, unchanged.
+ *
+ * Returns the trimmed continuation texts (for the caller's single-space join) and the index of
+ * the LAST line consumed (`itemLineIdx` itself when nothing was consumed) — the caller advances
+ * the outer loop's `i` to that index so these lines are never re-scanned as their own
+ * items/prose/tier-headers. This happens unconditionally, before the caller checks
+ * `isFullyStruck` on the item's first-line text — a struck item's continuation lines are still
+ * consumed-and-discarded, never left for the next iteration to misread as fresh content (e.g. an
+ * indented `   - foo` sub-bullet would otherwise be picked up as its own top-level item, since
+ * `ITEM_START_RE` matches against TRIMMED text).
+ */
+function collectContinuationLines(
+  lines: string[],
+  itemLineIdx: number,
+  endIdx: number,
+  stampIdx: number,
+): { texts: string[]; lastIdx: number } {
+  const texts: string[] = [];
+  let lastIdx = itemLineIdx;
+  for (let j = itemLineIdx + 1; j < endIdx; j++) {
+    if (j === stampIdx) break; // never consume the stamp line, wherever it falls (existing invariant)
+    const raw = lines[j];
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) break; // blank line ends the item
+    if (!isContinuationIndented(raw)) break; // non-indented line ends the item (next item marker or prose)
+    if (trimmed.startsWith("#") || trimmed.startsWith("|") || trimmed.startsWith("<details") || trimmed.startsWith("<!--")) break;
+    texts.push(trimmed);
+    lastIdx = j;
+  }
+  return { texts, lastIdx };
 }
 
 /** Removes `` `…` `` inline-code spans entirely (backticks AND their content) — fold 7a heading
@@ -676,15 +732,25 @@ export function parseBacklogSection(md: string): ParsedSection {
     const itemMatch = ITEM_START_RE.exec(trimmed);
     if (!itemMatch) continue; // prose line — not an item, not counted, not flagged
 
-    const itemText = trimmed.slice(itemMatch[0].length).trim();
-    if (isFullyStruck(itemText)) continue; // struck item — skipped per the grammar
+    const firstLineIdx = i;
+    const firstLineText = trimmed.slice(itemMatch[0].length).trim();
+
+    // fold 9 (ops-pipeline#155): join hard-wrapped continuation lines BEFORE evaluating
+    // tier/owner/clock — consumed (and `i` advanced past) regardless of whether the item turns
+    // out to be struck below, so they're never re-scanned as their own items/prose.
+    const { texts: continuationTexts, lastIdx } = collectContinuationLines(lines, firstLineIdx, endIdx, stampIdx);
+    i = lastIdx;
+
+    if (isFullyStruck(firstLineText)) continue; // struck item (first-line text only) — skipped per the grammar
+
+    const itemText = [firstLineText, ...continuationTexts].join(" ");
 
     const inlineTierMatch = TIER_RE.exec(itemText);
     const tier = inlineTierMatch ? (`P${inlineTierMatch[1]}` as Tier) : currentTier;
     const hasOwner = OWNER_RE.test(itemText);
     const hasClock = UNCLOCKED_RE.test(itemText) || CLOCK_DATE_RE.test(itemText);
 
-    items.push({ line: i + 1, text: itemText, tier, hasOwner, hasClock });
+    items.push({ line: firstLineIdx + 1, text: itemText, tier, hasOwner, hasClock });
   }
 
   return { found: true, headingLine: lines[headingIdx], stamp, stampLine, items, emptyMarker };
