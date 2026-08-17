@@ -302,6 +302,16 @@ describe("parseStampLine", () => {
   it("an UNBALANCED trailing paren (no closing ')') is left unchanged, so isIso correctly rejects it — garbage is never silently accepted (fold 6a)", () => {
     expect(parseStampLine("ranked-by: lane 2026-08-17T06:25Z (oops")).toBeNull();
   });
+
+  it("a comma INSIDE the trailing parenthetical does not split the field early (codex pass 3 P2, ops-pipeline#151)", () => {
+    const s = parseStampLine("ranked-by: lane 2026-08-17T06:25Z (last re-rank, ranks unchanged) · manager CD 2026-08-17T06:25Z · cos — · kevin —");
+    expect(s).toEqual({ lane: "2026-08-17T06:25Z", manager: { seat: "CD", at: "2026-08-17T06:25Z" }, cos: null, kevin: null });
+  });
+
+  it("a comma inside a NESTED parenthetical also doesn't split early", () => {
+    const s = parseStampLine("ranked-by: lane 2026-08-17T06:25Z (note (sub-note, with a comma) continues) · manager — · cos — · kevin —");
+    expect(s!.lane).toBe("2026-08-17T06:25Z");
+  });
 });
 
 // ───────────────────────────── parseBacklogSection ─────────────────────────────
