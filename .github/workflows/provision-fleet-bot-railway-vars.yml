@@ -18,66 +18,58 @@ name: Provision Fleet Bot Railway Vars
 #
 # Rollout sequence: run dry-run once, review the printed body → re-run with apply=true
 # → bolt-wms redeploys (Rule #135 — env vars need a redeploy to reach the running
-# process) → confirm a receipt from studiob-fleet-bot[bot] on a live bolt-wms PR/commit
-# → the Kevin-minted PAT variable on bolt-wms's service is unset (separate, manual step
-# — this workflow never touches or reads it).
+# process) → confirm a receipt from studiob-fleet-bot[bot] via bolt-wms's plant script
+# (scripts/github-issues-plant.ts, both controls) → the Kevin-minted PAT variable on
+# bolt-wms's service is unset (separate step — this workflow never touches or reads it).
 #
 # Secrets (Kevin-gated; Rules #98/#259/#282/#363 — never printed, never logged):
 #   RAILWAY_API_TOKEN      Railway API token with write access to the target project.
 #   FLEET_APP_ID           studiob-fleet-bot GitHub App id.
 #   FLEET_APP_PRIVATE_KEY  studiob-fleet-bot GitHub App PEM private key.
-# `installation_id` is a plain workflow input, not a secret (it identifies which repo
-# installation the App is scoped to, not a credential) — forwarded as the
-# FLEET_APP_INSTALLATION_ID env var for the script to read explicitly (Rule #79: never
-# an opportunistic env fallback).
+#
+# ⚠️ TARGET IS A CONSTANT TUPLE, NOT AN INPUT (codex review passes 2 + 3 on ops#160):
+# the ONLY dispatch input is the `apply` boolean. Every target-scoping value —
+# project id, environment name, service name, App installation id — is a workflow-
+# level constant below, so nobody able to dispatch this workflow can redirect
+# FLEET_APP_PRIVATE_KEY to another Railway project/environment/service or stamp a
+# service with the wrong installation id (a free-text input guarded by a partial
+# allow-list left `environment_name` + `installation_id` open — pass 3). Onboarding a
+# second consumer of this ladder = a NEW job with its own constant tuple in the same
+# PR that onboards it (Rule #235) — never a free-text input, never a wildcard.
+# `installation_id` is not a secret (it identifies which repo installation the App is
+# scoped to) — it is forwarded as the FLEET_APP_INSTALLATION_ID env var for the script
+# to read explicitly (Rule #79: never an opportunistic env fallback).
 #
 # ⚠️ Rules #198/#280: GitHub Actions does not validate Actions-identifier rules at
-# authoring time — after merge, `gh workflow run "Provision Fleet Bot Railway Vars"
+# authoring time — after merge, `gh workflow run provision-fleet-bot-railway-vars.yml
 # --repo studio-b-ai/ops-pipeline -f apply=false` once and confirm a completed run,
 # don't just trust the diff.
-#
-# ⚠️ Target allow-list (codex review, pass 2): `project_id`/`service_name` are
-# free-text workflow_dispatch inputs, so without a check anyone able to dispatch this
-# workflow could redirect FLEET_APP_PRIVATE_KEY onto any Railway service reachable by
-# RAILWAY_API_TOKEN. The "Guard: restrict to known fleet-bot Railway targets" step
-# below fails the job BEFORE the secret-bearing step runs unless project_id+service_name
-# match an explicit allow-list — onboarding a new consumer means adding it to that
-# guard's list in the SAME PR (Rule #235), never widening it to a wildcard.
 
 on:
   workflow_dispatch:
     inputs:
-      project_id:
-        description: "Railway project id (default: aesthetik-production)"
-        type: string
-        default: "186573d8-0b87-4013-a464-dcda9b1eed0f"
-      environment_name:
-        description: "Railway environment name"
-        type: string
-        default: "production"
-      service_name:
-        description: "Railway service name to receive the FLEET_APP_* vars"
-        type: string
-        default: "bolt-wms"
-      installation_id:
-        description: "studiob-fleet-bot GitHub App installation id for the target repo"
-        type: string
-        default: "153748636"
       apply:
         description: "Write the variables for real (default = dry-run: resolves ids + prints a redacted body only, no mutation sent)"
         type: boolean
         default: false
 
+# The one approved provisioning target. Constants, not inputs — see the header.
+env:
+  TARGET_PROJECT_ID: "186573d8-0b87-4013-a464-dcda9b1eed0f" # Railway project aesthetik-production
+  TARGET_ENVIRONMENT_NAME: "production"
+  TARGET_SERVICE_NAME: "bolt-wms"
+  TARGET_INSTALLATION_ID: "153748636" # studiob-fleet-bot installation on studio-b-ai/bolt-wms
+
 permissions:
   contents: read
 
 concurrency:
-  group: provision-fleet-bot-${{ inputs.service_name }}
+  group: provision-fleet-bot-bolt-wms
   cancel-in-progress: false
 
 jobs:
-  provision:
-    name: "Provision FLEET_APP_* vars"
+  provision-bolt-wms:
+    name: "Provision FLEET_APP_* vars on bolt-wms"
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -95,40 +87,17 @@ jobs:
       - name: Install deps
         run: npm ci
 
-      - name: "Guard: restrict to known fleet-bot Railway targets"
-        # Fail-closed allow-list on the (project_id, service_name) pair (codex review,
-        # pass 2) — runs BEFORE the secret-bearing step so a non-allow-listed dispatch
-        # never reaches FLEET_APP_PRIVATE_KEY at all. Extend ALLOWED in the same PR that
-        # onboards a new consumer of this ladder (Rule #235); never replace it with a
-        # wildcard.
-        env:
-          PROJECT_ID: ${{ inputs.project_id }}
-          SERVICE_NAME: ${{ inputs.service_name }}
-        run: |
-          ALLOWED="186573d8-0b87-4013-a464-dcda9b1eed0f:bolt-wms"
-          CANDIDATE="${PROJECT_ID}:${SERVICE_NAME}"
-          if [ "$CANDIDATE" != "$ALLOWED" ]; then
-            echo "::error::project_id:service_name '$CANDIDATE' is not on the fleet-bot-provisioning allow-list ('$ALLOWED'). Add it to this guard step's ALLOWED value in the same PR that onboards the new consumer."
-            exit 1
-          fi
-          echo "target allow-listed: $CANDIDATE"
-
       - name: "Provision Railway vars (dry-run unless apply=true)"
-        # Inputs travel through `env:` and are read back as `"$SHELL_VARS"`, never interpolated
-        # directly as `${{ inputs.* }}` text into the `run:` script — a dispatcher-supplied string
-        # input containing shell metacharacters would otherwise be spliced into a step whose
-        # environment holds RAILWAY_API_TOKEN and the GitHub App private key (codex review finding,
-        # this PR). PROJECT_ID/ENVIRONMENT_NAME/SERVICE_NAME are plain env vars here, same as
-        # FLEET_APP_INSTALLATION_ID already was; APPLY_FLAG is built once via the `${{ }}` ternary
-        # (never derived from free-text input) and left unquoted at the call site on purpose, since
-        # it must either vanish or expand to exactly one word (`--apply`).
+        # Every value the script receives is either a workflow-level constant (the target
+        # tuple) or the `${{ }}` boolean ternary below — no free-text dispatch input ever
+        # reaches this step's shell, whose environment holds RAILWAY_API_TOKEN and the
+        # GitHub App private key (codex review pass 1: never splice `${{ inputs.* }}` text
+        # into a secret-bearing `run:`). APPLY_FLAG is left unquoted at the call site on
+        # purpose: it must either vanish or expand to exactly one word (`--apply`).
         env:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
           FLEET_APP_ID: ${{ secrets.FLEET_APP_ID }}
           FLEET_APP_PRIVATE_KEY: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
-          FLEET_APP_INSTALLATION_ID: ${{ inputs.installation_id }}
-          PROJECT_ID: ${{ inputs.project_id }}
-          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
-          SERVICE_NAME: ${{ inputs.service_name }}
+          FLEET_APP_INSTALLATION_ID: ${{ env.TARGET_INSTALLATION_ID }}
           APPLY_FLAG: ${{ inputs.apply == true && '--apply' || '' }}
-        run: npx tsx provision-railway-vars.ts --project-id "$PROJECT_ID" --environment-name "$ENVIRONMENT_NAME" --service-name "$SERVICE_NAME" $APPLY_FLAG
+        run: npx tsx provision-railway-vars.ts --project-id "$TARGET_PROJECT_ID" --environment-name "$TARGET_ENVIRONMENT_NAME" --service-name "$TARGET_SERVICE_NAME" $APPLY_FLAG
