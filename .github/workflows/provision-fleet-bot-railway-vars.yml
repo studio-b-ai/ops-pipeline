@@ -1,0 +1,103 @@
+name: Provision Fleet Bot Railway Vars
+
+# Credential-lifecycle-no-Kevin-touch ladder, rung 0 (decision D3):
+# ~/Documents/brain/library/decisions/2026-08-17-credential-lifecycle-no-kevin-touch.md
+#
+# bolt-wms mints `studiob-fleet-bot` GitHub App installation tokens (App ID 4595770,
+# installation 153748636) instead of a Kevin-minted PAT (bolt-wms PR #1840). Only
+# ops-pipeline holds the App's PEM (repo secrets FLEET_APP_ID / FLEET_APP_PRIVATE_KEY)
+# plus RAILWAY_API_TOKEN, so provisioning the consumer's Railway service must run as an
+# ops-pipeline workflow_dispatch job — bolt-wms cannot self-provision its own App
+# identity. This job is a thin dispatch wrapper around scripts/provision-railway-vars.ts
+# (see that file's header for the mutation shape, dry-run design, and post-apply
+# verification) — it does not reimplement any of that logic.
+#
+# DEFAULT = DRY-RUN (Rule #376): leave `apply` at its default `false` to resolve the
+# real project/environment/service ids and print the redacted upsert body with no
+# mutation sent. Set `apply: true` only when actually writing the vars.
+#
+# Rollout sequence: run dry-run once, review the printed body → re-run with apply=true
+# → bolt-wms redeploys (Rule #135 — env vars need a redeploy to reach the running
+# process) → confirm a receipt from studiob-fleet-bot[bot] via bolt-wms's plant script
+# (scripts/github-issues-plant.ts, both controls) → the Kevin-minted PAT variable on
+# bolt-wms's service is unset (separate step — this workflow never touches or reads it).
+#
+# Secrets (Kevin-gated; Rules #98/#259/#282/#363 — never printed, never logged):
+#   RAILWAY_API_TOKEN      Railway API token with write access to the target project.
+#   FLEET_APP_ID           studiob-fleet-bot GitHub App id.
+#   FLEET_APP_PRIVATE_KEY  studiob-fleet-bot GitHub App PEM private key.
+#
+# ⚠️ TARGET IS A CONSTANT TUPLE, NOT AN INPUT (codex review passes 2 + 3 on ops#160):
+# the ONLY dispatch input is the `apply` boolean. Every target-scoping value —
+# project id, environment name, service name, App installation id — is a workflow-
+# level constant below, so nobody able to dispatch this workflow can redirect
+# FLEET_APP_PRIVATE_KEY to another Railway project/environment/service or stamp a
+# service with the wrong installation id (a free-text input guarded by a partial
+# allow-list left `environment_name` + `installation_id` open — pass 3). Onboarding a
+# second consumer of this ladder = a NEW job with its own constant tuple in the same
+# PR that onboards it (Rule #235) — never a free-text input, never a wildcard.
+# `installation_id` is not a secret (it identifies which repo installation the App is
+# scoped to) — it is forwarded as the FLEET_APP_INSTALLATION_ID env var for the script
+# to read explicitly (Rule #79: never an opportunistic env fallback).
+#
+# ⚠️ Rules #198/#280: GitHub Actions does not validate Actions-identifier rules at
+# authoring time — after merge, `gh workflow run provision-fleet-bot-railway-vars.yml
+# --repo studio-b-ai/ops-pipeline -f apply=false` once and confirm a completed run,
+# don't just trust the diff.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Write the variables for real (default = dry-run: resolves ids + prints a redacted body only, no mutation sent)"
+        type: boolean
+        default: false
+
+# The one approved provisioning target. Constants, not inputs — see the header.
+env:
+  TARGET_PROJECT_ID: "186573d8-0b87-4013-a464-dcda9b1eed0f" # Railway project aesthetik-production
+  TARGET_ENVIRONMENT_NAME: "production"
+  TARGET_SERVICE_NAME: "bolt-wms"
+  TARGET_INSTALLATION_ID: "153748636" # studiob-fleet-bot installation on studio-b-ai/bolt-wms
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provision-fleet-bot-bolt-wms
+  cancel-in-progress: false
+
+jobs:
+  provision-bolt-wms:
+    name: "Provision FLEET_APP_* vars on bolt-wms"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: scripts
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: scripts/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: "Provision Railway vars (dry-run unless apply=true)"
+        # Every value the script receives is either a workflow-level constant (the target
+        # tuple) or the `${{ }}` boolean ternary below — no free-text dispatch input ever
+        # reaches this step's shell, whose environment holds RAILWAY_API_TOKEN and the
+        # GitHub App private key (codex review pass 1: never splice `${{ inputs.* }}` text
+        # into a secret-bearing `run:`). APPLY_FLAG is left unquoted at the call site on
+        # purpose: it must either vanish or expand to exactly one word (`--apply`).
+        env:
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          FLEET_APP_ID: ${{ secrets.FLEET_APP_ID }}
+          FLEET_APP_PRIVATE_KEY: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          FLEET_APP_INSTALLATION_ID: ${{ env.TARGET_INSTALLATION_ID }}
+          APPLY_FLAG: ${{ inputs.apply == true && '--apply' || '' }}
+        run: npx tsx provision-railway-vars.ts --project-id "$TARGET_PROJECT_ID" --environment-name "$TARGET_ENVIRONMENT_NAME" --service-name "$TARGET_SERVICE_NAME" $APPLY_FLAG
