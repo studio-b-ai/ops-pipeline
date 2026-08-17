@@ -79,6 +79,7 @@ import {
   renderLaneBody,
   summaryLine,
   laneMarker,
+  decodeContentsResponse,
   ROLLUP_MARKER,
   LABEL,
   type ComplianceConfig,
@@ -143,11 +144,14 @@ function isNotFoundError(err: unknown): boolean {
 }
 
 function apiContentsRaw(repo: string, path: string): string {
-  // Throws on ANY failure, 404 included — callers decide how to interpret (mirrors the
+  // Throws on ANY gh-call failure, 404 included — callers decide how to interpret (mirrors the
   // isNotFoundError-detection convention already established in github-issues.ts's
-  // isOrgMember, same `gh` CLI, same stderr shape).
-  const raw = gh(["api", `repos/${repo}/contents/${path}`, "--jq", ".content"]);
-  return Buffer.from(raw.trim(), "base64").toString("utf-8");
+  // isOrgMember, same `gh` CLI, same stderr shape). The response's OWN declared shape
+  // (type/encoding/content) is validated by decodeContentsResponse, not assumed (Rule #465) —
+  // a non-file/non-base64 response throws THERE, with a message isNotFoundError can't confuse
+  // for a 404 (a real 404 never reaches this point; `gh` throws at the API-call layer above).
+  const raw = gh(["api", `repos/${repo}/contents/${path}`, "--jq", "{type,encoding,size,content}"]);
+  return decodeContentsResponse(raw, path);
 }
 
 /** Builds the two read functions this run uses, closed over the mode (local disk vs Contents API). */
