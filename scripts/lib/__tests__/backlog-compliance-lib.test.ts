@@ -90,6 +90,11 @@ describe("parseLanesRows", () => {
     expect(r.manager).toBe("CMO");
   });
 
+  it("PROJECT row with a MULTI-WORD rule-15 manager (real seats — \"Creative Director\", \"General Counsel\" — confirmed live in LANES.md 2026-08-17): manager captured whole, not truncated to its first word (codex pass-1 P1, ops-pipeline#151)", () => {
+    const rows = parseLanesRows("| **Deep River** (lane manager (rule 15): **Creative Director** — report UP to them, not the CoS) (PROJECT) | a | b | c |");
+    expect(rows[0].manager).toBe("Creative Director");
+  });
+
   it("TEMP row: class TEMP, active, no manager", () => {
     const r = row("Errand");
     expect(r.class).toBe("TEMP");

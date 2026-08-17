@@ -127,7 +127,10 @@ const ROW_START_RE = /^\s*\|\s*\*\*([^*]+)\*\*/;
  * the same position, and regex alternation picks the first alternative that matches, so the
  * longer/more-specific form has to come first or it never gets a chance to win. */
 const CLASS_TOKEN_RE = /\b(SEAT|PROJECT|TEMP|ARCHIVED-DONE|ARCHIVED|TOMBSTONED)\b/;
-const MANAGER_RE = /lane manager \(rule 15\):\s*\*\*(\w+)\*\*/;
+// [^*]+ (not \w+) — mirrors ROW_START_RE: real rule-15 managers include multi-word seats
+// ("Creative Director", "General Counsel"), confirmed live in LANES.md 2026-08-17. \w+ silently
+// dropped those to manager:null, which read as F2-exempt (codex pass-1 P1, ops-pipeline#151).
+const MANAGER_RE = /lane manager \(rule 15\):\s*\*\*([^*]+)\*\*/;
 const BRIEF_PATH_RE = /(?:coldstarts|library\/backlogs)\/[\w\-./]+\.md/;
 
 /** Text between the row's leading `|` and the next `|` (see module header re: table-breaking pipes). */
@@ -160,7 +163,7 @@ export function parseLanesRows(md: string): LaneRow[] {
       name: nameMatch[1].trim(),
       class: cls,
       active: cls !== "ARCHIVED" && cls !== "TOMBSTONED",
-      manager: managerMatch ? managerMatch[1] : null,
+      manager: managerMatch ? managerMatch[1].trim() : null,
       briefPath: briefMatch ? briefMatch[0] : null,
       raw: line,
     });
