@@ -223,6 +223,17 @@ describe("parseStampLine", () => {
     expect(parseStampLine("ranked-by: lane 2026-08-17 · manager — · cos — · kevin —")!.manager).toBeNull();
   });
 
+  it("manager MULTI-WORD seat ('Creative Director', 'General Counsel' — real, live 2026-08-17) stays intact, both stamped and unstamped (codex pass-1 P1, ops-pipeline#151)", () => {
+    expect(parseStampLine("ranked-by: lane 2026-08-17 · manager Creative Director 2026-08-17 · cos — · kevin —")!.manager).toEqual({
+      seat: "Creative Director",
+      at: "2026-08-17",
+    });
+    expect(parseStampLine("ranked-by: lane 2026-08-17 · manager General Counsel — · cos — · kevin —")!.manager).toEqual({
+      seat: "General Counsel",
+      at: null,
+    });
+  });
+
   it("returns null when the line doesn't start 'ranked-by:' (even after stripping decoration)", () => {
     expect(parseStampLine("this is not a stamp line")).toBeNull();
   });

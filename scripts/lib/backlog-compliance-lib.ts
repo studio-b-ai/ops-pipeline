@@ -263,7 +263,10 @@ export function parseStampLine(rawLine: string): Stamp | null {
 
   let manager: StampManager | null = null;
   if (fields.manager && !UNSTAMPED_RE.test(fields.manager)) {
-    const sp = fields.manager.indexOf(" ");
+    // lastIndexOf, not indexOf — a multi-word seat ("Creative Director") must stay intact; the
+    // ISO-or-dash trailing token never itself contains a space, so it's always the LAST one
+    // (codex pass-1 P1, ops-pipeline#151).
+    const sp = fields.manager.lastIndexOf(" ");
     if (sp === -1) {
       manager = { seat: fields.manager.trim(), at: null }; // a bare seat name, nothing else — treat as named-but-unstamped
     } else {
