@@ -11,6 +11,7 @@ import {
   renderLaneBody,
   summaryLine,
   laneMarker,
+  decodeContentsResponse,
   ROLLUP_MARKER,
   LABEL,
   COMPLIANCE_CHECKS,
@@ -829,5 +830,40 @@ describe("exported constants", () => {
 
   it("COMPLIANCE_CHECKS names exactly the 7 documented checks", () => {
     expect([...COMPLIANCE_CHECKS].sort()).toEqual(["F1", "F2", "F3", "P1", "P2", "P3", "S1"].sort());
+  });
+});
+
+describe("decodeContentsResponse", () => {
+  it("decodes a well-formed file/base64 response", () => {
+    const text = "## Backlog (ranked)\nhello";
+    const json = JSON.stringify({ type: "file", encoding: "base64", size: text.length, content: Buffer.from(text, "utf-8").toString("base64") });
+    expect(decodeContentsResponse(json, "coldstarts/x.md")).toBe(text);
+  });
+
+  it("throws — never silently mis-decodes — on a non-file type (e.g. a directory listing)", () => {
+    const json = JSON.stringify({ type: "dir", encoding: "base64", size: 0, content: "" });
+    expect(() => decodeContentsResponse(json, "coldstarts/x.md")).toThrow(/type=dir/);
+  });
+
+  it("throws on encoding !== base64 (e.g. an oversized file the API declines to inline)", () => {
+    const json = JSON.stringify({ type: "file", encoding: "none", size: 999999, content: undefined });
+    expect(() => decodeContentsResponse(json, "coldstarts/x.md")).toThrow(/encoding=none/);
+  });
+
+  it("throws on a missing/non-string content field", () => {
+    const json = JSON.stringify({ type: "file", encoding: "base64", size: 12 });
+    expect(() => decodeContentsResponse(json, "coldstarts/x.md")).toThrow(/coldstarts\/x\.md/);
+  });
+
+  it("the thrown message never contains the isNotFoundError substrings, so a shape mismatch can never be misread as an absent file", () => {
+    const json = JSON.stringify({ type: "dir", encoding: "base64", size: 0, content: "" });
+    try {
+      decodeContentsResponse(json, "coldstarts/x.md");
+      throw new Error("expected decodeContentsResponse to throw");
+    } catch (err) {
+      const msg = (err as Error).message;
+      expect(msg).not.toContain("HTTP 404");
+      expect(msg).not.toContain("Not Found");
+    }
   });
 });
