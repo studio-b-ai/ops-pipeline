@@ -35,6 +35,14 @@ name: Provision Fleet Bot Railway Vars
 # authoring time — after merge, `gh workflow run "Provision Fleet Bot Railway Vars"
 # --repo studio-b-ai/ops-pipeline -f apply=false` once and confirm a completed run,
 # don't just trust the diff.
+#
+# ⚠️ Target allow-list (codex review, pass 2): `project_id`/`service_name` are
+# free-text workflow_dispatch inputs, so without a check anyone able to dispatch this
+# workflow could redirect FLEET_APP_PRIVATE_KEY onto any Railway service reachable by
+# RAILWAY_API_TOKEN. The "Guard: restrict to known fleet-bot Railway targets" step
+# below fails the job BEFORE the secret-bearing step runs unless project_id+service_name
+# match an explicit allow-list — onboarding a new consumer means adding it to that
+# guard's list in the SAME PR (Rule #235), never widening it to a wildcard.
 
 on:
   workflow_dispatch:
@@ -86,6 +94,24 @@ jobs:
 
       - name: Install deps
         run: npm ci
+
+      - name: "Guard: restrict to known fleet-bot Railway targets"
+        # Fail-closed allow-list on the (project_id, service_name) pair (codex review,
+        # pass 2) — runs BEFORE the secret-bearing step so a non-allow-listed dispatch
+        # never reaches FLEET_APP_PRIVATE_KEY at all. Extend ALLOWED in the same PR that
+        # onboards a new consumer of this ladder (Rule #235); never replace it with a
+        # wildcard.
+        env:
+          PROJECT_ID: ${{ inputs.project_id }}
+          SERVICE_NAME: ${{ inputs.service_name }}
+        run: |
+          ALLOWED="186573d8-0b87-4013-a464-dcda9b1eed0f:bolt-wms"
+          CANDIDATE="${PROJECT_ID}:${SERVICE_NAME}"
+          if [ "$CANDIDATE" != "$ALLOWED" ]; then
+            echo "::error::project_id:service_name '$CANDIDATE' is not on the fleet-bot-provisioning allow-list ('$ALLOWED'). Add it to this guard step's ALLOWED value in the same PR that onboards the new consumer."
+            exit 1
+          fi
+          echo "target allow-listed: $CANDIDATE"
 
       - name: "Provision Railway vars (dry-run unless apply=true)"
         # Inputs travel through `env:` and are read back as `"$SHELL_VARS"`, never interpolated
