@@ -1041,6 +1041,37 @@ describe("parseBacklogSection — wrapped continuation lines (fold 9, ops-pipeli
     expect(items[0].line).toBe(4);
   });
 
+  it("an indented tier header directly after an item (no blank line) is recognized as a header, not swallowed as continuation text — currentTier still updates for the NEXT item (codex review, PR #156, P2)", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. first item under no header yet — owner CTO · 2026-08-20", // 4
+      "   **P2**", // 5
+      "2. second item, no inline tier — owner CTO · 2026-08-21", // 6
+    );
+    const items = parseBacklogSection(md).items;
+    expect(items).toHaveLength(2);
+    expect(items[0].tier).toBeNull(); // no header before it, and "**P2**" was NOT swallowed into its text
+    expect(items[1].tier).toBe("P2"); // currentTier correctly updated by the outer loop's own header handling
+  });
+
+  it("an indented UPPERCASE <DETAILS> block terminates the item the same as lowercase — case-insensitive to match the outer loop's own <details> handling (codex review, PR #156, P3)", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. P1 — first item text", // 4
+      "   <DETAILS>", // 5
+      "   owner Kevin · 2026-08-21", // 6
+      "   </DETAILS>", // 7
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(1);
+    expect(section.items[0].hasOwner).toBe(false);
+    expect(section.items[0].hasClock).toBe(false);
+  });
+
   it("table-row items are unchanged by the continuation-line join (regression guard — re-asserts the existing mixed table+bulleted test verbatim)", () => {
     const md = lines(
       "## Backlog (ranked)",

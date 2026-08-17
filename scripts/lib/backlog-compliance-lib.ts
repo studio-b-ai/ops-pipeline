@@ -547,6 +547,24 @@ function isContinuationIndented(rawLine: string): boolean {
  * falls) — ends the scan WITHOUT consuming that line: the outer loop's own next iteration picks
  * it up and applies its normal heading/table/details/prose handling, unchanged.
  *
+ * Also stops (without consuming) on an indented line that is itself tier-header-shaped
+ * (`isTierHeaderLine` — e.g. `   **P2**`/`   P2 — roadmap`, directly after an item with no
+ * blank line between them): the pre-fold outer loop recognized these regardless of indentation
+ * (it tests `isTierHeaderLine` against the TRIMMED line), so swallowing one as continuation text
+ * would both mis-tag the current item (an unrelated `P2` token entering its joined text) and
+ * silently skip the `currentTier` update every later item in that block relies on — a tier
+ * mis-assignment that can HIDE a real missing-tier finding on a later item, not just produce a
+ * false one (codex review, ops-pipeline#155 PR #156, P2). `isTierHeaderLine` already excludes
+ * anything item-shaped first (`ITEM_START_RE` wins), so an indented sub-bullet that happens to
+ * start `P1`/`P2`/… (e.g. `   - P1 escalate`) still correctly counts as continuation, never a
+ * header.
+ *
+ * The `<details` check is case-insensitive to match the outer loop's own (pre-existing)
+ * case-insensitive `<details>`/`</details>` recognition (codex review, same PR, P3) — a
+ * lowercase-only check here could consume an indented `<DETAILS>`/`<Details>` opener as plain
+ * continuation text while the outer loop's *next* line would still expect (and never find) an
+ * opener to enter its skip-state, leaking hidden owner/clock text into the item.
+ *
  * Returns the trimmed continuation texts (for the caller's single-space join) and the index of
  * the LAST line consumed (`itemLineIdx` itself when nothing was consumed) — the caller advances
  * the outer loop's `i` to that index so these lines are never re-scanned as their own
@@ -570,7 +588,8 @@ function collectContinuationLines(
     const trimmed = raw.trim();
     if (trimmed.length === 0) break; // blank line ends the item
     if (!isContinuationIndented(raw)) break; // non-indented line ends the item (next item marker or prose)
-    if (trimmed.startsWith("#") || trimmed.startsWith("|") || trimmed.startsWith("<details") || trimmed.startsWith("<!--")) break;
+    if (trimmed.startsWith("#") || trimmed.startsWith("|") || /^<details/i.test(trimmed) || trimmed.startsWith("<!--")) break;
+    if (isTierHeaderLine(trimmed)) break; // an indented tier header is still a header, never continuation text
     texts.push(trimmed);
     lastIdx = j;
   }
