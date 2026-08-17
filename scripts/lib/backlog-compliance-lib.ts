@@ -69,6 +69,8 @@
  * Postgres; "failed"/"pending" read naturally as plain English regardless.
  */
 
+import { createHash } from "node:crypto";
+
 // ───────────────────────────── constants ─────────────────────────────
 
 /** GitHub label name this leg's own issues (rollup + per-lane) carry. */
@@ -576,7 +578,8 @@ const REMEDY_LINE =
 export const ROLLUP_MARKER = "<!-- backlog-compliance:rollup -->";
 
 export function laneMarker(name: string): string {
-  return `<!-- backlog-compliance:lane=${slugify(name)} -->`;
+  const hash = createHash("sha1").update(name.normalize("NFC")).digest("hex").slice(0, 8);
+  return `<!-- backlog-compliance:lane=${slugify(name)}-${hash} -->`;
 }
 
 /**

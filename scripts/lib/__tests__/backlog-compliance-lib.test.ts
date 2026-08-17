@@ -791,6 +791,14 @@ describe("renderRollupBody / renderLaneBody / laneMarker", () => {
     expect(body).toContain("compliant");
     expect(body).not.toContain("| Check | Status | Detail |");
   });
+
+  it("laneMarker: names that slugify identically produce DIFFERENT markers (hash suffix), and the same name is stable across calls", () => {
+    const a = laneMarker("Zoom Workspace");
+    const b = laneMarker("Zoom-Workspace");
+    expect(a).not.toBe(b);
+    expect(laneMarker("Zoom Workspace")).toBe(a);
+    expect(laneMarker("Zoom-Workspace")).toBe(b);
+  });
 });
 
 describe("summaryLine", () => {
