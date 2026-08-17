@@ -498,9 +498,16 @@ function parseTableRowItem(cells: string[], cols: TableColumns, lineNo: number):
   const tierMatch = TIER_RE.exec(tierCell);
   const tier = tierMatch ? (`P${tierMatch[1]}` as Tier) : null;
 
+  // A dash-only cell (—/-, same placeholder UNSTAMPED_RE already treats as an absent tier two
+  // lines above) means "unassigned"/"unclocked", NOT "present" — codex review (ops-pipeline#151
+  // follow-up, issue #153): a literal "—" has length > 0, so a bare-length check would wrongly
+  // read it as compliant. Falls through to the whole-row scan exactly like an empty cell would.
+  const ownerCellIsEmptyish = ownerCell === "" || UNSTAMPED_RE.test(ownerCell);
+  const clockCellIsEmptyish = clockCell === "" || UNSTAMPED_RE.test(clockCell);
+
   const wholeRow = cells.join(" ");
-  const hasOwner = ownerCell.length > 0 || OWNER_RE.test(wholeRow);
-  const hasClock = clockCell.length > 0 || UNCLOCKED_RE.test(wholeRow) || CLOCK_DATE_RE.test(wholeRow);
+  const hasOwner = !ownerCellIsEmptyish || OWNER_RE.test(wholeRow);
+  const hasClock = !clockCellIsEmptyish || UNCLOCKED_RE.test(wholeRow) || CLOCK_DATE_RE.test(wholeRow);
 
   return { line: lineNo, text: itemCell || wholeRow, tier, hasOwner, hasClock };
 }

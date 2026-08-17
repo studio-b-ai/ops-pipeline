@@ -677,17 +677,22 @@ describe("parseBacklogSection — table-row items (issue #153 item 1)", () => {
     const section = parseBacklogSection(md);
     expect(section.stamp).toEqual({ lane: "2026-08-17T06:20:38Z", manager: { seat: "CFO", at: "2026-08-17T05:50Z" }, cos: null, kevin: null });
     expect(section.items).toHaveLength(10);
-    expect(section.items.every((i) => i.hasOwner && i.hasClock)).toBe(true);
+    // item 9 (line 17, "7 — follow-ups …") has a literal "—" date cell, not a real date/"unclocked
+    // (why)" — codex review (ops-pipeline#151 follow-up, issue #153): a dash placeholder is
+    // "unassigned", not "present" (same UNSTAMPED_RE semantics the tier cell already had). Every
+    // OTHER row keeps both.
+    expect(section.items.every((i, idx) => i.hasOwner && (i.hasClock || idx === 9))).toBe(true);
+    expect(section.items[9].hasClock).toBe(false);
     expect(section.items[0].tier).toBe("P1"); // from "**P1 · now**"
     expect(section.items[0].text).toContain("bolt PR #1829");
     expect(section.items[8].tier).toBe("P1"); // from "P1 (clocked)"
     expect(section.items[8].text).toContain("trade level-up");
 
-    // end-to-end: fully shaped table -> zero shape/presence/freshness FAILURES (only the
-    // not-yet-enforced F3 "cos" pending finding survives) — "S1 only where cells are genuinely
-    // empty" (issue #153), and here none are.
+    // end-to-end: fully shaped table -> zero shape/presence/freshness FAILURES except the one
+    // genuine dash-date row above (only the not-yet-enforced F3 "cos" pending finding otherwise
+    // survives) — "S1 only where cells are genuinely empty [or dash-placeholder]" (issue #153).
     const findings = evaluate(row("TestSeat"), { exists: true, text: md }, config(), NOW_EARLY);
-    expect(findings.filter((f) => f.status === "failed")).toEqual([]);
+    expect(findings.filter((f) => f.status === "failed")).toEqual([{ check: "S1", text: "1 item(s) missing: clock[17]", status: "failed" }]);
   });
 
   it("CFO (verbatim, coldstarts/2026-08-05-cfo-seat.md lines 145-157): leading '#' row-number column; the merged/struck '0d' row (tier '—' + item cell starting '(') is SKIPPED, not a finding", () => {
@@ -769,6 +774,39 @@ describe("parseBacklogSection — table-row items (issue #153 item 1)", () => {
     expect(section.items.every((i) => !i.hasOwner)).toBe(true);
     const findings = evaluate(row("TestSeat"), { exists: true, text: md }, config(), NOW_EARLY);
     expect(findings.filter((f) => f.check === "S1")).toEqual([{ check: "S1", text: "2 item(s) missing: owner[6,7]", status: "failed" }]);
+  });
+
+  it("a table WITH an owner/date column whose per-row cells hold dash placeholders ('—'/'-', not blank) ALSO flags EACH row under S1 — dash means unassigned, not present (codex review, ops-pipeline#151 follow-up)", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T07:20Z · manager — · cos — · kevin —", // 2
+      "", // 3
+      "| P | item | owner | date |", // 4
+      "|---|---|---|---|", // 5
+      "| P1 | thing one, dash placeholders both cells | — | — |", // 6
+      "| P1 | thing two, single-hyphen placeholders | - | - |", // 7
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(2);
+    expect(section.items.every((i) => !i.hasOwner && !i.hasClock)).toBe(true);
+    const findings = evaluate(row("TestSeat"), { exists: true, text: md }, config(), NOW_EARLY);
+    expect(findings.filter((f) => f.check === "S1")).toEqual([
+      { check: "S1", text: "2 item(s) missing: owner[6,7] clock[6,7]", status: "failed" },
+    ]);
+  });
+
+  it("a table row's dash-only owner cell still resolves true via the whole-row fallback when a real 'owner X' token sits elsewhere in the row", () => {
+    const md = lines(
+      "## Backlog (ranked)",
+      "ranked-by: lane 2026-08-17T07:20Z · manager — · cos — · kevin —",
+      "",
+      "| P | item | owner | date |",
+      "|---|---|---|---|",
+      "| P1 | something real (owner CFO, chasing Tue) | — | 8/19 |",
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(1);
+    expect(section.items[0].hasOwner).toBe(true); // dash cell, but "owner CFO" fallback-matches over the whole row
   });
 
   it("a merged/struck row's fallback ISN'T triggered just by an empty tier cell alone — only tier-empty AND item-starts-with-'(' together skip it", () => {
