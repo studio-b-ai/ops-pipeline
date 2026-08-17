@@ -449,12 +449,30 @@ export function parseBacklogSection(md: string): ParsedSection {
   let stampIdx = -1;
   let stamp: Stamp | null = null;
   let nonBlankSeen = 0;
+  // fold 7b, ops-pipeline#151 (live-vault bug: Ästhetik Films' real stamp sat 11 lines below its
+  // heading, behind a 10-line `<!-- … -->` note — the note alone burned the whole budget before
+  // the scanner ever reached the stamp). A line inside/comprising an HTML comment (including
+  // the line that opens it and the line that closes it, and a line that opens+closes on itself)
+  // never counts toward the budget; counting resumes on the line after the closing `-->`. Do NOT
+  // raise STAMP_LOOKAHEAD_LINES — real prose between a heading and its stamp still budgets at 6.
+  let insideComment = false;
   for (let i = headingIdx + 1; i < endIdx && nonBlankSeen < STAMP_LOOKAHEAD_LINES; i++) {
-    if (lines[i].trim().length === 0) continue;
+    const line = lines[i];
+    if (line.trim().length === 0) continue;
+
+    if (insideComment) {
+      if (line.includes("-->")) insideComment = false;
+      continue;
+    }
+    if (line.includes("<!--")) {
+      if (!line.includes("-->")) insideComment = true; // else: opens+closes on itself — still skipped, state unchanged
+      continue;
+    }
+
     nonBlankSeen++;
-    if (looksLikeRankedByLine(lines[i])) {
+    if (looksLikeRankedByLine(line)) {
       stampIdx = i;
-      stamp = parseStampLine(lines[i]); // may still come back null (malformed) — that's a P3 finding, not "no stamp line found"
+      stamp = parseStampLine(line); // may still come back null (malformed) — that's a P3 finding, not "no stamp line found"
       break;
     }
   }
