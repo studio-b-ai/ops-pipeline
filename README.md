@@ -153,6 +153,69 @@ without a fleet App token — `gh`'s own ambient auth is enough for a single-rep
 name absent from `backlog-managers.yaml` throws. A NON-dry-run scoped run additionally skips
 mutating any manager whose scope is only partial — see the guard above.
 
+### `backlog-compliance` (ops-pipeline#151)
+
+Daily instrument for LANES rule 17(g): every session's git-tracked backlog must be first
+ranked by the lane, then the manager, then the CoS, then Kevin. Reads
+`studio-b-ai/brain`'s `LANES.md` row-by-row and, for each active row not listed in
+`backlog-managers.yaml`'s `compliance.skip:`, checks its resolved brief
+(`coldstarts/…md` or `library/backlogs/<slug>.md`) for a `## Backlog (ranked)` section, a
+`ranked-by:` stamp, and shaped items. Full grammar + the checks table:
+`library/product/2026-08-17-backlog-compliance-leg-design.md` (brain repo) — this worker
+implements that doc, it does not restate it.
+
+**What it measures**, per active non-skip row:
+- `P1` — the resolved brief doesn't exist
+- `P2` — the brief exists but has no `## Backlog (ranked)` section
+- `P3` — the section exists but its `ranked-by:` stamp is missing/unparseable
+- `F1` — the lane's own stamp is older than `lane_stamp_max_age_days` (default 7)
+- `F2` — the row's rule-15 manager (if any) hasn't stamped, stamped as the wrong seat, or is
+  lagging the lane stamp by more than `manager_lag_max_hours` (default 48) — SEAT rows have
+  no rule-15 manager and are exempt from F2 entirely (a seat is its own manager)
+- `F3` — the CoS stamp is missing or older than `cos_stamp_max_age_days` (default 7)
+- `S1` — one or more items are missing a tier, an `owner`, or a clock (a date/weekday/`wk
+  N`/`by …`/`≥…`/AM-PM token, or the literal `unclocked`) — a bare tracker-handle item (e.g.
+  `1. ops#129`) fails both owner and clock, with no separate "prose" bucket
+
+F2/F3 report `pending` (not a failure) before `manager_stamp_enforced_from` /
+`cos_stamp_enforced_from` respectively — a ramp-up grace window, not a free pass forever.
+Findings from a row's own git-tracked brief never reach GitHub issues on any OTHER repo; the
+only issues this worker mutates are its own rollup or per-lane issues, both on
+`studio-b-ai/brain`, labeled `backlog-compliance`.
+
+**Rollup vs per-lane**: before `compliance.per_lane_issues_from`, every active non-skip row
+lands as one row in a single standing rollup issue (body rewritten every run, no comment
+spam — it's a refreshed checklist, not a sequence of alert events). At/after that date the
+rollup closes for good and each non-compliant row gets (or keeps) its own issue instead,
+gated on FAILED findings only — a lane with only `pending` findings stays clean.
+
+**How a lane clears a finding:** fix the brief per the grammar (add the missing section/
+stamp/item field) and let the next run re-evaluate — this worker never edits a brief itself,
+it only reads.
+
+**Plant recipe** (Rules #464/#471 — verify both verdicts before trusting a "clean" run):
+
+```bash
+cd scripts
+# known-bad: force every stamp in the fleet to read as expired
+npx tsx backlog-compliance-worker.ts --dry-run --now 2026-12-01T00:00:00Z
+# known-good: the real clock — reflects today's actual compliance state
+npx tsx backlog-compliance-worker.ts --dry-run
+# single-lane negative control against the real vault checkout (no gh Contents-API round
+# trip; --brain-dir never writes, LANES.md + briefs are read straight off disk)
+npx tsx backlog-compliance-worker.ts --dry-run --brain-dir ~/Documents/brain --lanes CTO
+```
+
+`--lanes <csv>` scopes a run to a subset of `LANES.md`'s row names; any name that doesn't
+match a real row throws. In rollup mode a partial `--lanes` scope skips the rollup mutation
+outright (a partial checklist must never overwrite the complete one) — the cutover close and
+per-lane mutations are unaffected, since each lane's own issue is independent. `--brain-dir
+<path>` switches from the default GitHub Contents API mode (reads the pushed HEAD of
+`compliance.brain_repo`) to reading a local checkout instead — used for the ship-gate
+dry-run against the real vault; issue mutations still always go through `gh`, in both modes.
+A `compliance.briefs:` key that matches no `LANES.md` row prints a `warn:` line every run,
+never silently.
+
 ## Why this exists
 
 Operations repos are canonical, but the surfaces ops people use day-to-day (Slack canvases, HubSpot UI) drift the moment the repo changes without manual mirror updates. This pipeline makes drift impossible (sync-on-push) and auditable (weekly drift-check) — without sacrificing the GitOps workflow that makes the repo trustworthy in the first place.
