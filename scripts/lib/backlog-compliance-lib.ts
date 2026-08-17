@@ -406,6 +406,98 @@ const EMPTY_MARKER_TEXT = "(empty — nothing ranked)";
 /** How many non-blank lines below the heading the stamp search looks through before giving up (CoS refinement 2026-08-17). */
 const STAMP_LOOKAHEAD_LINES = 6;
 
+// ───────────────────────────── table-row items (issue #153 item 1) ─────────────────────────────
+//
+// Three real lanes (Pricing, CFO, HubSpot Platform) wrote their ranked backlog as a markdown
+// TABLE with the four contract fields as COLUMNS instead of numbered/bulleted lines — the
+// existing item scanner below (bullets/numbered only) read every one of them as "0 item(s) —
+// no items and no marker", a false S1. This block recognizes an item-table header (by CELL
+// NAMES, not fixed column positions — the three real shapes disagree on whether a leading `#`
+// row-number column exists) and turns each following data row into a `ParsedItem`, using the
+// SAME tier/owner/clock primitives (`TIER_RE`/`OWNER_RE`/`UNCLOCKED_RE`/`CLOCK_DATE_RE`) the
+// bulleted-item path already uses — never a forked notion of what a valid tier/owner/clock is.
+
+/** Column indexes resolved from a detected item-table header row (0-based, into the array
+ * `splitRowCells` returns for that table's rows). `itemIdx`/`clockIdx` may be absent (null) —
+ * `parseTableRowItem` falls back to scanning the whole row when either is. */
+interface TableColumns {
+  tierIdx: number;
+  itemIdx: number | null;
+  ownerIdx: number;
+  clockIdx: number | null;
+}
+
+/** Splits a markdown table row into trimmed cell strings — drops the leading empty segment
+ * from the row's opening `|` and, when present, the trailing empty segment from a closing `|`
+ * (a row with no trailing pipe just keeps its last real cell as-is). Returns `[]` for a line
+ * that doesn't start with `|` after trimming — never treated as a table row at all. Does not
+ * handle `\|`-escaped pipes — not a shape any real brief needs this parser to survive yet. */
+function splitRowCells(line: string): string[] {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("|")) return [];
+  const parts = trimmed.split("|").slice(1);
+  if (parts.length > 0 && parts[parts.length - 1].trim() === "") parts.pop();
+  return parts.map((c) => c.trim());
+}
+
+/** A markdown table separator row — every cell only `-`/`:` characters (`---`, `:---`, `:-:`, …). */
+function isSeparatorRow(cells: string[]): boolean {
+  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+}
+
+/**
+ * Recognizes an item-table header row per the design doc's tolerant-parse grammar (issue #153
+ * item 1): cells (decoration-stripped, lower-cased, trimmed) include one EXACT match for
+ * `p`/`tier`/`priority` (the tier column) AND one EXACT match for `owner` (the owner column) —
+ * both required, or this isn't a header this parser understands at all (`null`, never a
+ * partial guess — a `|`-line that fails this check is left for the caller to treat as plain,
+ * unflagged prose, same as any other non-item line). The item column (loosely, any header cell
+ * whose text CONTAINS "item" — covers "item", "Item", "item (see Queue for detail)") and the
+ * clock column (`date`/`clock`/`when`, exact) are both optional — `parseTableRowItem` falls
+ * back to whole-row scans when either is absent.
+ */
+function detectTableHeader(cells: string[]): TableColumns | null {
+  const lower = cells.map((c) => c.replace(/\*\*/g, "").replace(/`/g, "").trim().toLowerCase());
+  const tierIdx = lower.findIndex((c) => c === "p" || c === "tier" || c === "priority");
+  const ownerIdx = lower.findIndex((c) => c === "owner");
+  if (tierIdx === -1 || ownerIdx === -1) return null;
+  const itemIdx = lower.findIndex((c) => c.includes("item"));
+  const clockIdx = lower.findIndex((c) => c === "date" || c === "clock" || c === "when");
+  return { tierIdx, itemIdx: itemIdx === -1 ? null : itemIdx, ownerIdx, clockIdx: clockIdx === -1 ? null : clockIdx };
+}
+
+/**
+ * Turns one data row's cells into a `ParsedItem` under an already-detected table header, or
+ * `null` for a merged/struck row the grammar skips outright (design doc: "a row whose tier
+ * cell is `—`/`-`/empty AND item cell starts with `(` … is skipped" — the real CFO shape `| 0d
+ * | — | (merged into 0c: …) | | | |`). tier comes from the tier cell via the SAME `TIER_RE`
+ * bullet/numbered items use (`\bP([0-3])\b` already tolerates `**P1 · now**` / `P1 (clocked)`
+ * decoration for free — the word-boundary either side of "P1" holds regardless of what
+ * surrounds it, so no extra stripping is needed here). owner/clock each prefer their OWN
+ * column when non-empty, else fall back to the existing token/date-like detection scanned over
+ * the whole row (design doc: "else an `owner <name>` token" / "else the existing date-like/
+ * `unclocked (…)` detection over the whole row") — this is how a row with a genuinely blank
+ * owner/clock cell still gets a real true/false verdict instead of a fixed guess.
+ */
+function parseTableRowItem(cells: string[], cols: TableColumns, lineNo: number): ParsedItem | null {
+  const tierCell = cells[cols.tierIdx] ?? "";
+  const itemCell = cols.itemIdx !== null ? (cells[cols.itemIdx] ?? "") : "";
+  const ownerCell = cells[cols.ownerIdx] ?? "";
+  const clockCell = cols.clockIdx !== null ? (cells[cols.clockIdx] ?? "") : "";
+
+  const tierIsEmptyish = tierCell === "" || UNSTAMPED_RE.test(tierCell);
+  if (tierIsEmptyish && itemCell.startsWith("(")) return null; // merged/struck row — skipped, not a finding
+
+  const tierMatch = TIER_RE.exec(tierCell);
+  const tier = tierMatch ? (`P${tierMatch[1]}` as Tier) : null;
+
+  const wholeRow = cells.join(" ");
+  const hasOwner = ownerCell.length > 0 || OWNER_RE.test(wholeRow);
+  const hasClock = clockCell.length > 0 || UNCLOCKED_RE.test(wholeRow) || CLOCK_DATE_RE.test(wholeRow);
+
+  return { line: lineNo, text: itemCell || wholeRow, tier, hasOwner, hasClock };
+}
+
 function isTierHeaderLine(trimmedLine: string): boolean {
   if (ITEM_START_RE.test(trimmedLine)) return false; // items win over header detection (inline-tier items look like this too)
   return /^\*\*P[0-3]\b/.test(trimmedLine) || /^P[0-3]\b/.test(trimmedLine);
@@ -466,7 +558,9 @@ function findBacklogHeadingIndex(lines: string[]): number {
  * under a `##` backlog heading, stays IN the section) — skipping `<details>…</details>` blocks
  * and struck-through (`~~…~~`) items per the grammar. Lines before/around a stamp that isn't
  * literally the first line are still scanned for headers/items (only the stamp line itself is
- * excluded from the body).
+ * excluded from the body). Items are numbered/bulleted lines OR rows of a detected item TABLE
+ * (issue #153 item 1, `detectTableHeader`/`parseTableRowItem`) — a section may mix both, e.g. a
+ * table followed later by a plain bulleted addendum.
  */
 export function parseBacklogSection(md: string): ParsedSection {
   const lines = md.split("\n");
@@ -521,6 +615,7 @@ export function parseBacklogSection(md: string): ParsedSection {
   let currentTier: Tier | null = null;
   let inDetails = false;
   let emptyMarker = false;
+  let tableCols: TableColumns | null = null; // non-null while scanning rows of an already-detected item table
   for (let i = headingIdx + 1; i < endIdx; i++) {
     if (i === stampIdx) continue; // the stamp line itself is never body content, wherever it fell
 
@@ -537,7 +632,26 @@ export function parseBacklogSection(md: string): ParsedSection {
     }
 
     const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
+    if (trimmed.length === 0) {
+      tableCols = null; // grammar: a table block ends at a blank line
+      continue;
+    }
+
+    if (trimmed.startsWith("|")) {
+      const cells = splitRowCells(line);
+      if (tableCols === null) {
+        const headerCols = detectTableHeader(cells);
+        if (headerCols !== null && i + 1 < endIdx && isSeparatorRow(splitRowCells(lines[i + 1]))) {
+          tableCols = headerCols;
+          i++; // also consume the |---| separator row on this pass (loop's own i++ lands on the first data row)
+        }
+        continue; // the header row itself, or an unrecognized "|" line, is never an item
+      }
+      const item = parseTableRowItem(cells, tableCols, i + 1);
+      if (item) items.push(item);
+      continue;
+    }
+    tableCols = null; // a non-"|" content line also ends the current table block (bullets/numbered items keep working after it)
 
     if (isTierHeaderLine(trimmed)) {
       const m = TIER_RE.exec(trimmed);
