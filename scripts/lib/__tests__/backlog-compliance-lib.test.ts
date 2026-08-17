@@ -286,6 +286,22 @@ describe("parseStampLine", () => {
     const s = parseStampLine("ranked-by: lane 2026-08-17 · manager — · cos — · kevin — · extra something-else");
     expect(s!.lane).toBe("2026-08-17");
   });
+
+  it("tolerates a trailing parenthetical annotation after the lane ISO — real Ästhetik Films line (fold 6a, ops-pipeline#151)", () => {
+    const s = parseStampLine("ranked-by: lane 2026-08-17T06:25Z (last lane re-rank) · manager CD 2026-08-17T06:25Z · cos — · kevin —");
+    expect(s).toEqual({ lane: "2026-08-17T06:25Z", manager: { seat: "CD", at: "2026-08-17T06:25Z" }, cos: null, kevin: null });
+  });
+
+  it("tolerates a NESTED parenthetical annotation after the lane ISO — real Deep River line (fold 6a, ops-pipeline#151)", () => {
+    const s = parseStampLine(
+      "ranked-by: lane 2026-08-17T06:42Z (17(g) ack restamp; last rank CHANGE 2026-08-16T20:35Z = item 20 added; ranks unchanged since) · manager CD 2026-08-17T06:25Z · cos — · kevin —",
+    );
+    expect(s).toEqual({ lane: "2026-08-17T06:42Z", manager: { seat: "CD", at: "2026-08-17T06:25Z" }, cos: null, kevin: null });
+  });
+
+  it("an UNBALANCED trailing paren (no closing ')') is left unchanged, so isIso correctly rejects it — garbage is never silently accepted (fold 6a)", () => {
+    expect(parseStampLine("ranked-by: lane 2026-08-17T06:25Z (oops")).toBeNull();
+  });
 });
 
 // ───────────────────────────── parseBacklogSection ─────────────────────────────
@@ -620,6 +636,37 @@ describe("evaluate — one fixture per finding class (known-bad, Rule #322/#471 
     );
     const findings = evaluate(row("Pricing"), { exists: true, text: brief }, config(), NOW_LATE);
     expect(findings).toEqual([{ check: "F2", text: "manager stamp names COO, row names CMO", status: "failed" }]);
+  });
+
+  const creativeDirectorRow: LaneRow = {
+    name: "Deep River",
+    class: "PROJECT",
+    active: true,
+    manager: "Creative Director",
+    briefPath: null,
+    raw: "| **Deep River** (lane manager (rule 15): **Creative Director** — report UP to them, not the CoS) (PROJECT) | a | b | c |",
+  };
+
+  it('F2 — manager stamped the ABBREVIATION "CD" against a row naming "Creative Director" is NOT a mismatch (fold 6b, ops-pipeline#151, Rule #425)', () => {
+    const brief = lines(
+      "## Backlog (ranked)",
+      "ranked-by: lane 2026-08-24T12:00Z · manager CD 2026-08-24T06:00Z · cos 2026-08-24T00:00Z · kevin —",
+      "**P1**",
+      "1. thing — owner CMO · by 2026-08-26",
+    );
+    const findings = evaluate(creativeDirectorRow, { exists: true, text: brief }, config(), NOW_LATE);
+    expect(findings.filter((f) => f.check === "F2")).toEqual([]);
+  });
+
+  it('F2 — manager stamped "CFO" against a row naming "Creative Director" IS a real mismatch, alias or not (fold 6b)', () => {
+    const brief = lines(
+      "## Backlog (ranked)",
+      "ranked-by: lane 2026-08-24T12:00Z · manager CFO 2026-08-24T06:00Z · cos 2026-08-24T00:00Z · kevin —",
+      "**P1**",
+      "1. thing — owner CMO · by 2026-08-26",
+    );
+    const findings = evaluate(creativeDirectorRow, { exists: true, text: brief }, config(), NOW_LATE);
+    expect(findings).toEqual([{ check: "F2", text: "manager stamp names CFO, row names Creative Director", status: "failed" }]);
   });
 
   it("F2 pending — before manager_stamp_enforced_from, the same violation reports 'pending' not 'failed'", () => {
