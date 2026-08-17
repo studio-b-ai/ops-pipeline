@@ -244,6 +244,39 @@ function looksLikeRankedByLine(rawLine: string): boolean {
 }
 
 /**
+ * Strips ONE trailing balanced parenthetical annotation off a stamp field value — live briefs
+ * append human-readable commentary straight after the ISO token, before the next `·` (e.g. Deep
+ * River: `2026-08-17T06:42Z (17(g) ack restamp; last rank CHANGE 2026-08-16T20:35Z = item 20
+ * added; ranks unchanged since)`) — fold 6a, ops-pipeline#151 (Rule #425: the pre-fold parser
+ * strictness read this as unparseable, a false positive, not a real brief defect).
+ *
+ * Walks backwards from the end tracking paren depth so NESTED parens resolve correctly (the
+ * Deep River example above has an inner `(g)` — depth must reach 0 at the OUTER `(`, not the
+ * inner one). The matched `(` must sit at index 0 or be preceded by whitespace — a trailing
+ * `(...)` glued onto a word with no separating space (`seat(note)`) is not a standalone
+ * annotation and is left alone. Unbalanced (`(oops` with no `)`, or an extra stray `)`) or no
+ * match at all → returns `v` unchanged; the caller's own validation (`isIso`, etc.) then
+ * correctly rejects the still-garbage value rather than this helper silently inventing a cut
+ * point.
+ */
+function stripTrailingParenthetical(v: string): string {
+  if (!v.endsWith(")")) return v;
+  let depth = 0;
+  for (let i = v.length - 1; i >= 0; i--) {
+    const ch = v[i];
+    if (ch === ")") depth++;
+    else if (ch === "(") {
+      depth--;
+      if (depth === 0) {
+        const precededByBoundary = i === 0 || /\s/.test(v[i - 1] ?? "");
+        return precededByBoundary ? v.slice(0, i).trimEnd() : v;
+      }
+    }
+  }
+  return v; // unbalanced — no matching "(" found for the trailing ")"
+}
+
+/**
  * Parses one `ranked-by: lane <ISO> · manager <seat> <ISO>|<seat> —|— · cos <ISO>|— · kevin
  * <ISO>|—` line (tolerant of `**`/backtick/blockquote/bullet wrapping, and of `·`/`|`/`,` as
  * the field separator). Returns null when the (stripped) line doesn't start `ranked-by:`, or
@@ -260,7 +293,7 @@ export function parseStampLine(rawLine: string): Stamp | null {
     const sp = segment.indexOf(" ");
     if (sp === -1) continue; // a bare key with no value — defensively ignored, not fatal
     const key = segment.slice(0, sp).trim().toLowerCase();
-    const value = segment.slice(sp + 1).trim();
+    const value = stripTrailingParenthetical(segment.slice(sp + 1).trim());
     fields[key] = value;
   }
 
