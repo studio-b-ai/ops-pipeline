@@ -583,6 +583,28 @@ export function laneMarker(name: string): string {
 }
 
 /**
+ * Validates + decodes a GitHub Contents-API response (`{type,encoding,size,content}`, fetched
+ * via `--jq '{type,encoding,size,content}'`) into the file's text. Pure — no I/O; the network
+ * round trip lives in the worker's `apiContentsRaw`. Rule #465: the API's own declared shape is
+ * part of the receipt — a directory listing, submodule ref, or symlink response all 200 with a
+ * DIFFERENT `type`, and an oversized file arrives with `content` omitted entirely — silently
+ * decoding whatever `.content` happens to hold (the pre-fold-5 shape) would base64-decode
+ * garbage or crash opaquely instead of naming the mismatch. The thrown message deliberately
+ * avoids the substrings "HTTP 404"/"Not Found" so `isNotFoundError` can never misclassify a
+ * shape mismatch as an absent file — a real 404 never reaches this function; `gh` throws at the
+ * API-call layer before any JSON exists to validate.
+ */
+export function decodeContentsResponse(json: string, path: string): string {
+  const parsed = JSON.parse(json) as { type?: unknown; encoding?: unknown; size?: unknown; content?: unknown };
+  if (parsed.type !== "file" || parsed.encoding !== "base64" || typeof parsed.content !== "string") {
+    throw new Error(
+      `contents API returned type=${String(parsed.type)} encoding=${String(parsed.encoding)} size=${String(parsed.size)} for ${path} — refusing to interpret as text (Rule #465)`,
+    );
+  }
+  return Buffer.from(parsed.content, "base64").toString("utf-8");
+}
+
+/**
  * ONE fleet rollup issue body (used before `per_lane_issues_from`) — a full checklist of every
  * ACTIVE lane, not just the non-compliant ones (design doc §2: "so the CoS census has a
  * checklist"), so a clean lane's compliance is visible too, not just silence.
