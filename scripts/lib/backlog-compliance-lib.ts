@@ -173,9 +173,16 @@ export function parseLanesRows(md: string): LaneRow[] {
   return rows;
 }
 
-/** slug = lowercase name, non-alnum runs -> "-", trimmed of leading/trailing "-". */
+/** slug = NFD-normalize + strip combining marks (issue #153 item 3: "Ästhetik Target Universe"
+ * -> "asthetik-target-universe", NOT "sthetik-..." — matches the vault's own naming convention,
+ * e.g. `coldstarts/asthetik-films-reentry.md`) THEN lowercase, non-alnum runs -> "-", trimmed
+ * of leading/trailing "-". Both callers (`laneMarker`'s marker hash-suffix slug and
+ * `resolveBriefPath`'s rung-3 default-path slug) change shape for non-ASCII row names — fine
+ * ONLY because no per-lane issue exists yet (design doc §2 `per_lane_issues_from` =
+ * 2026-08-21); must ship before then. */
 function slugify(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  const transliterated = name.normalize("NFD").replace(/\p{M}/gu, ""); // strip combining marks (e.g. Ä -> A + ¨ -> A)
+  return transliterated.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
 function nfc(s: string): string {
