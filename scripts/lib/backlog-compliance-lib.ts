@@ -480,6 +480,32 @@ function hoursBetween(fromIso: string, toIso: string): number {
   return (new Date(toIso).getTime() - new Date(fromIso).getTime()) / (60 * 60 * 1000);
 }
 
+const SEAT_ALIASES: Record<string, string> = {
+  cd: "Creative Director",
+  "creative director": "Creative Director",
+  cos: "Chief of Staff",
+  "chief of staff": "Chief of Staff",
+  gc: "General Counsel",
+  "general counsel": "General Counsel",
+  cto: "CTO",
+  cfo: "CFO",
+  cmo: "CMO",
+  coo: "COO",
+};
+
+/**
+ * Normalizes a rule-15 seat name for the F2 mismatch COMPARISON only — fold 6b, ops-pipeline#151
+ * (Rule #425: a manager stamp abbreviating "CD" against a row spelling out "Creative Director"
+ * is the SAME seat, not a mismatch; the pre-fold exact-string compare false-positived on every
+ * lane whose manager stamps the short form). Case-insensitive; anything outside the alias map
+ * passes through trimmed as-is, so an already-exact match still works with no alias needed. The
+ * finding TEXT always quotes the RAW (un-normalized) names — this function backs the compare,
+ * never the message.
+ */
+function canonicalSeat(name: string): string {
+  return SEAT_ALIASES[name.trim().toLowerCase()] ?? name.trim();
+}
+
 function buildShapeFindingText(missingTier: number[], missingOwner: number[], missingClock: number[]): string {
   const n = new Set([...missingTier, ...missingOwner, ...missingClock]).size;
   const parts: string[] = [];
@@ -534,7 +560,7 @@ export function evaluate(row: LaneRow, brief: { exists: boolean; text: string },
     if (row.manager) {
       const enforced = now >= config.manager_stamp_enforced_from;
       const mgr = section.stamp.manager;
-      if (mgr && mgr.seat !== row.manager) {
+      if (mgr && canonicalSeat(mgr.seat) !== canonicalSeat(row.manager)) {
         findings.push({
           check: "F2",
           text: `manager stamp names ${mgr.seat}, row names ${row.manager}`,
