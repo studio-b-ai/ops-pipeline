@@ -72,3 +72,34 @@ machinery_labels:
   - "*-failed-sync"
   - "so-import-rescue"
   - "awaiting-approval"
+
+# compliance: — ops-pipeline#151 (backlog COMPLIANCE leg, LANES rule 17(g), Kevin word
+# 2026-08-17 ~02:20 ET via CoS: "make sure you're enforcing all sessions to be keeping
+# gittracked backlogs which are first ranked and prioritized by the lane, then the manager,
+# then the cos then kevin"). Distinct instrument from `repos:`/`thresholds:`/
+# `machinery_labels:` above (which drive backlog-staleness-worker.ts over GitHub issues) —
+# this leg reads `studio-b-ai/brain` LANES.md rows + their briefs and checks PRESENCE /
+# FRESHNESS / SHAPE of the git-tracked ranked-backlog section itself. Consumed by
+# scripts/backlog-compliance-worker.ts (read-only — never written by the worker). Full
+# grammar + checks table: brain `library/product/2026-08-17-backlog-compliance-leg-design.md`.
+compliance:
+  brain_repo: "studio-b-ai/brain"
+  lanes_file: "LANES.md"
+  # Rollout dates (config diff, not a code change — design doc §2): before
+  # per_lane_issues_from, findings land on ONE fleet rollup issue; after it, one issue per
+  # non-compliant lane. Before manager_stamp_enforced_from / cos_stamp_enforced_from, F2/F3
+  # report as `pending` rather than failures (managers/CoS get one tick/census cycle first).
+  per_lane_issues_from: "2026-08-21T12:00:00Z"
+  manager_stamp_enforced_from: "2026-08-19T12:00:00Z"
+  cos_stamp_enforced_from: "2026-08-22T12:00:00Z"
+  lane_stamp_max_age_days: 7
+  manager_lag_max_hours: 48
+  cos_stamp_max_age_days: 7
+  # Row name -> brief path overrides, for rows whose backlog file the row text doesn't name
+  # directly (no `coldstarts/…md` mention). Seeded from the CoS census table when it lands;
+  # until then an unmatched row falls through to the `library/backlogs/<slug>.md` default and,
+  # if that file doesn't exist either, reports the P1 "no brief/backlog file" finding.
+  briefs: {}
+  # Row names (exact, as parsed from the row's bold first-cell name) that this leg never
+  # checks — independent of lifecycle class (ARCHIVED/TOMBSTONED are already always skipped).
+  skip: []
