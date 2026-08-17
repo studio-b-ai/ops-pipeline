@@ -216,6 +216,10 @@ dry-run against the real vault; issue mutations still always go through `gh`, in
 A `compliance.briefs:` key that matches no `LANES.md` row prints a `warn:` line every run,
 never silently.
 
+The 12:30Z **schedule** is gated on the `BACKLOG_COMPLIANCE_CI_ENABLED` repo variable (off by
+default until ops#104's `studiob-fleet-bot` `contents:read` grant on `studio-b-ai/brain` lands)
+— `workflow_dispatch` always runs regardless (issue #153 item 4).
+
 ## Why this exists
 
 Operations repos are canonical, but the surfaces ops people use day-to-day (Slack canvases, HubSpot UI) drift the moment the repo changes without manual mirror updates. This pipeline makes drift impossible (sync-on-push) and auditable (weekly drift-check) — without sacrificing the GitOps workflow that makes the repo trustworthy in the first place.
