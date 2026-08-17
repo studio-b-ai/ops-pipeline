@@ -69,6 +69,7 @@ import {
 import { reconcileSeverity, buildSeverityTitle, parseSeverityTitle } from "./lib/severity-issue-reconcile.js";
 import { listIssuesByLabel, ensureLabel, openIssue, closeIssue, commentIssue, retitleIssue, type IssueRef } from "./lib/github-issues.js";
 import { sweepUnmonitoredCredentialIssues } from "./lib/credential-reconcile.js";
+import { readCredentialValue } from "./lib/credential-value-source.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_FILE = join(HERE, "credentials.manifest.yaml");
@@ -76,6 +77,13 @@ const MANIFEST_FILE = join(HERE, "credentials.manifest.yaml");
 const REPO = "studio-b-ai/ops-pipeline";
 const LABEL = "credential-monitor";
 const LABEL_DESCRIPTION = "credential-expiry-monitor alert state (open = a credential needs attention)";
+/** Ladder rung labels (decision 2026-08-17) — kept next to the manifest field docs. */
+const RUNG_LABELS: Record<0 | 1 | 2 | 3, string> = {
+  0: "keyless",
+  1: "self-rotating",
+  2: "non-expiring + monitored + revoke-on-signal",
+  3: "one Kevin sitting per year",
+};
 
 type CredType =
   | "1password-sa"
@@ -95,6 +103,20 @@ interface ManifestItem {
   recorded_expiry?: string | null;
   owner?: string;
   keyless_alternative?: string | null;
+  /**
+   * Credential-lifecycle ladder target (brain library/decisions/2026-08-17-credential-lifecycle-no-kevin-touch.md):
+   * 0 keyless · 1 self-rotating · 2 non-expiring + monitored + revoke-on-signal · 3 one Kevin sitting/year.
+   * Informational — surfaced in alert bodies so a WARN/DEAD issue names the migration it should trigger.
+   */
+  target_rung?: 0 | 1 | 2 | 3;
+  /** When the credential must be AT its target rung (ISO date, or a milestone name). */
+  rung_by?: string | null;
+  /**
+   * true = non-expiring BY DESIGN (rung 2). Alive + no expiry → OK instead of NO_EXPIRY; the daily
+   * aliveness probe is the monitoring, revoke-on-signal the response. Must NOT be combined with a
+   * `recorded_expiry` (classify fails loud on the contradiction).
+   */
+  non_expiring?: boolean;
 }
 
 interface ItemResult {
@@ -112,12 +134,19 @@ function statusOf(r: ItemResult): CredStatus {
 // ───────────────────────────── value access (never logged) ─────────────────────────────
 
 function opRead(opRef: string): string {
-  const token = requireEnv("OP_SERVICE_ACCOUNT_INFRA");
-  return execFileSync("op", ["read", opRef], {
-    env: { ...process.env, OP_SERVICE_ACCOUNT_TOKEN: token },
-    encoding: "utf-8",
-    timeout: 15_000,
-  }).trim();
+  return readCredentialValue(opRef, {
+    readOp: (ref) => {
+      const token = requireEnv("OP_SERVICE_ACCOUNT_INFRA");
+      return execFileSync("op", ["read", ref], {
+        env: { ...process.env, OP_SERVICE_ACCOUNT_TOKEN: token },
+        encoding: "utf-8",
+        timeout: 15_000,
+      }).trim();
+    },
+    // env:<NAME> = the self-probe scheme (decision 2026-08-17 D2): the monitor's own SA token is
+    // probed straight from its process env — it has no 1P item it could `op read` with itself.
+    readEnv: (name) => requireEnv(name),
+  });
 }
 
 function reqRef(item: ManifestItem): string {
@@ -167,7 +196,7 @@ async function evaluate(item: ManifestItem, dryRun: boolean): Promise<ItemResult
   const recorded = item.recorded_expiry ?? null;
   if (dryRun) {
     // No secrets, no network: classify from the recorded date alone.
-    return { item, classification: classify({ recordedExpiry: recorded, probe: { alive: true, expiry: null, source: "recorded" } }) };
+    return { item, classification: classify({ recordedExpiry: recorded, probe: { alive: true, expiry: null, source: "recorded" }, declaredNonExpiring: item.non_expiring === true }) };
   }
   let probe: ProbeResult;
   try {
@@ -177,8 +206,10 @@ async function evaluate(item: ManifestItem, dryRun: boolean): Promise<ItemResult
   }
   return {
     item,
-    classification: classify({ recordedExpiry: recorded, probe }),
-    probeError: probe.error,
+    classification: classify({ recordedExpiry: recorded, probe, declaredNonExpiring: item.non_expiring === true }),
+    probeError: probe.error ?? (item.non_expiring === true && (probe.expiry || recorded)
+      ? `manifest contradiction: non_expiring: true but an expiry is known (${probe.expiry ? "probe" : "recorded_expiry"}) — fix the manifest`
+      : undefined),
     probeNonExpiring: probe.nonExpiring,
   };
 }
@@ -227,7 +258,10 @@ function credentialIssueBody(r: ItemResult): string {
   const { item } = r;
   const owner = item.owner ?? "?";
   const keyless = item.keyless_alternative ? `\n\nConsider moving to: ${item.keyless_alternative}` : "";
-  return [credentialHeadline(r), "", `Owner: ${owner}${keyless}`, "", "This issue auto-closes (with a comment) when this credential's status returns to OK."].join("\n");
+  const rung = item.target_rung !== undefined
+    ? `\n\nLifecycle target: rung ${item.target_rung} (${RUNG_LABELS[item.target_rung]})${item.rung_by ? ` by ${item.rung_by}` : ""} — decision 2026-08-17 (credential lifecycle with no Kevin touch); this alert is the signal to run that migration, not to mint a fresh copy.`
+    : "";
+  return [credentialHeadline(r), "", `Owner: ${owner}${keyless}${rung}`, "", "This issue auto-closes (with a comment) when this credential's status returns to OK."].join("\n");
 }
 
 function credentialStatusChangeComment(r: ItemResult, fromStatus: string, toStatus: string): string {

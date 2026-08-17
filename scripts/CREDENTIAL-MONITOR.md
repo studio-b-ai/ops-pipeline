@@ -9,7 +9,8 @@ clients-releases-broken-for-3-weeks silent incident (2026-06-07).
 Daily (GitHub Actions cron, 14:00 UTC), for each item in [`credentials.manifest.yaml`](./credentials.manifest.yaml):
 
 1. Reads the value via the read-only **"Studio B Infrastructure"** 1Password Service Account
-   (`OP_SERVICE_ACCOUNT_INFRA`).
+   (`OP_SERVICE_ACCOUNT_INFRA`) — or, for the monitor's OWN token, straight from its process env
+   (`op_ref: env:OP_SERVICE_ACCOUNT_INFRA`, the self-probe scheme; the SA cannot `op read` itself).
 2. Runs the type's **active probe** for the *real* expiry / aliveness (Rule #302 — not the recorded date):
    | type | probe |
    |---|---|
@@ -99,3 +100,22 @@ Three items are tracked OUTSIDE the live manifest, by design:
 **Dropped from scope (now keyless):** npm publish (`@studio-b-ai/clients` → OIDC), PyPI publish
 (`acumatica-lint` → OIDC), all GitHub-Packages *publish* (ephemeral `GITHUB_TOKEN`). See
 `~/Documents/brain/library/vendor/npm/2026-06-07-oidc-trusted-publishing-gotchas.md` § "Fleet audit 2026-06-10".
+
+## Credential lifecycle — target rungs (decision 2026-08-17)
+
+Kevin, 2026-08-17: "I never want to do this again… all of these tokens are rotated and we don't
+need to mint fresh and delete." Every manifest item now carries `target_rung` + `rung_by`
+(`brain/library/decisions/2026-08-17-credential-lifecycle-no-kevin-touch.md`):
+
+| rung | meaning | manifest shape |
+|---|---|---|
+| 0 | keyless (GitHub App installation tokens, OIDC) — the entry is REMOVED once migrated | `target_rung: 0` |
+| 1 | self-rotating — a job mints the successor, updates every store, verifies, revokes the old | `target_rung: 1` |
+| 2 | non-expiring + monitored + revoke-on-signal | `target_rung: 2` + `non_expiring: true` (+ `recorded_expiry: null`) |
+| 3 | one Kevin sitting per year at most | `target_rung: 3` |
+
+A WARN/DEAD issue is the signal to run the migration named on the entry — never to hand Kevin a
+fresh mint. `non_expiring: true` turns alive-with-no-expiry into OK (the daily aliveness probe IS
+the monitoring); combining it with a `recorded_expiry` fails loud (PROBE_FAILED) so the manifest
+can never say both.
+
