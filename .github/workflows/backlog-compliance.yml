@@ -1,0 +1,115 @@
+name: Backlog Compliance
+
+# ops-pipeline#151 (CTO seat -> CoS, LANES rule 17(g), Kevin word 2026-08-17) -- the daily
+# fleet instrument for rule 17(g)'s git-tracked-ranked-backlog compliance check. Full design
+# lives in scripts/backlog-compliance-worker.ts's and scripts/lib/backlog-compliance-lib.ts's
+# header comments; this workflow only mints the fleet App token (repo-hygiene.yml's pattern,
+# copied verbatim, also used by backlog-staleness.yml) and runs the worker with it.
+#
+# Fleet App token required -- more starkly than backlog-staleness.yml's reason: this worker
+# reads studio-b-ai/brain's LANES.md + every lane's brief via the Contents API AND opens/
+# retitles/comments/closes ISSUES on studio-b-ai/brain -- a DIFFERENT repo than the one this
+# workflow runs in (studio-b-ai/ops-pipeline). The ambient GITHUB_TOKEN is scoped to the repo
+# a workflow runs in and structurally cannot reach a different repo at all; studiob-fleet-bot's
+# installation-level contents:read + issues:write on brain covers every read (LANES.md, each
+# brief, the existing open compliance issues) and every write (open/retitle/body/comment/close
+# the rollup or per-lane issues) this worker performs. This workflow itself never uses
+# --brain-dir (local-disk mode) -- runners don't have the vault checked out -- so it always
+# runs in GitHub Contents API mode.
+#
+# Offset 30 minutes after backlog-staleness.yml's 12:00 UTC slot -- both legs read/write via
+# `gh` against the org; running them back-to-back rather than simultaneously avoids stacking
+# API load for no benefit (they're independent instruments, no ordering dependency between
+# them).
+
+on:
+  schedule:
+    - cron: "30 12 * * *" # daily, 12:30 UTC (8:30 AM ET) -- GH Actions cron is UTC-only (Rule #94)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real reads throughout (LANES.md, every brief, existing open compliance issues) -- zero issue mutations on brain, preview only"
+        required: false
+        type: boolean
+        default: true
+      now:
+        description: "ISO 8601 timestamp overriding the clock (the #464/#471 plant ladder) -- omit for the real current time"
+        required: false
+        type: string
+        default: ""
+      lanes:
+        description: "Comma-separated LANES.md row-name allowlist (e.g. CTO,Pricing) to scope this run to a subset of lanes -- omit for every active, non-skip lane"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backlog-compliance
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: "Backlog compliance -- rule 17(g) instrument (fleet App token)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: "Install deps"
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted UNCONDITIONALLY -- including on a dry run: Rule #376, a dry run that reads
+      # nothing proves nothing, and every read this worker does (LANES.md, every brief, the
+      # existing open compliance issues on brain) needs real cross-repo access the ambient
+      # GITHUB_TOKEN structurally cannot provide.
+      - name: "Mint fleet installation token"
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: "Fail loud if the fleet token did not mint"
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token -- check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
+          exit 1
+
+      # Codex pattern carried over from backlog-staleness.yml (its pass-1 P1 fix): untrusted
+      # free-text workflow_dispatch inputs (now, lanes) travel through env: (real OS-level env
+      # vars, never text-substituted into the script) and are referenced quoted -- never a
+      # direct ${{ }} substitution inside the run: block's shell source, which would let a
+      # dispatcher-supplied value containing `$(...)`/backticks/`;` execute as shell syntax
+      # with the just-minted fleet App token live in GH_TOKEN. dry_run stays a direct ${{ }}
+      # substitution because it's boolean-typed -- GitHub Actions can only ever produce the
+      # literal string '--dry-run' or '' from that expression, no attacker-controlled text.
+      - name: "Run backlog-compliance worker"
+        id: run_worker
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          DRY_RUN_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+          NOW_INPUT: ${{ inputs.now }}
+          LANES_INPUT: ${{ inputs.lanes }}
+        run: |
+          args=()
+          if [ -n "$DRY_RUN_FLAG" ]; then args+=("--dry-run"); fi
+          if [ -n "$NOW_INPUT" ]; then args+=(--now "$NOW_INPUT"); fi
+          if [ -n "$LANES_INPUT" ]; then args+=(--lanes "$LANES_INPUT"); fi
+          npx tsx backlog-compliance-worker.ts "${args[@]}"
+
+      # Rule #356: a timeout kill reports "cancelled" SILENTLY unless a SEPARATE if: always()
+      # step names the terminal status explicitly.
+      - name: "Report terminal status"
+        if: always()
+        run: |
+          echo "backlog-compliance workflow terminal status: ${{ job.status }} (run_worker outcome: ${{ steps.run_worker.outcome }})"

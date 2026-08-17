@@ -72,3 +72,66 @@ machinery_labels:
   - "*-failed-sync"
   - "so-import-rescue"
   - "awaiting-approval"
+
+# compliance: — ops-pipeline#151 (backlog COMPLIANCE leg, LANES rule 17(g), Kevin word
+# 2026-08-17 ~02:20 ET via CoS: "make sure you're enforcing all sessions to be keeping
+# gittracked backlogs which are first ranked and prioritized by the lane, then the manager,
+# then the cos then kevin"). Distinct instrument from `repos:`/`thresholds:`/
+# `machinery_labels:` above (which drive backlog-staleness-worker.ts over GitHub issues) —
+# this leg reads `studio-b-ai/brain` LANES.md rows + their briefs and checks PRESENCE /
+# FRESHNESS / SHAPE of the git-tracked ranked-backlog section itself. Consumed by
+# scripts/backlog-compliance-worker.ts (read-only — never written by the worker). Full
+# grammar + checks table: brain `library/product/2026-08-17-backlog-compliance-leg-design.md`.
+compliance:
+  brain_repo: "studio-b-ai/brain"
+  lanes_file: "LANES.md"
+  # Rollout dates (config diff, not a code change — design doc §2): before
+  # per_lane_issues_from, findings land on ONE fleet rollup issue; after it, one issue per
+  # non-compliant lane. Before manager_stamp_enforced_from / cos_stamp_enforced_from, F2/F3
+  # report as `pending` rather than failures (managers/CoS get one tick/census cycle first).
+  per_lane_issues_from: "2026-08-21T12:00:00Z"
+  manager_stamp_enforced_from: "2026-08-19T12:00:00Z"
+  cos_stamp_enforced_from: "2026-08-22T12:00:00Z"
+  lane_stamp_max_age_days: 7
+  manager_lag_max_hours: 48
+  cos_stamp_max_age_days: 7
+  # Row name -> brief path overrides. RESOLUTION PRECEDENCE (CoS refinement 2026-08-17,
+  # supersedes the row-text-first draft): this map wins FIRST (an explicit human mapping
+  # always beats row text), THEN the row's own (coldstarts|library/backlogs)/....md mention,
+  # THEN the library/backlogs/<slug>.md default. Seeded from the CoS census table (8/17
+  # 07:1xZ) — every key below verified byte-exact (NFC) against a real LANES.md row name.
+  # "Zoom Workspace" pins the CURRENT brief explicitly: the row mentions two coldstarts
+  # files (the row-text-first match alone would not reliably resolve to the current one) —
+  # this override makes the resolution deterministic regardless of row-text ordering.
+  # "Task Sync Build"/"Answering Service"/"Procurement Hub" name no brief in row text at
+  # all; the explicit entries here document what the slug default already resolves to (the
+  # latter two files do not exist yet — expected P1 findings until the COO creates them).
+  # A briefs: key matching no LANES.md row name is a WARN in the worker's run output, never
+  # silent (unmatchedBriefKeys() in the lib).
+  briefs:
+    "Chief of Staff": "coldstarts/2026-08-04-chief-of-staff-reentry.md"
+    "CTO": "coldstarts/2026-08-04-cto-seat-reentry.md"
+    "CFO": "coldstarts/2026-08-05-cfo-seat.md"
+    "CMO": "coldstarts/cmo-seat-reentry.md"
+    "Creative Director": "coldstarts/2026-08-05-creative-director-seat.md"
+    "COO": "coldstarts/coo-seat-reentry.md"
+    "General Counsel": "coldstarts/general-counsel-reentry.md"
+    "Pricing": "coldstarts/pricing-lane-reentry.md"
+    "HubSpot Platform": "coldstarts/hubspot-platform-reentry.md"
+    "Shopify": "coldstarts/2026-08-15-shopify-lane.md"
+    "Wayfair": "coldstarts/2026-08-14-wayfair-lane.md"
+    "Faire": "coldstarts/2026-08-14-faire-lane.md"
+    "Ästhetik Films": "coldstarts/asthetik-films-reentry.md"
+    "Deep River": "coldstarts/2026-08-13-asthetik-rail-deep-river-lane-reentry.md"
+    "Ästhetik Image Studio": "coldstarts/2026-08-04-asthetik-image-studio.md"
+    "MTM lane": "coldstarts/2026-08-08-mtm-prolific-readiness.md"
+    "Studio B Corporate": "coldstarts/2026-08-04-studiob-corporate.md"
+    "Zoom Workspace": "coldstarts/2026-08-12-zoom-workspace-lane.md"
+    "Acumatica": "coldstarts/2026-08-15-acumatica-lane.md"
+    "Task Sync Build": "library/backlogs/task-sync-build.md"
+    "Answering Service": "library/backlogs/answering-service.md"
+    "Procurement Hub": "library/backlogs/procurement-hub.md"
+  # Row names (exact, as parsed from the row's bold first-cell name) that this leg never
+  # checks — independent of lifecycle class (ARCHIVED/TOMBSTONED are already always skipped).
+  skip:
+    - "api-bot stale-string fleet scrub" # WRAPPED 8/16, archive proposed — remove when the row is ARCHIVED
