@@ -88,9 +88,21 @@ jobs:
         run: npm ci
 
       - name: "Provision Railway vars (dry-run unless apply=true)"
+        # Inputs travel through `env:` and are read back as `"$SHELL_VARS"`, never interpolated
+        # directly as `${{ inputs.* }}` text into the `run:` script — a dispatcher-supplied string
+        # input containing shell metacharacters would otherwise be spliced into a step whose
+        # environment holds RAILWAY_API_TOKEN and the GitHub App private key (codex review finding,
+        # this PR). PROJECT_ID/ENVIRONMENT_NAME/SERVICE_NAME are plain env vars here, same as
+        # FLEET_APP_INSTALLATION_ID already was; APPLY_FLAG is built once via the `${{ }}` ternary
+        # (never derived from free-text input) and left unquoted at the call site on purpose, since
+        # it must either vanish or expand to exactly one word (`--apply`).
         env:
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
           FLEET_APP_ID: ${{ secrets.FLEET_APP_ID }}
           FLEET_APP_PRIVATE_KEY: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
           FLEET_APP_INSTALLATION_ID: ${{ inputs.installation_id }}
-        run: npx tsx provision-railway-vars.ts --project-id "${{ inputs.project_id }}" --environment-name "${{ inputs.environment_name }}" --service-name "${{ inputs.service_name }}" ${{ inputs.apply == true && '--apply' || '' }}
+          PROJECT_ID: ${{ inputs.project_id }}
+          ENVIRONMENT_NAME: ${{ inputs.environment_name }}
+          SERVICE_NAME: ${{ inputs.service_name }}
+          APPLY_FLAG: ${{ inputs.apply == true && '--apply' || '' }}
+        run: npx tsx provision-railway-vars.ts --project-id "$PROJECT_ID" --environment-name "$ENVIRONMENT_NAME" --service-name "$SERVICE_NAME" $APPLY_FLAG
