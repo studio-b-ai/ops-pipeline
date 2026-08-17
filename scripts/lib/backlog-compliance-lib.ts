@@ -326,7 +326,17 @@ export function parseStampLine(rawLine: string): Stamp | null {
     fields[key] = value;
   }
 
-  if (!fields.lane || !isIso(fields.lane)) return null;
+  if (!fields.lane) return null;
+  // `lane [<label>] <ISO>` — issue #153 item 2: a leading label token before the ISO is
+  // tolerated (real briefs, 2026-08-17: CMO `lane CMO 2026-08-17T06:23Z`, COO `lane COO-seat
+  // 2026-08-17T07:24:31Z`, Creative Director `lane CD 2026-08-17T06:25Z`). The ISO is always
+  // the LAST whitespace token — the same trick the `manager` field already uses via
+  // lastIndexOf(" ") below, since an ISO never itself contains a space. A last token that
+  // still isn't a valid ISO fails the whole stamp (P3) — garbage is never silently accepted,
+  // label or not.
+  const laneSpaceIdx = fields.lane.lastIndexOf(" ");
+  const laneIso = laneSpaceIdx === -1 ? fields.lane : fields.lane.slice(laneSpaceIdx + 1).trim();
+  if (!isIso(laneIso)) return null;
 
   let manager: StampManager | null = null;
   if (fields.manager && !UNSTAMPED_RE.test(fields.manager)) {
@@ -349,7 +359,7 @@ export function parseStampLine(rawLine: string): Stamp | null {
   const cos = fields.cos && !UNSTAMPED_RE.test(fields.cos) && isIso(fields.cos) ? fields.cos : null;
   const kevin = fields.kevin && !UNSTAMPED_RE.test(fields.kevin) && isIso(fields.kevin) ? fields.kevin : null;
 
-  return { lane: fields.lane, manager, cos, kevin };
+  return { lane: laneIso, manager, cos, kevin };
 }
 
 // ───────────────────────────── item / section parsing ─────────────────────────────
