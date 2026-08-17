@@ -21,6 +21,15 @@ name: Backlog Compliance
 # `gh` against the org; running them back-to-back rather than simultaneously avoids stacking
 # API load for no benefit (they're independent instruments, no ordering dependency between
 # them).
+#
+# Issue #153 item 4 -- the 12:30Z SCHEDULE is gated on the studio-b-ai/ops-pipeline repo
+# variable BACKLOG_COMPLIANCE_CI_ENABLED (`sweep` job's `if:`, below): until the CTO flips it
+# to "true", every scheduled run shows SKIPPED in the Actions tab -- NOT a daily red run
+# emailing Kevin -- because studiob-fleet-bot's App installation does not yet carry
+# contents:read on studio-b-ai/brain (grant tracked at ops#104; the mint-token step above would
+# 403 reading LANES.md/briefs without it). workflow_dispatch ALWAYS runs regardless of the
+# variable -- manual runs, including the --dry-run ship-gate probe against the real vault
+# (README "Plant recipe"), are never blocked by this gate.
 
 on:
   schedule:
@@ -52,6 +61,11 @@ concurrency:
 
 jobs:
   sweep:
+    # Issue #153 item 4: SKIPPED (not a failure) on the 12:30Z schedule until the CTO flips
+    # BACKLOG_COMPLIANCE_CI_ENABLED=true (ops#104's brain contents:read grant, pending as of
+    # this gate landing). workflow_dispatch is NEVER gated -- manual runs (incl. the
+    # --dry-run/--brain-dir ship-gate probe) always execute.
+    if: github.event_name == 'workflow_dispatch' || vars.BACKLOG_COMPLIANCE_CI_ENABLED == 'true'
     name: "Backlog compliance -- rule 17(g) instrument (fleet App token)"
     runs-on: ubuntu-latest
     timeout-minutes: 15

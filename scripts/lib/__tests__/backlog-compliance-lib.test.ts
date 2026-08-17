@@ -180,7 +180,14 @@ describe("resolveBriefPath — 3-rung precedence", () => {
     const rows = parseLanesRows("| **Ästhetik Image Studio!!** (PROJECT) | a | b | c |");
     // Leading/trailing non-alnum runs are stripped entirely (not left as a stray "-") — only
     // the interior separators survive as single "-"s. Verified against the real slugify().
-    expect(resolveBriefPath(rows[0], config())).toBe("library/backlogs/sthetik-image-studio.md");
+    // "Ä" transliterates to "a" (issue #153 item 3 — NFD-normalize + strip combining marks
+    // before the ASCII fold), never dropped as a bare non-alnum character.
+    expect(resolveBriefPath(rows[0], config())).toBe("library/backlogs/asthetik-image-studio.md");
+  });
+
+  it("slug: transliterates diacritics rather than stripping them (issue #153 item 3, verbatim example — a real LANES row name)", () => {
+    const rows = parseLanesRows("| **Ästhetik Target Universe** (PROJECT) | a | b | c |");
+    expect(resolveBriefPath(rows[0], config())).toBe("library/backlogs/asthetik-target-universe.md");
   });
 });
 
@@ -311,6 +318,39 @@ describe("parseStampLine", () => {
   it("a comma inside a NESTED parenthetical also doesn't split early", () => {
     const s = parseStampLine("ranked-by: lane 2026-08-17T06:25Z (note (sub-note, with a comma) continues) · manager — · cos — · kevin —");
     expect(s!.lane).toBe("2026-08-17T06:25Z");
+  });
+});
+
+// ───────────────────────────── parseStampLine — lane [<label>] <ISO> (issue #153 item 2) ─────────────────────────────
+
+describe("parseStampLine — lane [<label>] <ISO> tolerates a leading label token before the ISO", () => {
+  it("CMO (verbatim, coldstarts/cmo-seat-reentry.md): 'lane CMO <ISO>' — the label is ignored, the ISO is the LAST token", () => {
+    const s = parseStampLine(
+      "**ranked-by:** lane CMO 2026-08-17T06:23Z · manager CMO 2026-08-17T06:23Z (seat self-ranks; LANES rule 17(g)) · cos — · kevin —",
+    );
+    expect(s).toEqual({ lane: "2026-08-17T06:23Z", manager: { seat: "CMO", at: "2026-08-17T06:23Z" }, cos: null, kevin: null });
+  });
+
+  it("COO (verbatim, coldstarts/coo-seat-reentry.md): 'lane COO-seat <ISO>' — a hyphenated label", () => {
+    const s = parseStampLine("ranked-by: lane COO-seat 2026-08-17T07:24:31Z · manager COO 2026-08-17T07:24:31Z · cos — · kevin —");
+    expect(s).toEqual({ lane: "2026-08-17T07:24:31Z", manager: { seat: "COO", at: "2026-08-17T07:24:31Z" }, cos: null, kevin: null });
+  });
+
+  it("Creative Director (verbatim, coldstarts/2026-08-05-creative-director-seat.md): 'lane CD <ISO>', backtick-wrapped whole line", () => {
+    const s = parseStampLine("`ranked-by: lane CD 2026-08-17T06:25Z · manager CD 2026-08-17T06:25Z · cos — · kevin —`");
+    expect(s).toEqual({ lane: "2026-08-17T06:25Z", manager: { seat: "CD", at: "2026-08-17T06:25Z" }, cos: null, kevin: null });
+  });
+
+  it("plain 'lane <ISO>' (no label at all) keeps working — the last-whitespace-token rule is a no-op with only one token", () => {
+    expect(parseStampLine("ranked-by: lane 2026-08-17T06:05Z · manager — · cos — · kevin —")!.lane).toBe("2026-08-17T06:05Z");
+  });
+
+  it("'lane foo' with no ISO anywhere is still unparseable — a label never rescues garbage", () => {
+    expect(parseStampLine("ranked-by: lane foo · manager — · cos — · kevin —")).toBeNull();
+  });
+
+  it("a label followed by a near-miss (not a real ISO) still fails — not just a bare single word", () => {
+    expect(parseStampLine("ranked-by: lane CMO not-a-date · manager — · cos — · kevin —")).toBeNull();
   });
 });
 
@@ -603,6 +643,204 @@ describe("parseBacklogSection — item shape", () => {
       "1. after — owner CTO · by 2026-08-20",
     );
     expect(parseBacklogSection(md).items).toHaveLength(1);
+  });
+});
+
+// ───────────────────────────── parseBacklogSection — table-row items (issue #153 item 1) ─────────────────────────────
+//
+// Three real lanes wrote their ranked backlog as a markdown TABLE (P/tier/priority + owner as
+// COLUMNS) instead of numbered/bulleted lines — before this fix every one of them read as a
+// false "0 item(s) — no items and no marker" (S1). Fixtures below are copied VERBATIM
+// (`sed -n` on the vault paths, read-only) from the real briefs that surfaced this gap.
+
+describe("parseBacklogSection — table-row items (issue #153 item 1)", () => {
+  it("Pricing (verbatim, coldstarts/pricing-lane-reentry.md lines 112-128): no leading '#' column; tier-cell decoration ('**P1 · now**', 'P1 (clocked)') resolves; a `<!-- … -->` comment between the stamp and the table doesn't break table detection", () => {
+    const md = lines(
+      "## Backlog (ranked)",
+      "ranked-by: lane 2026-08-17T06:20:38Z · manager CFO 2026-08-17T05:50Z · cos — · kevin —",
+      "",
+      "<!-- LANES rule 17(g). Section inserted by the CFO (rule-15 manager) 8/17 05:50Z while Pricing's inbound queue was wedged; Pricing re-ranked + restamped `lane` 06:20Z (same sitting). The \"Queue\" list below carries the detail; this table is the ranked backlog of record. Order = clock first (rule 18): the DTC watch fires 07:32Z, before Mon AM. -->",
+      "",
+      "| P | item (see Queue for detail) | owner | next action | date |",
+      "|---|---|---|---|---|",
+      "| **P1 · now** | 0 — bolt PR #1829 (`>=` fix, #1828): merge on CI green (JSON-bucket gate) → deploy SUCCESS → live probe `portal-today-price-probe.mts` → 40071 STANDARD = 15.95 → receipt to CFO/CoS/CMO/Shopify | Pricing | in flight | 8/17 |",
+      "| P1 | 6a — DTC RETAIL WATCH: 07:40Z storefront still 5995/6995 (old MSRPs); RESOLVED direction = the sanctioned nightly integrity leg writes base←MSRP (rows-before-bases, one cap) — CoS ruling pending (default let it run); still stale after the 8/18 07:23Z run → hand to Shopify lane | Pricing | 8/18 AM re-probe | 8/18 |",
+      "| P1 | 1 — Cheyenne EXCLUSIVE→N flip + G3 re-fire, close #1737/#1775 | Pricing | Mon AM | 8/17 |",
+      "| P1 | 6b — DIRECT `syncSalesPrices` pass for the 588 after 00:00Z 8/18 (Dakota rows ride along) + one-night `SHOPIFY_PRICE_INTEGRITY_MAX_FIXES` raise (Shopify env via CoS); then G3 03:40Z + price-sync 07:23Z receipts | Pricing | 00:0xZ 8/18 dry → fire | 8/18 |",
+      "| P1 | 2 — joint CFO+Pricing grid-AXES proposal (construction × base cloth) | Pricing + CFO | Tue night | 8/18 |",
+      "| P1 | 3 — ACCOUNT × PATTERN review build + WS-* classes + inert TARGETRAIL spec (Kevin gate: nothing promotes for 1/1 before his read) | Pricing (+CFO volume/$ side) | Wed build → Kevin Thu/Fri | 8/19 |",
+      "| P1 | 4 — RESELLER segment + rail in the segment→catalog map v1 · MAP-letter mechanics · House Fabric first case | Pricing | with the map | 8/18 |",
+      "| P2 | 5 — Warren/Parkhill R&T MAP enforcement · #362 MSRP set · #321 sweep sequencing · CFO holds c/d | Pricing | after 3 | 8/21 |",
+      "| P1 (clocked) | 6 — 9/1 trade level-up first cron (REPORT-ONLY) → present the \"arm 10/1?\" fork with the report | Pricing | 9/1 14:00Z | 9/1 |",
+      "| P2/P3 | 7 — follow-ups bolt#1752 · #1736 · #1763 · #1775 · #1807 (repo P-labels are the trackers) | Pricing | rolling | — |",
+    );
+    const section = parseBacklogSection(md);
+    expect(section.stamp).toEqual({ lane: "2026-08-17T06:20:38Z", manager: { seat: "CFO", at: "2026-08-17T05:50Z" }, cos: null, kevin: null });
+    expect(section.items).toHaveLength(10);
+    // item 9 (line 17, "7 — follow-ups …") has a literal "—" date cell, not a real date/"unclocked
+    // (why)" — codex review (ops-pipeline#151 follow-up, issue #153): a dash placeholder is
+    // "unassigned", not "present" (same UNSTAMPED_RE semantics the tier cell already had). Every
+    // OTHER row keeps both.
+    expect(section.items.every((i, idx) => i.hasOwner && (i.hasClock || idx === 9))).toBe(true);
+    expect(section.items[9].hasClock).toBe(false);
+    expect(section.items[0].tier).toBe("P1"); // from "**P1 · now**"
+    expect(section.items[0].text).toContain("bolt PR #1829");
+    expect(section.items[8].tier).toBe("P1"); // from "P1 (clocked)"
+    expect(section.items[8].text).toContain("trade level-up");
+
+    // end-to-end: fully shaped table -> zero shape/presence/freshness FAILURES except the one
+    // genuine dash-date row above (only the not-yet-enforced F3 "cos" pending finding otherwise
+    // survives) — "S1 only where cells are genuinely empty [or dash-placeholder]" (issue #153).
+    const findings = evaluate(row("TestSeat"), { exists: true, text: md }, config(), NOW_EARLY);
+    expect(findings.filter((f) => f.status === "failed")).toEqual([{ check: "S1", text: "1 item(s) missing: clock[17]", status: "failed" }]);
+  });
+
+  it("CFO (verbatim, coldstarts/2026-08-05-cfo-seat.md lines 145-157): leading '#' row-number column; the merged/struck '0d' row (tier '—' + item cell starting '(') is SKIPPED, not a finding", () => {
+    const md = lines(
+      "## Backlog (ranked)",
+      "ranked-by: lane 2026-08-17T05:45Z · manager CFO 2026-08-17T05:45Z · cos — · kevin —",
+      "",
+      "<!-- LANES rule 17(g): git-tracked ranked backlog (born 8/16 ~20:15Z; refresh every tick; NEXT cell of the LANES row = #1; the seat is its own lane and its own manager) -->",
+      "",
+      "Priority law: **P0** live money/customer/outage · **P1** dated commitment or Kevin word in flight · **P2** roadmap · **P3** hygiene. Every item = owner · next action · date or \"unclocked (why)\". Blocked-on-Kevin items are ASKED, not parked.",
+      "",
+      "| # | P | item | owner | next action | date |",
+      "|---|---|---|---|---|---|",
+      "| 0a | P1 | **ACCOUNT × PATTERN INCREASE REVIEW** (Kevin 8/16: per account per pattern current → 1/1 price · % · $ on T12M · account total, worst-first; nothing promotes / no letters until he reads) — build with Pricing | CFO + Pricing | data join Mon–Tue; sheet with grid v1 Wed 8/19 → Kevin Thu/Fri | **8/19** |",
+      "| 0b | P1 | **GRID AXES proposal (construction × base cloth × content × GSM)** — joint with Pricing before the Wed build; BASE/GROUND attribute = CD mint | CFO + Pricing (+CD) | draft Tue 8/18 night | **8/18** |",
+      "| 0c | P1 | **Print/dye (Express) program — CFO PLANNING leg (Kevin 8/17 ~04:2xZ: \"the dyeing machine is a big part of that, too… I'm ok to work on this now. it just doesn't have to be executed until we're ready\" → PLANNING NOW, execution on his \"ready\"; canon `library/decisions/2026-08-17-print-program-two-lanes-drop-plus-express-capability.md`):** (1) capex-vs-toll frame for TWO machines — Epson ML-8000 (COO dealer RFQ) + one-bolt HT lab dye jet + dye kitchen + dryer/heat-set — vs toll print (ADT ~$50 strike-off, 50-yd min, ~2 wk) + a Carolina commission dye house; payback by expressions/yr; failure modes (utilization · shade rejects · effluent/permitting · operator) · (2) WHITE-POOL working-capital frame (white pool must be SMALLER than the finished-color pile it replaces; before = EXIT $243.1K + KEEP $93.6K; cotton 220 first) · (3) cost layers for base-white + expression items (white + print/dye conversion + finishing + labor) = the floor for Pricing's express rails · INPUTS on disk: COO's `library/product/2026-08-17-one-bolt-dye-capability-decision-sheet.md` (bridge = NC State ZTE pilot plant 45–100 kg + Metro Dyeing NY per-lot; machine class 40–60 kg HT soft-flow jet — quotes only; lab kit · finishing · utilities · POTW/effluent permitting; the two deciding ratios = lots/mo × per-lot bridge cost vs amortized owned line + operator, and sell-before-dye WC release vs today's solid-color inventory; D1 rec = bridge at ZTE first) + the ML-8000 shortlist; plus the earlier print-economics leg (upfront yards/color from PO history; margins by ground; grid rows) | CFO (CD owns strategy; COO owns RFQs) | frames on a sibling `library/finance/` doc; Thu 8/20 with the print brief if RFQ inputs allow, else the honest date | **8/20 (frames)** |",
+      "| 0d | — | (merged into 0c: the ML-8000 capex model is the print half of the two-machine frame) | | | |",
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(3); // 0a, 0b, 0c — NOT 0d
+    expect(section.items.map((i) => i.tier)).toEqual(["P1", "P1", "P1"]);
+    expect(section.items.some((i) => i.text.includes("merged into 0c"))).toBe(false);
+
+    const findings = evaluate(row("TestSeat"), { exists: true, text: md }, config(), NOW_EARLY);
+    expect(findings.filter((f) => f.status === "failed")).toEqual([]);
+  });
+
+  it("HubSpot Platform (verbatim, coldstarts/hubspot-platform-reentry.md lines 26-34): a '#' cell carrying extra annotation ('1 `next`') is not mistaken for the tier cell", () => {
+    const md = lines(
+      "## Backlog (ranked) — LANES rule 17 · labels: P0 live customer/money/outage · P1 dated commitment or Kevin word in flight · P2 roadmap · P3 hygiene",
+      "**ranked-by:** lane 2026-08-17T04:55Z · manager CMO 2026-08-17T06:23Z (reviewed at tick — ACCEPTED as-is; notes: #23 stays wk-of-8/17 pending the lead-capture sitting · #26a rides Kevin's ruled string · #6 + R2–R9 Kevin-class on the CoS board) · cos — · kevin —",
+      "(Rule 17(g), Kevin 8/17 ~02:20 ET: git-tracked ranked backlog, ranked lane → manager → CoS → Kevin. Lane restamps at every ranking sitting + /wrap; DONE rows keep their receipt one wake, then move to the design docs' execution logs.)",
+      "Every row: **owner · next action · date or \"unclocked (why)\"**. `next` = #1 (exactly one). Blocked-on-Kevin rows carry the staged ask verbatim.",
+      "",
+      "| # | P | Item | Owner | Next action | Date |",
+      "|---|---|---|---|---|---|",
+      "| 1 `next` | P1 | **Phase-1 B1 live canary** — prove key-first UPDATE-not-CREATE on the first sync pass with customers>0 (Monitor `bigp1xcal` fires; else check Mon AM) | lane | read the pass; assert no NEW company for an existing key + `acumatica_last_synced` advanced on the keyed row (C000079 → merged id 57535183234) | Mon 8/17 AM (natural traffic) |",
+      "| 2 | P1 | **Phase-1 B2 — merge the remaining 73 dup groups / 86 rows** (plan v2 `scratchpad/phase1/dedup-plan-v2.json` regenerated post-B3 — REGENERATE again at B2 time: the 4 V-groups now key on `acumatica_vendor_id`; scratchpad dies at boot) | lane | after #1: dry-run diff → 5-group batch → all; verify 1,066 C-keys ↔ 1,066 companies (+24 V-rows → 20 after V-group merges); log every merge (old ids → new id) | Mon 8/17 (gated on #1) |",
+    );
+    const section = parseBacklogSection(md);
+    expect(section.stamp).toEqual({ lane: "2026-08-17T04:55Z", manager: { seat: "CMO", at: "2026-08-17T06:23Z" }, cos: null, kevin: null });
+    expect(section.items).toHaveLength(2);
+    expect(section.items[0].tier).toBe("P1");
+    expect(section.items[0].text).toContain("Phase-1 B1 live canary");
+    expect(section.items[0].hasOwner).toBe(true); // owner cell = "lane", non-empty
+
+    const findings = evaluate(row("TestSeat"), { exists: true, text: md }, config(), NOW_EARLY);
+    expect(findings.filter((f) => f.status === "failed")).toEqual([]);
+  });
+
+  it("a table whose header has NO 'owner'-named column at all is not recognized as an item table — 0 items, whole-section S1 (never a per-row guess)", () => {
+    const md = lines(
+      "## Backlog (ranked)",
+      "ranked-by: lane 2026-08-17T07:20Z · manager — · cos — · kevin —",
+      "",
+      "| P | item | date |",
+      "|---|---|---|",
+      "| P1 | something real | 8/19 |",
+    );
+    expect(parseBacklogSection(md).items).toHaveLength(0);
+    const findings = evaluate(row("TestSeat"), { exists: true, text: md }, config(), NOW_EARLY);
+    expect(findings.filter((f) => f.check === "S1")).toEqual([
+      { check: "S1", text: '0 item(s) — no items and no "(empty — nothing ranked)" marker', status: "failed" },
+    ]);
+  });
+
+  it("a table WITH an owner column whose per-row cells are blank (and no fallback 'owner' token anywhere in the row) flags EACH row under S1 — one finding, every offending line cited", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T07:20Z · manager — · cos — · kevin —", // 2
+      "", // 3
+      "| P | item | owner | date |", // 4
+      "|---|---|---|---|", // 5
+      "| P1 | thing one, no assignee named | | 8/19 |", // 6
+      "| P1 | thing two, still nobody named | | 8/20 |", // 7
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(2);
+    expect(section.items.every((i) => !i.hasOwner)).toBe(true);
+    const findings = evaluate(row("TestSeat"), { exists: true, text: md }, config(), NOW_EARLY);
+    expect(findings.filter((f) => f.check === "S1")).toEqual([{ check: "S1", text: "2 item(s) missing: owner[6,7]", status: "failed" }]);
+  });
+
+  it("a table WITH an owner/date column whose per-row cells hold dash placeholders ('—'/'-', not blank) ALSO flags EACH row under S1 — dash means unassigned, not present (codex review, ops-pipeline#151 follow-up)", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T07:20Z · manager — · cos — · kevin —", // 2
+      "", // 3
+      "| P | item | owner | date |", // 4
+      "|---|---|---|---|", // 5
+      "| P1 | thing one, dash placeholders both cells | — | — |", // 6
+      "| P1 | thing two, single-hyphen placeholders | - | - |", // 7
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(2);
+    expect(section.items.every((i) => !i.hasOwner && !i.hasClock)).toBe(true);
+    const findings = evaluate(row("TestSeat"), { exists: true, text: md }, config(), NOW_EARLY);
+    expect(findings.filter((f) => f.check === "S1")).toEqual([
+      { check: "S1", text: "2 item(s) missing: owner[6,7] clock[6,7]", status: "failed" },
+    ]);
+  });
+
+  it("a table row's dash-only owner cell still resolves true via the whole-row fallback when a real 'owner X' token sits elsewhere in the row", () => {
+    const md = lines(
+      "## Backlog (ranked)",
+      "ranked-by: lane 2026-08-17T07:20Z · manager — · cos — · kevin —",
+      "",
+      "| P | item | owner | date |",
+      "|---|---|---|---|",
+      "| P1 | something real (owner CFO, chasing Tue) | — | 8/19 |",
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(1);
+    expect(section.items[0].hasOwner).toBe(true); // dash cell, but "owner CFO" fallback-matches over the whole row
+  });
+
+  it("a merged/struck row's fallback ISN'T triggered just by an empty tier cell alone — only tier-empty AND item-starts-with-'(' together skip it", () => {
+    const md = lines(
+      "## Backlog (ranked)",
+      "ranked-by: lane 2026-08-17T07:20Z · manager — · cos — · kevin —",
+      "",
+      "| P | item | owner | date |",
+      "|---|---|---|---|",
+      "| — | not a merge note, just missing its tier | CTO | 8/19 |",
+    );
+    const items = parseBacklogSection(md).items;
+    expect(items).toHaveLength(1); // NOT skipped — the item cell doesn't start with "("
+    expect(items[0].tier).toBeNull(); // still correctly flagged as tier-less
+  });
+
+  it("a section may mix a table block and plain bulleted/numbered items — issue #153 item 1: 'Bulleted/numbered items keep working; a section may mix both'", () => {
+    const md = lines(
+      "## Backlog (ranked)",
+      "ranked-by: lane 2026-08-17 · manager — · cos — · kevin —",
+      "",
+      "| P | item | owner | date |",
+      "|---|---|---|---|",
+      "| P1 | table row | CTO | 2026-08-20 |",
+      "",
+      "**P2**",
+      "1. a plain bulleted item after the table — owner CTO · by 2026-08-21",
+    );
+    const items = parseBacklogSection(md).items;
+    expect(items).toHaveLength(2);
+    expect(items[0].tier).toBe("P1");
+    expect(items[0].text).toBe("table row");
+    expect(items[1].tier).toBe("P2");
+    expect(items[1].text).toContain("plain bulleted item");
   });
 });
 
