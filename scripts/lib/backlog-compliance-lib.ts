@@ -277,11 +277,40 @@ function stripTrailingParenthetical(v: string): string {
 }
 
 /**
+ * Splits a `ranked-by:` field list on `·`/`|`/`,` — but NOT when that character sits INSIDE a
+ * balanced `(...)` span (codex pass-3 P2, ops-pipeline#151, fold-6a follow-up): a trailing
+ * parenthetical annotation using ordinary English comma punctuation — `lane 2026-08-17T06:25Z
+ * (last re-rank, ranks unchanged) · manager ...` — must not be torn in half by its OWN internal
+ * comma before `stripTrailingParenthetical` ever gets a chance to see the whole annotation.
+ * Depth-tracked so a nested paren (the live Deep River case, `(17(g) ack restamp; ...)`) doesn't
+ * false-close early. Parens themselves stay IN the emitted segments — this only decides where to
+ * cut, not what to strip; `stripTrailingParenthetical` does the stripping afterward.
+ */
+function splitStampFields(s: string): string[] {
+  const segments: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const ch of s) {
+    if (ch === "(") depth++;
+    else if (ch === ")") depth = Math.max(0, depth - 1);
+    if (depth === 0 && (ch === "·" || ch === "|" || ch === ",")) {
+      segments.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  segments.push(current);
+  return segments;
+}
+
+/**
  * Parses one `ranked-by: lane <ISO> · manager <seat> <ISO>|<seat> —|— · cos <ISO>|— · kevin
  * <ISO>|—` line (tolerant of `**`/backtick/blockquote/bullet wrapping, and of `·`/`|`/`,` as
- * the field separator). Returns null when the (stripped) line doesn't start `ranked-by:`, or
- * `lane` is missing/unparseable (the one REQUIRED field — everything else may legitimately
- * read "—"). Unknown extra fields are parsed into nothing usable and silently ignored.
+ * the field separator — except inside a balanced parenthetical, `splitStampFields`). Returns
+ * null when the (stripped) line doesn't start `ranked-by:`, or `lane` is missing/unparseable
+ * (the one REQUIRED field — everything else may legitimately read "—"). Unknown extra fields
+ * are parsed into nothing usable and silently ignored.
  */
 export function parseStampLine(rawLine: string): Stamp | null {
   const trimmed = stripStampDecoration(rawLine);
@@ -289,7 +318,7 @@ export function parseStampLine(rawLine: string): Stamp | null {
   if (!prefixMatch) return null;
 
   const fields: Record<string, string> = {};
-  for (const segment of prefixMatch[1].split(/[·|,]/).map((s) => s.trim()).filter(Boolean)) {
+  for (const segment of splitStampFields(prefixMatch[1]).map((s) => s.trim()).filter(Boolean)) {
     const sp = segment.indexOf(" ");
     if (sp === -1) continue; // a bare key with no value — defensively ignored, not fatal
     const key = segment.slice(0, sp).trim().toLowerCase();
