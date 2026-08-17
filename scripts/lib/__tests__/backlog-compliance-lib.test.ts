@@ -383,6 +383,65 @@ describe("parseBacklogSection — heading + stamp detection", () => {
     expect(section.emptyMarker).toBe(true);
     expect(section.items).toHaveLength(0);
   });
+
+  // fold 7c, ops-pipeline#151 — fixtures copied VERBATIM from the real briefs that surfaced the
+  // two discovery bugs on the 2026-08-17 real-vault dry run (folds 7a/7b).
+
+  it("Deep River (verbatim, coldstarts/2026-08-13-asthetik-rail-deep-river-lane-reentry.md lines ~115-129): the decoy '# §4 Next milestones (... `## Backlog (ranked)` just below ...)' heading is skipped — the REAL heading + stamp are found (fold 7a)", () => {
+    const md = lines(
+      "# §4 Next milestones (SUMMARY ONLY — the ranked backlog of record is `## Backlog (ranked)` just below; on conflict the backlog wins)",
+      "- **Late Sept:** fire S8 (craft-school c3 landscape — the only queued",
+      "  spike) · dealer-city overlay (needs dealer list by city) · draft the",
+      "  one-page charter spec + rendering for Tier-2 pricing probes.",
+      "- **Post-Oct-17 (the armed November sequence, order in program-doc",
+      "  checklist):** Willetts → Parks/Menzies → Ozark (band now closed; standing",
+      "  order \"call us first\") → Amtrak Special Moves (NYC boarding on 79/80;",
+      "  invited-vs-public) → NCTM + City of HP → Tier-2 pricing probes →",
+      "  Halloway call → book the April '27 charter.",
+      "- **G1 (year-end):** 2 credible cars · charter contracted · Market-week",
+      "  scenario selected · Special Moves answers.",
+      "",
+      "## Backlog (ranked) — LANES rule 17 (Kevin 8/16 ~4 PM ET: \"every lane and owner needs to do a better job of managing the backlog. things shouldn't be lost and should be ranked and prioritized to keep work moving forward. ask me when you need guidance\"). THE ONE backlog of record for this lane (vault-only lane, no repo → this section). Every item = owner · next action · date or \"unclocked (WHY)\"; the LANES row-38 NEXT annotation = #1. Re-rank at every touch and whenever a Kevin word lands; P0/P1 > 2 d or P2 > 14 d without movement → re-rank or escalate to the CD (my lane manager) with a rec. Dormant-by-design between milestones — a dormant lane still ranks its holds; sleeping-until-a-date is NOT a stall. Last re-rank: 2026-08-16 20:05Z (16:05 ET).",
+      "",
+      "`ranked-by: lane 2026-08-17T06:42Z (17(g) ack restamp; last rank CHANGE 2026-08-16T20:35Z = item 20 added; ranks unchanged since) · manager CD 2026-08-17T06:25Z · cos — · kevin —`",
+    );
+    const section = parseBacklogSection(md);
+    expect(section.found).toBe(true);
+    expect(section.headingLine).toMatch(/^## Backlog \(ranked\) — LANES rule 17/); // the REAL heading, not the "# §4" decoy
+    expect(section.stamp).toEqual({ lane: "2026-08-17T06:42Z", manager: { seat: "CD", at: "2026-08-17T06:25Z" }, cos: null, kevin: null });
+  });
+
+  it("Ästhetik Films (verbatim, coldstarts/asthetik-films-reentry.md lines ~281-293): a 10-line <!-- … --> note between the heading and the stamp doesn't exhaust the lookahead budget (fold 7b)", () => {
+    const md = lines(
+      "## Backlog (ranked)",
+      "<!-- §5. THE ONE BACKLOG OF RECORD for this non-repo lane (LANES rule 17, Kevin's word",
+      "     8/16: \"things shouldn't be lost and should be ranked and prioritized to keep work",
+      "     moving forward. ask me when you need guidance\"). Every item = priority · owner ·",
+      "     next action · date or \"unclocked (WHY)\". The LANES row's NEXT cell = item #1.",
+      "     Manager (rule 15) = Creative Director, session local_60d49c0a-654b-4e2d-a941-d26c9697edc6;",
+      "     census (open · P0/P1 · top-3 · stale · blocked-on-Kevin) goes to them.",
+      "     Stale thresholds (rule 17d): P0/P1 > 2 days · P2 > 14 days without movement.",
+      "     Nothing lost (17c): anything surfaced and not executed same-turn is FILED here",
+      "     before the turn ends. Old \"§5 OPEN THREADS\" folded in 8/16 (its items 1 + 2 = the",
+      "     closed receipts at the bottom). -->",
+      "",
+      "`ranked-by: lane 2026-08-17T06:25Z (last lane re-rank) · manager CD 2026-08-17T06:25Z · cos — · kevin —`",
+    );
+    const section = parseBacklogSection(md);
+    expect(section.found).toBe(true);
+    expect(section.headingLine).toBe("## Backlog (ranked)");
+    expect(section.stamp).toEqual({ lane: "2026-08-17T06:25Z", manager: { seat: "CD", at: "2026-08-17T06:25Z" }, cos: null, kevin: null });
+  });
+
+  it("negative: a heading whose ONLY mention of the phrase is inside backticks is NOT a false hit — no section at all (fold 7a)", () => {
+    const md = lines(
+      "# §4 Next milestones (the ranked backlog of record is `## Backlog (ranked)` just below; on conflict the backlog wins)",
+      "- some other content, no real section anywhere in this doc",
+    );
+    const section = parseBacklogSection(md);
+    expect(section.found).toBe(false);
+    expect(section.headingLine).toBeNull();
+  });
 });
 
 describe("parseBacklogSection — item shape", () => {
