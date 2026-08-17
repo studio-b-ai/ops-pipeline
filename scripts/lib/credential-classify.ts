@@ -29,6 +29,15 @@ export interface ClassifyInput {
   /** ISO date from the manifest (`recorded_expiry`), or null/undefined if not recorded. */
   recordedExpiry?: string | null;
   probe: ProbeResult;
+  /**
+   * Manifest `non_expiring: true` — the credential is non-expiring BY DESIGN (ladder rung 2,
+   * decision 2026-08-17: non-expiring + monitored + revoke-on-signal). Alive + no expiry is then
+   * OK, not NO_EXPIRY: the daily aliveness probe IS the monitoring; a standing NO_EXPIRY issue that
+   * never closes would only train the seat to ignore the label (Rules #60/#292). Contradiction guard:
+   * a declared non-expiring item that ALSO carries an expiry (probe or recorded) is PROBE_FAILED —
+   * a manifest that says both cannot be trusted either way.
+   */
+  declaredNonExpiring?: boolean;
 }
 
 export interface Classification {
@@ -74,7 +83,9 @@ export function daysBetweenUTC(from: Date, to: Date): number {
  *   1. probe.error set       → PROBE_FAILED (monitoring gap — couldn't determine state)
  *   2. probe.alive === false → DEAD (confirmed dead/revoked — the npm-token silent-break case)
  *   3. effective expiry = probe.expiry ?? recordedExpiry
- *        - none + nonExpiring → OK   (classic PAT etc.)
+ *        - none + declaredNonExpiring (manifest `non_expiring: true`, rung 2 by design) → OK
+ *        - some + declaredNonExpiring → PROBE_FAILED (manifest contradiction — fail loud)
+ *        - none + probe.nonExpiring (probe-detected, e.g. classic PAT) → NO_EXPIRY (message tailored)
  *        - none               → NO_EXPIRY (flag for backfill)
  *        - ≤1/≤7/≤14 days     → WARN (threshold = tightest band; overdue collapses to WARN@1)
  *        - else               → OK
@@ -100,10 +111,18 @@ export function classify(input: ClassifyInput, now: Date = new Date()): Classifi
     expirySource = "recorded";
   }
 
+  if (input.declaredNonExpiring) {
+    // Rung 2 by design: alive + no expiry anywhere → OK. An expiry from either source contradicts
+    // the declaration → PROBE_FAILED (a monitoring gap in the MANIFEST, surfaced, never silently OK).
+    if (!expiry) return mk("OK", null, null, null, null);
+    return mk("PROBE_FAILED", null, null, expiry, expirySource);
+  }
+
   if (!expiry) {
     // Alive but no known expiry — whether genuinely non-expiring (classic PAT → scope down /
     // migrate to keyless) or just unrecorded (→ backfill). Both are NO_EXPIRY (never silently OK,
     // which would hide a manifest hygiene gap); the monitor tailors the message from probe.nonExpiring.
+    // (A DELIBERATE non-expiring credential declares `non_expiring: true` in the manifest — see above.)
     return mk("NO_EXPIRY", null, null, null, null);
   }
 

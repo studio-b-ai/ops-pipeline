@@ -86,3 +86,38 @@ describe("classify — WARN bands (recorded expiry)", () => {
     expect(c.daysToExpiry).toBe(-2);
   });
 });
+
+describe("classify — declaredNonExpiring (manifest `non_expiring: true`, ladder rung 2 — decision 2026-08-17)", () => {
+  it("OK when alive + no expiry from either source (the daily aliveness probe IS the monitoring)", () => {
+    const c = classify({ probe: alive(), declaredNonExpiring: true }, NOW);
+    expect(c.status).toBe("OK");
+    expect(c.expiry).toBeNull();
+    expect(c.daysToExpiry).toBeNull();
+  });
+
+  it("still DEAD when the aliveness probe fails — the declaration never masks a revoked token", () => {
+    const c = classify({ probe: { alive: false, expiry: null, source: "recorded" }, declaredNonExpiring: true }, NOW);
+    expect(c.status).toBe("DEAD");
+  });
+
+  it("still PROBE_FAILED when the probe errored", () => {
+    const c = classify({ probe: { alive: true, expiry: null, source: "probe", error: "op CLI not found on PATH" }, declaredNonExpiring: true }, NOW);
+    expect(c.status).toBe("PROBE_FAILED");
+  });
+
+  it("PROBE_FAILED on the manifest contradiction: declared non-expiring but a recorded_expiry is set", () => {
+    const c = classify({ recordedExpiry: "2026-09-07", probe: alive(), declaredNonExpiring: true }, NOW);
+    expect(c.status).toBe("PROBE_FAILED");
+    expect(c.expiry).toBe("2026-09-07");
+  });
+
+  it("PROBE_FAILED on the contradiction from the PROBE side too (probe read a real expiry)", () => {
+    const c = classify({ probe: alive("2027-01-01T00:00:00Z"), declaredNonExpiring: true }, NOW);
+    expect(c.status).toBe("PROBE_FAILED");
+  });
+
+  it("false/undefined leaves the existing NO_EXPIRY behaviour untouched (negative control)", () => {
+    expect(classify({ probe: alive(), declaredNonExpiring: false }, NOW).status).toBe("NO_EXPIRY");
+    expect(classify({ probe: alive() }, NOW).status).toBe("NO_EXPIRY");
+  });
+});
