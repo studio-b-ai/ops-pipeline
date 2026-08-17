@@ -844,6 +844,255 @@ describe("parseBacklogSection — table-row items (issue #153 item 1)", () => {
   });
 });
 
+// ───────────────────────────── parseBacklogSection — wrapped continuation lines (fold 9, ops-pipeline#155) ─────────────────────────────
+//
+// Briefs hard-wrap at ~72 cols with 3-space continuation lines; an item's `owner … · next: … ·
+// <date>` tail routinely lands on a continuation line, not the numbered/bulleted first line — the
+// pre-fold parser evaluated tier/owner/clock over the first line only, producing a false `S1:
+// missing owner/clock` on Chief of Staff (11 items), most of Faire's 39, and part of Acumatica's
+// (first live firing, brain#136). Fixtures A/B are copied VERBATIM from the real briefs that
+// surfaced this: `coldstarts/2026-08-04-chief-of-staff-reentry.md` L205-212 and the Faire
+// re-entry brief L111-116.
+
+describe("parseBacklogSection — wrapped continuation lines (fold 9, ops-pipeline#155)", () => {
+  it("Fixture A (Chief of Staff, verbatim): 2 items at lines 4 and 8, both P1/owner/clock — continuation tails joined into the item text", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager Chief of Staff — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      '1. **P1 · `next` — Digest cadence LIVE** (Kevin 8/17: "we need to start', // 4
+      '   doing a real digest"): 9 AM · 1 PM · 5 PM ET + on "digest"; format', // 5
+      "   `library/digests/2026-08-17-0200et-cos-digest.md`; break-through", // 6
+      "   only for clock-bound Kevin words + incidents. owner CoS · next: 9 AM ET Mon digest, then Front Desk (Zoom) posting once the post tooling is stable · 2026-08-17", // 7
+      "2. **P1 — Rule 17(g) rollout receipts + census** (Kevin 8/17): collect", // 8
+      "   one line per lane from all 5 managers; census table → digest; the", // 9
+      "   CTO's enforcement leg (backlog-managers.yaml compliance check → brain", // 10
+      "   issues) receipt; my own restamp weekly. owner CoS · next: census table in the 9 AM digest + CTO enforcement receipt · 2026-08-17", // 11
+    );
+    const items = parseBacklogSection(md).items;
+    expect(items).toHaveLength(2);
+    expect(items.map((i) => i.line)).toEqual([4, 8]);
+    expect(items.every((i) => i.tier === "P1")).toBe(true);
+    expect(items.every((i) => i.hasOwner)).toBe(true);
+    expect(items.every((i) => i.hasClock)).toBe(true);
+    expect(items[0].text).toMatch(/^\*\*P1 · /);
+    expect(items[0].text).toContain("posting once the post tooling is stable · 2026-08-17");
+  });
+
+  it("Fixture B (Faire, verbatim): owner on continuation line 2 counts for the item — 1 item, P1, hasOwner true", () => {
+    const md = lines(
+      "## Backlog (ranked)",
+      "ranked-by: lane 2026-08-17T09:20Z · manager Faire — · cos 2026-08-17T09:20Z · kevin —",
+      "",
+      "2. **P1 — Kevin's clicks at ANY sign-in (C4 images · C6 payout · C5 team",
+      "   seat).** Owner: Kevin (clicks) → Faire lane (fresh-read receipt, #346; mark",
+      "   C4/C5/C6 ✅ in runbook/program/coldstart/LANES). Next: (a) 3 uploads via the",
+      "   native pickers from `~/Downloads/faire-brand-profile/` (1-COVER ·",
+      "   2-PROFILE · 3-LOGO-A-crest [alt B]; Feature image untouched) · (b)",
+      "   Payments → 60-DAY (ruled) · (c) team member = the R17 CS-lead name (Sarah's",
+    );
+    const items = parseBacklogSection(md).items;
+    expect(items).toHaveLength(1);
+    expect(items[0].tier).toBe("P1");
+    expect(items[0].hasOwner).toBe(true);
+  });
+
+  it("negative: continuation lines carrying no owner/clock tokens leave hasOwner/hasClock false — still ONE item, not item + N prose lines", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. P1 — some item with", // 4
+      "   no assignee info in here", // 5
+      "   just prose continuing on", // 6
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(1);
+    expect(section.items[0].hasOwner).toBe(false);
+    expect(section.items[0].hasClock).toBe(false);
+  });
+
+  it("two items separated by a blank line stay two items; an indented line AFTER the blank does not rejoin the first item", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. P1 — first item owner Kevin · 2026-08-21", // 4
+      "", // 5
+      "   indented line after blank should not rejoin", // 6
+      "2. P1 — second item owner Kevin · 2026-08-22", // 7
+    );
+    const items = parseBacklogSection(md).items;
+    expect(items).toHaveLength(2);
+    expect(items.map((i) => i.line)).toEqual([4, 7]);
+    expect(items[0].text).not.toContain("indented line after blank");
+  });
+
+  it("an indented sub-bullet counts for its parent's owner+clock and is NOT a separate item", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. P1 — parent item with no owner on this line", // 4
+      "   - owner CTO · by Fri 8/21", // 5
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(1);
+    expect(section.items[0].hasOwner).toBe(true);
+    expect(section.items[0].hasClock).toBe(true);
+  });
+
+  it("a NON-indented '- ' bullet after an item starts a new item, not a continuation", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. P1 — first item owner Kevin · 2026-08-21", // 4
+      "- P1 — second item owner Kevin · 2026-08-22", // 5
+    );
+    const items = parseBacklogSection(md).items;
+    expect(items).toHaveLength(2);
+    expect(items.map((i) => i.line)).toEqual([4, 5]);
+  });
+
+  it("a heading line terminates the item even when indented — content after it is not joined in", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. P1 — first item text", // 4
+      "   # not a real heading but starts with hash", // 5
+      "   owner Kevin · 2026-08-21", // 6
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(1);
+    expect(section.items[0].hasOwner).toBe(false);
+    expect(section.items[0].hasClock).toBe(false);
+  });
+
+  it("a table-row ('|') line terminates the item even when indented", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. P1 — first item text", // 4
+      "   | not a real table | but starts with pipe |", // 5
+      "   owner Kevin · 2026-08-21", // 6
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(1);
+    expect(section.items[0].hasOwner).toBe(false);
+    expect(section.items[0].hasClock).toBe(false);
+  });
+
+  it("a <details> line terminates the item even when indented — the existing inDetails skip-state still applies to what follows", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. P1 — first item text", // 4
+      "   <details>", // 5
+      "   owner Kevin · 2026-08-21", // 6
+      "   </details>", // 7
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(1);
+    expect(section.items[0].hasOwner).toBe(false);
+    expect(section.items[0].hasClock).toBe(false);
+  });
+
+  it("an HTML comment ('<!--') line terminates the item even when indented", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. P1 — first item text", // 4
+      "   <!-- comment line -->", // 5
+      "   owner Kevin · 2026-08-21", // 6
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(1);
+    expect(section.items[0].hasOwner).toBe(false);
+    expect(section.items[0].hasClock).toBe(false);
+  });
+
+  it("a struck first line followed by an indented sub-bullet continuation yields ZERO items — the continuation is consumed, never re-scanned as its own item", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. ~~done~~", // 4
+      "   - owner Kevin · 2026-08-21", // 5
+    );
+    expect(parseBacklogSection(md).items).toHaveLength(0);
+  });
+
+  it("item 'line' numbers are always the FIRST line of the item, not the line the owner/clock tail lands on", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. P1 — an item whose", // 4
+      "   owner and clock tail is three lines", // 5
+      "   further down: owner CTO · 2026-08-21", // 6
+    );
+    const items = parseBacklogSection(md).items;
+    expect(items).toHaveLength(1);
+    expect(items[0].line).toBe(4);
+  });
+
+  it("an indented tier header directly after an item (no blank line) is recognized as a header, not swallowed as continuation text — currentTier still updates for the NEXT item (codex review, PR #156, P2)", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. first item under no header yet — owner CTO · 2026-08-20", // 4
+      "   **P2**", // 5
+      "2. second item, no inline tier — owner CTO · 2026-08-21", // 6
+    );
+    const items = parseBacklogSection(md).items;
+    expect(items).toHaveLength(2);
+    expect(items[0].tier).toBeNull(); // no header before it, and "**P2**" was NOT swallowed into its text
+    expect(items[1].tier).toBe("P2"); // currentTier correctly updated by the outer loop's own header handling
+  });
+
+  it("an indented UPPERCASE <DETAILS> block terminates the item the same as lowercase — case-insensitive to match the outer loop's own <details> handling (codex review, PR #156, P3)", () => {
+    const md = lines(
+      "## Backlog (ranked)", // 1
+      "ranked-by: lane 2026-08-17T09:20Z · manager X — · cos 2026-08-17T09:20Z · kevin —", // 2
+      "", // 3
+      "1. P1 — first item text", // 4
+      "   <DETAILS>", // 5
+      "   owner Kevin · 2026-08-21", // 6
+      "   </DETAILS>", // 7
+    );
+    const section = parseBacklogSection(md);
+    expect(section.items).toHaveLength(1);
+    expect(section.items[0].hasOwner).toBe(false);
+    expect(section.items[0].hasClock).toBe(false);
+  });
+
+  it("table-row items are unchanged by the continuation-line join (regression guard — re-asserts the existing mixed table+bulleted test verbatim)", () => {
+    const md = lines(
+      "## Backlog (ranked)",
+      "ranked-by: lane 2026-08-17 · manager — · cos — · kevin —",
+      "",
+      "| P | item | owner | date |",
+      "|---|---|---|---|",
+      "| P1 | table row | CTO | 2026-08-20 |",
+      "",
+      "**P2**",
+      "1. a plain bulleted item after the table — owner CTO · by 2026-08-21",
+    );
+    const items = parseBacklogSection(md).items;
+    expect(items).toHaveLength(2);
+    expect(items[0].tier).toBe("P1");
+    expect(items[0].text).toBe("table row");
+    expect(items[1].tier).toBe("P2");
+    expect(items[1].text).toContain("plain bulleted item");
+  });
+});
+
 // ───────────────────────────── evaluate — both directions (Rule #322/#471) ─────────────────────────────
 
 describe("evaluate — the fully compliant fixture (known-good, zero FAILED findings)", () => {
