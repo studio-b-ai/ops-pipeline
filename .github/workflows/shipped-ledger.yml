@@ -1,0 +1,127 @@
+name: Shipped Ledger
+
+# ops-pipeline#162 (SHIPPED.md weekly PR-derived backfill, CoS -> CTO 2026-08-18) -- the
+# recurring safety-net worker: SHIPPED.md (studio-b-ai/brain) is fed same-turn by every
+# lane's /wrap step, and this catches merged PRs that wraps miss. Full design lives in
+# scripts/shipped-ledger-worker.ts's and scripts/lib/shipped-ledger-lib.ts's header
+# comments; this workflow only mints the fleet App token (repo-hygiene.yml's pattern,
+# copied verbatim per ops#88) and runs the worker with it.
+#
+# Fleet App token required -- this worker reads merged-PR history on EIGHT repos AND
+# reads/writes on studio-b-ai/brain, none of which is the repo this workflow runs in
+# (studio-b-ai/ops-pipeline); the ambient GITHUB_TOKEN is scoped to the repo a workflow
+# runs in and structurally cannot reach any of them.
+#
+# ⚠️ Live-verified 2026-08-14 (`gh api /orgs/studio-b-ai/installations`, repo-hygiene.yml's
+# own header): the fleet App's CURRENT installation permissions are exactly
+# `issues:write` + `metadata:read` -- no `contents:read`, no `pull_requests:read`, no
+# write of any kind on studio-b-ai/brain. Every leg of this worker (reading SHIPPED.md,
+# listing merged PRs on any of the 8 configured repos, branching/writing/PR-ing on brain)
+# needs a grant this App does not yet have (tracked as ops-pipeline#104 / #135,
+# Kevin-gated -- see the README). Until that grant lands, EVERY run -- dry-run included,
+# since even the dry-run's baseline SHIPPED.md read needs contents:read on brain -- would
+# 403 at the very first real read and exit 1.
+#
+# DEVIATION FROM THE CHIP BRIEF (documented per Rules #4/#215/#238): the brief's mechanics
+# list did not ask for a CI-enable gate, but backlog-compliance.yml -- a NAMED sibling read
+# during this chip's own research, solving the IDENTICAL "this worker's very first read
+# needs a not-yet-granted brain permission" situation -- gates its schedule trigger behind
+# a repo variable so the weekly cron shows SKIPPED (not a chronically red, unactionable
+# failure Kevin can't do anything about beyond the one-time grant he already knows he owes;
+# Rule #8/#29) until the CTO flips it. Mirrored here verbatim as SHIPPED_LEDGER_CI_ENABLED
+# for the exact same reason. workflow_dispatch is NEVER gated -- a human can always
+# manually probe (including once a PARTIAL grant lands, to see exactly which leg still
+# 403s) regardless of the variable.
+
+on:
+  schedule:
+    - cron: "0 9 * * 1" # weekly, Monday 09:00 UTC (GH Actions cron is UTC-only -- Rule #94)
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Create/update the shipped-ledger/<YYYY-Www> branch + PR on studio-b-ai/brain. Default false = dry-run (real reads, zero writes)."
+        required: false
+        type: boolean
+        default: false
+      since:
+        description: "ISO 8601 timestamp overriding EVERY repo's computed watermark -- DRY-RUN CONTROLS ONLY, refused together with apply=true (manufactures a known-visible-PR control case even when the real watermark already swept it)."
+        required: false
+        type: string
+        default: ""
+
+# Job-level permissions cover ONLY this job's own checkout via the ambient GITHUB_TOKEN.
+# Every actual read/write (merged-PR lists on 8 repos, SHIPPED.md read, branch/PUT/PR on
+# brain) rides the MINTED fleet installation token (GH_TOKEN below), never this ambient
+# token -- if the mint step ever failed silently and a later step fell back to
+# `github.token`, that token cannot see any repo but this one, so every `gh` call fails
+# loud rather than quietly operating under the wrong identity.
+permissions:
+  contents: read
+
+concurrency:
+  group: shipped-ledger
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    # See the file-header DEVIATION note: SKIPPED (not a failure) on the Monday schedule
+    # until the CTO flips SHIPPED_LEDGER_CI_ENABLED=true (ops-pipeline#104/#135's brain +
+    # cross-repo grants land). workflow_dispatch is NEVER gated.
+    if: github.event_name == 'workflow_dispatch' || vars.SHIPPED_LEDGER_CI_ENABLED == 'true'
+    name: "SHIPPED.md weekly PR-derived backfill (fleet App token)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: "Install deps"
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted UNCONDITIONALLY -- including on a dry run: Rule #376, a dry run that reads
+      # nothing proves nothing, and every read this worker does (SHIPPED.md, merged-PR
+      # lists on all 8 configured repos) needs real cross-repo access the ambient
+      # GITHUB_TOKEN structurally cannot provide.
+      - name: "Mint fleet installation token"
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: "Fail loud if the fleet token did not mint"
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token -- check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
+          exit 1
+
+      # `since` is free-text (an operator-supplied ISO timestamp) -- routed through env:
+      # and referenced quoted in the shell, never substituted directly into the run: block
+      # (backlog-compliance.yml's codex-driven pattern: a dispatcher-controlled string
+      # landing straight in shell source next to a live GH_TOKEN is an injection surface;
+      # `apply` stays a direct ${{ }} substitution because it's boolean-typed -- GitHub
+      # Actions can only ever produce the literal string '--dry-run' or '' from that
+      # expression, never attacker-controlled text).
+      - name: "Run shipped-ledger worker"
+        id: run_worker
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SINCE_INPUT: ${{ inputs.since }}
+        run: |
+          args=(${{ (github.event_name == 'workflow_dispatch' && inputs.apply) && '' || '--dry-run' }})
+          if [ -n "$SINCE_INPUT" ]; then args+=(--since "$SINCE_INPUT"); fi
+          npx tsx shipped-ledger-worker.ts "${args[@]}"
+
+      # Rule #356: a timeout kill reports "cancelled" SILENTLY unless a SEPARATE if:
+      # always() step names the terminal status explicitly.
+      - name: "Report terminal status"
+        if: always()
+        run: |
+          echo "shipped-ledger workflow terminal status: ${{ job.status }} (run_worker outcome: ${{ steps.run_worker.outcome }})"

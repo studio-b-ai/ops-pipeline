@@ -104,9 +104,12 @@ Detailed runbook in [`studio-b-ai/marketing-ops/docs/runbooks/sync-mirrors.md`](
 ## Fleet monitors
 
 Recurring GitHub Actions workers (distinct from the reusable `sync.yml`/`drift-check.yml`
-workflows above) that read live fleet state and open/retitle/close ONE auto-reconciled
-issue per finding-holder — the open-issue set IS the dedup state (Rule #165) — rather than
-posting to a channel nobody reads (#60).
+workflows above) that read live fleet state. `backlog-staleness` and `backlog-compliance`
+open/retitle/close ONE auto-reconciled issue per finding-holder — the open-issue set IS the
+dedup state (Rule #165) — rather than posting to a channel nobody reads (#60).
+`shipped-ledger` reconciles a different way: a branch + PR (never a direct commit, never
+auto-merged, #97) on the file it proposes appending to, keyed by ISO week so a re-run
+updates in place instead of duplicating.
 
 ### `backlog-staleness` (ops-pipeline#136)
 
@@ -219,6 +222,73 @@ never silently.
 The 12:30Z **schedule** is gated on the `BACKLOG_COMPLIANCE_CI_ENABLED` repo variable (off by
 default until ops#104's `studiob-fleet-bot` `contents:read` grant on `studio-b-ai/brain` lands)
 — `workflow_dispatch` always runs regardless (issue #153 item 4).
+
+### `shipped-ledger` (ops-pipeline#162)
+
+Weekly safety net for `studio-b-ai/brain`'s `SHIPPED.md` — a running, append-only record of
+what customers and staff can see that shipped (Kevin, via the GC: "a running record of
+what's been accomplished the CMO can choose to feature as content"). `SHIPPED.md` is fed
+same-turn by every lane's `/wrap` step; this worker catches merged PRs that wraps miss by
+scanning merged-PR history directly.
+
+**What it does**, per repo listed in `scripts/shipped-ledger-repos.yaml`'s `repos:`:
+1. Reads `SHIPPED.md` fresh from `studio-b-ai/brain`'s `main` (never a cached copy) and
+   derives that repo's **watermark** — `max(watermark.seed_cutoff, newest date already
+   ledgered for that repo) − 7 days` (the overlap is intentional and harmless; dedup drops
+   anything already keyed).
+2. `gh pr list --state merged --search "merged:>=<watermark>"`, then per PR not already in
+   the ledger (dedup checked BEFORE classifying — never spend a model call on a PR about
+   to be discarded): classify **internal** via a fixed exclusion list (`chore:`/`ci:`/
+   `test:`/`build:` prefixes, `[machinery]`, dependabot/renovate/release-please/squasher
+   authors, diffs touching only `.github/`/`__tests__/` paths — no model call for any of
+   these), else an explicit `human-visible`/`internal` PR label, else the Sonnet classifier
+   (`claude-sonnet-5`, one call per PR, ≤2 retries with jitter) — a malformed/erroring model
+   response is `internal` + a counted `classifier_malformed`, **never a crash, never a
+   guessed line**.
+3. Plans + lints every kept entry (`- YYYY-MM-DD · **AUDIENCE** · surface · sentence ·
+   \`repo#PR\``, append-only, newest at the bottom of its month section) — a lint failure is
+   FATAL in both dry-run and apply; this worker never proposes a grammar-invalid line.
+4. **Apply** (the default when `--dry-run` is omitted): creates or updates
+   `shipped-ledger/<YYYY-Www>` on `studio-b-ai/brain` (Git Data ref + Contents API PUT) and
+   opens — or, if that week's PR is still open, comments on — its PR. **Never merges (#97)**:
+   the PR is reviewed and merged by a human (CoS/Kevin), always.
+
+**Token dependency**: as of this writing the `studiob-fleet-bot` fleet App carries only
+`issues:write` + `metadata:read`. This worker additionally needs `pull_requests:read`
+fleet-wide (to list merged PRs on all 8 configured repos) and `contents:write` +
+`pull_requests:write` on `studio-b-ai/brain` specifically (to branch/write/PR the ledger) —
+tracked as ops-pipeline#104 / #135, Kevin-gated. Per-repo PR-list failures are NOT fatal
+(logged as `skipped(read-error: HTTP <status>)`, the run continues to the next repo); the
+initial `SHIPPED.md` read is the one fatal dependency — without `contents:read` on brain,
+every run (dry-run included) fails loud at that first read. The **Monday 09:00 UTC
+schedule** is gated on the `SHIPPED_LEDGER_CI_ENABLED` repo variable (off by default until
+the grants above land, mirroring `backlog-compliance`'s identical gate) —
+`workflow_dispatch` always runs regardless, so a human can probe exactly which leg still
+403s at any time, including once a partial grant lands.
+
+**Plant recipe** (Rules #464/#471 — verify multiple verdicts before trusting a run; this
+worker's classifier needs `ANTHROPIC_API_KEY` for a genuine `visible` verdict, so a
+key-less local run demonstrates the `internal` and `unclassified`/dedup paths for real and
+reports `classifier: skipped` rather than fabricating a `visible` line):
+
+```bash
+cd scripts
+# real reads across every configured repo, real watermark, classifier real-or-skipped
+# depending on whether ANTHROPIC_API_KEY is already in your environment (never searched for)
+npx tsx shipped-ledger-worker.ts --dry-run
+
+# known-bad control: a PR whose title matches the fixed exclusion list (e.g. a real
+# `ci:`-prefixed merge) must classify internal/exclusion regardless of classifier mode —
+# --since widens the window past the real watermark to manufacture the case locally
+npx tsx shipped-ledger-worker.ts --dry-run --since 2026-08-15T00:00:00Z
+
+# known-already-ledgered control: a PR already present in SHIPPED.md must be skipped as a
+# dedup, never re-proposed — visible in the run's "skipped(dedup)" count for its repo
+```
+
+`--since <ISO>` overrides every repo's computed watermark — **dry-run only** (refused
+together with a live apply run); it exists to manufacture a control case locally even when
+the real watermark has already swept everything genuinely new.
 
 ## Why this exists
 
