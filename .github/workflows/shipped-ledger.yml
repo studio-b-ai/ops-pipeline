@@ -78,7 +78,11 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || vars.SHIPPED_LEDGER_CI_ENABLED == 'true'
     name: "SHIPPED.md weekly PR-derived backfill (fleet App token)"
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 30, not 20 (manager pass, ops-pipeline#164): the FIRST live apply classifies the whole
+    # post-seed backlog (~130 unclassified PRs on the 8/18 dry-run, one Sonnet call each,
+    # sequential) on top of the 8-repo reads -- a 5-10 min run; Rule #356 wants >= 3x the
+    # estimate. Steady-state weekly runs are far under either number.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

@@ -427,9 +427,20 @@ async function applyToLedgerRepo(config: LedgerConfig, parsedLedger: ParsedLedge
   // just created (byte-identical to main the instant a branch is cut, but a DIFFERENT ref
   // going forward) or already existed — this is the PUT's own concurrency token, never
   // reused from the earlier `main`-scoped read.
-  const { blobSha: currentBlobSha } = readLedgerContents(repo, path, branch);
-  putFileContents(repo, path, branch, rendered, currentBlobSha, `shipped-ledger: weekly PR-derived backfill ${week}`);
-  console.log(`[shipped-ledger] wrote ${path} on ${branch}.`);
+  const { text: currentText, blobSha: currentBlobSha } = readLedgerContents(repo, path, branch);
+  // codex review (2026-08-18, ops-pipeline#164 manager pass, P2): a same-week re-run whose
+  // full recompute renders BYTE-IDENTICAL content to what the branch already holds must not
+  // PUT again — an unchanged-content Contents API update is at best a pointless empty commit
+  // and at worst a 422 that fails the run BEFORE the comment/create step below (the
+  // "idempotent same-week re-run" promise in this function's header would be broken by its
+  // own write). Compare against the branch's CURRENT text (read fresh above), skip the write
+  // when equal, and still fall through to the PR comment/create leg so the receipt lands.
+  if (currentText === rendered) {
+    console.log(`[shipped-ledger] ${path} on ${branch} is already byte-identical to this run's render — skipping the write (idempotent re-run).`);
+  } else {
+    putFileContents(repo, path, branch, rendered, currentBlobSha, `shipped-ledger: weekly PR-derived backfill ${week}`);
+    console.log(`[shipped-ledger] wrote ${path} on ${branch}.`);
+  }
 
   const existingPr = findOpenPrForBranch(repo, branch);
   if (existingPr) {
