@@ -496,9 +496,9 @@ describe("computeWatermark", () => {
     const got = computeWatermark("2026-08-18T05:45:00Z", null, 7);
     expect(got).toBe(new Date(Date.parse("2026-08-18T05:45:00Z") - 7 * 86400000).toISOString());
   });
-  it("uses the newest ledgered date (end of day) minus overlap when it is LATER than seed_cutoff", () => {
+  it("uses the newest ledgered date (START of day) minus overlap when it is LATER than seed_cutoff", () => {
     const got = computeWatermark("2026-07-01T00:00:00Z", "2026-08-10", 7);
-    expect(got).toBe(new Date(Date.parse("2026-08-10T23:59:59Z") - 7 * 86400000).toISOString());
+    expect(got).toBe(new Date(Date.parse("2026-08-10T00:00:00Z") - 7 * 86400000).toISOString());
   });
   it("seed_cutoff wins when it is LATER than the newest ledgered date (e.g. a repo just added to config)", () => {
     const got = computeWatermark("2026-08-18T05:45:00Z", "2026-07-01", 7);
@@ -507,6 +507,17 @@ describe("computeWatermark", () => {
   it("defaults the overlap to WATERMARK_OVERLAP_DAYS when omitted", () => {
     const got = computeWatermark("2026-08-18T05:45:00Z", null);
     expect(got).toBe(new Date(Date.parse("2026-08-18T05:45:00Z") - WATERMARK_OVERLAP_DAYS * 86400000).toISOString());
+  });
+  // codex review (2026-08-18, ops-pipeline#162 PR pass 4, P2): proves the actual bug this
+  // fixes (not just the anchor time-of-day) — a PR merged EARLY on the oldest nominal
+  // overlap day must land >= the computed watermark (still inside the search window).
+  // Under the OLD end-of-day anchor, an early-morning PR on 2026-08-11 (newestLedgeredDate
+  // 2026-08-18 minus 7 days) fell just OUTSIDE a "2026-08-11T23:59:59Z" lower bound —
+  // permanently unreachable the moment a later run's watermark advanced past it.
+  it("keeps a PR merged early on the oldest nominal overlap day inside the search window", () => {
+    const watermark = computeWatermark("2026-01-01T00:00:00Z", "2026-08-18", 7);
+    const earlyPrOnBoundaryDay = "2026-08-11T08:00:00Z"; // 2026-08-18 minus 7 days, early morning
+    expect(Date.parse(earlyPrOnBoundaryDay)).toBeGreaterThanOrEqual(Date.parse(watermark));
   });
 });
 

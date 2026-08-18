@@ -217,16 +217,31 @@ export function newestDateForRepo(parsed: ParsedLedger, repoShortName: string): 
  * `max(seed_cutoff, newestLedgeredDate) - overlapDays`, per the issue's exact formula.
  * Re-scanning PRs merged inside the overlap window (default `WATERMARK_OVERLAP_DAYS`)
  * is intentional and harmless — `planAppends`'s dedup drops anything already keyed.
- * `newestLedgeredDate` is day-granularity (see `newestDateForRepo`); treated as the END
- * of that day (`T23:59:59Z`) before the overlap subtraction, so the watermark never
- * lands mid-day on a date that already has ledgered entries.
+ *
+ * codex review (2026-08-18, ops-pipeline#162 PR pass 4, P2): `newestLedgeredDate` is
+ * day-granularity (see `newestDateForRepo`) and is anchored at the START of that day
+ * (`T00:00:00Z`), NOT its end, before the overlap subtraction. Anchoring at the end (the
+ * original design, reasoning "so the watermark never lands mid-day on a date that
+ * already has ledgered entries") left the OLDEST day of the nominal N-day overlap
+ * window with only its FINAL SECOND of real coverage: for newest ledgered date N, a
+ * lower search bound of `(N-7)T23:59:59Z` excludes all but the last second of day
+ * N-7, silently shrinking a "7-day" safety margin to ~6 full days. Since the watermark
+ * only ever advances (never regresses — `newestLedgeredDate` is a running max across
+ * ledgered entries), a PR that fell in that under-covered sliver and was never
+ * ledgered (a prior read error, a since-fixed cap-hit skip Rule #331, any transient
+ * miss) becomes PERMANENTLY unreachable the moment a later run's watermark advances
+ * far enough to exclude that calendar day entirely — there is no going back for it.
+ * Start-of-day anchoring gives the full nominal window real, whole-day coverage; the
+ * `max(seed_cutoff, ...)` comparison below still holds under this earlier anchor —
+ * shifting `newestMs` earlier only ever makes the final watermark earlier-or-equal,
+ * never later, which only WIDENS the search window (harmless, per the paragraph above).
  */
 export function computeWatermark(seedCutoffIso: string, newestLedgeredDate: string | null, overlapDays: number = WATERMARK_OVERLAP_DAYS): string {
   const seedMs = Date.parse(seedCutoffIso);
   if (Number.isNaN(seedMs)) throw new Error(`computeWatermark: invalid seed_cutoff "${seedCutoffIso}"`);
   let baseMs = seedMs;
   if (newestLedgeredDate !== null) {
-    const newestMs = Date.parse(`${newestLedgeredDate}T23:59:59Z`);
+    const newestMs = Date.parse(`${newestLedgeredDate}T00:00:00Z`);
     if (Number.isNaN(newestMs)) throw new Error(`computeWatermark: invalid newestLedgeredDate "${newestLedgeredDate}"`);
     if (newestMs > baseMs) baseMs = newestMs;
   }
