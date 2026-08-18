@@ -34,12 +34,20 @@ name: Shipped Ledger
 # 403s) regardless of the variable.
 
 on:
+  # codex review (2026-08-18, ops-pipeline#162 PR pass 3, P1): the Monday cron IS the
+  # recurring safety net the issue asks for ("the safety net that catches what wraps
+  # miss") -- so it applies (creates/updates the shipped-ledger/<week> PR) once the
+  # sweep job's SHIPPED_LEDGER_CI_ENABLED gate (below) lets it run at all. A schedule
+  # trigger that only ever printed a dry-run table would never produce the "first
+  # live-run brain PR URL" receipt the issue's own Contract section names as the
+  # deliverable -- that would require a human to remember to manually re-dispatch
+  # apply=true every single Monday forever, which is not what "recurring" means.
   schedule:
     - cron: "0 9 * * 1" # weekly, Monday 09:00 UTC (GH Actions cron is UTC-only -- Rule #94)
   workflow_dispatch:
     inputs:
       apply:
-        description: "Create/update the shipped-ledger/<YYYY-Www> branch + PR on studio-b-ai/brain. Default false = dry-run (real reads, zero writes)."
+        description: "Create/update the shipped-ledger/<YYYY-Www> branch + PR on studio-b-ai/brain. Default false = dry-run (real reads, zero writes). The Monday cron always applies (see the schedule: comment above) -- this input only controls MANUAL dispatch runs."
         required: false
         type: boolean
         default: false
@@ -106,15 +114,24 @@ jobs:
       # landing straight in shell source next to a live GH_TOKEN is an injection surface).
       #
       # codex review (2026-08-18, ops-pipeline#162 PR pass 2, P1): `apply` is boolean-typed,
-      # but that alone did NOT make the old direct `${{ cond && '' || '--dry-run' }}`
-      # substitution safe. GitHub Actions' `&&`/`||` return OPERANDS, not a re-coerced
-      # boolean (same semantics as JS): `cond && '' || X` returns `''` when cond is true
-      # (the `&&`'s own right operand) and THEN `'' || X` returns `X`, because `''` is
-      # falsy -- so the expression evaluated to `--dry-run` in EVERY case, apply=true
-      # included, silently defeating the entire apply path (an approved dispatch would
-      # have run forever in dry-run mode, never actually opening the brain PR). Fixed by
-      # making BOTH ternary branches non-empty, truthy-as-text strings ('true'/'false') and
-      # moving the real branch into bash, where `=`/`!=` do not share this pitfall.
+      # but that alone did NOT make a direct `${{ cond && '' || '--dry-run' }}` substitution
+      # safe. GitHub Actions' `&&`/`||` return OPERANDS, not a re-coerced boolean (same
+      # semantics as JS): `cond && '' || X` returns `''` when cond is true (the `&&`'s own
+      # right operand) and THEN `'' || X` returns `X`, because `''` is falsy -- so a naive
+      # version of this expression evaluates to `--dry-run` in EVERY case, apply=true
+      # included, silently defeating the entire apply path. Fixed by making BOTH ternary
+      # branches non-empty, truthy-as-text strings ('true'/'false') and moving the real
+      # branch into bash, where `=`/`!=` do not share this pitfall.
+      #
+      # codex review (2026-08-18, ops-pipeline#162 PR pass 3, P1): the pass-2 fix above still
+      # gated APPLY_MODE on `github.event_name == 'workflow_dispatch'`, which is FALSE on
+      # every `schedule` (cron) run by definition -- so the Monday cron was hard-wired to
+      # dry-run forever, regardless of the pass-2 fix. Widened to `event_name == 'schedule'
+      # || inputs.apply` (see the file-header `schedule:` comment for why the cron itself
+      # must apply). `inputs.apply` is safe to reference here even on non-dispatch triggers
+      # -- GitHub Actions context property access on an unpopulated context evaluates to
+      # `null`/falsy rather than erroring, and `||` short-circuits before evaluating it once
+      # `event_name == 'schedule'` is already true.
       - name: "Run shipped-ledger worker"
         id: run_worker
         working-directory: scripts
@@ -122,7 +139,7 @@ jobs:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SINCE_INPUT: ${{ inputs.since }}
-          APPLY_MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.apply) && 'true' || 'false' }}
+          APPLY_MODE: ${{ (github.event_name == 'schedule' || inputs.apply) && 'true' || 'false' }}
         run: |
           args=()
           if [ "$APPLY_MODE" != "true" ]; then args+=(--dry-run); fi
