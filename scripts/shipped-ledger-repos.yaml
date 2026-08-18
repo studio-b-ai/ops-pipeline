@@ -1,0 +1,53 @@
+# shipped-ledger-repos.yaml — ops-pipeline#162 (SHIPPED.md weekly PR-derived backfill,
+# CoS -> CTO 2026-08-18, Kevin's word via the GC: "a running record of what's been
+# accomplished the CMO can choose to feature as content"). Consumed by
+# scripts/shipped-ledger-worker.ts (read-only — this file is committed config, never
+# written by the worker itself).
+#
+# Deviation from the issue text (documented per the chip brief, Rules #4/#238): issue
+# #162 said `config/shipped-ledger-repos.yml`. This repo's OWN convention keeps every
+# yaml manifest FLAT under scripts/ with a .yaml extension (backlog-managers.yaml,
+# credentials.manifest.yaml, railway-projects.manifest.yaml) — no `config/` directory
+# exists anywhere in this repo. Following the repo's established convention instead of
+# the issue's literal path, per Rule #5 ("copy working patterns").
+#
+# ── Watermark PERSISTENCE (no DB, no committed watermark file) ──
+# The run reads SHIPPED.md fresh from origin/main every time (never a cached copy) and
+# dedups every candidate PR by `repo#PR`, so the "watermark" per repo is DERIVED, not
+# stored:
+#   watermark(repo) = max(watermark.seed_cutoff, newest ledgered date for repo)
+#                      minus WATERMARK_OVERLAP_DAYS (7, hardcoded in
+#                      shipped-ledger-lib.ts next to isoWeekLabel — a fixed policy
+#                      constant, not a per-repo yaml knob, mirroring
+#                      repo-hygiene-lib.ts's BOT_CHURN_LOOKBACK_DAYS convention).
+# Re-reading already-ledgered PRs inside the 7-day overlap window is harmless — dedup
+# drops them before anything is appended (Rule #412: no silent caps, the worker logs
+# read/kept/skipped(dedup)/skipped(internal)/skipped(read-error) per repo every run).
+# See shipped-ledger-lib.ts's `computeWatermark` for the exact function.
+#
+# `ledger:` — where the human-visible ledger lives and how this worker's own PRs to it
+# are branded. `watermark.seed_cutoff` — the GC seed's cutoff (brain SHIPPED.md's own
+# "Seed:" line, 2026-08-18T05:45Z); the very first run (no ledgered PRs yet for a given
+# repo) starts here. `repos:` — the human-visible surfaces named in ops-pipeline#162
+# (the CoS's list of seven plus `studiob`, which the GC seed itself read from — trade
+# portal/checkout surfaces live there; the CoS's list omitted it, kept here as CONFIG,
+# not policy, per the issue text verbatim).
+
+ledger:
+  repo: studio-b-ai/brain
+  path: SHIPPED.md
+  branch_prefix: shipped-ledger/          # PR branch = shipped-ledger/<YYYY-WW> (ISO week)
+  label: shipped-ledger
+
+watermark:
+  seed_cutoff: "2026-08-18T05:45:00Z"     # the GC seed's cutoff — first run per-repo starts here
+
+repos:                                     # human-visible surfaces (CoS list + studiob, per ops#162)
+  - studio-b-ai/asthetik-trade-theme
+  - studio-b-ai/bolt-wms
+  - studio-b-ai/asthetik-portal
+  - studio-b-ai/studiob-price-sync
+  - studio-b-ai/client-asthetik
+  - studio-b-ai/webhook-router
+  - studio-b-ai/amplify
+  - studio-b-ai/studiob
