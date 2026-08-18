@@ -393,6 +393,17 @@ export function parseClassifierResponse(text: string): ClassifierResponse | null
   // `sentence` would, so it gets the identical "table-breaking character" ban, not just the
   // backtick/newline checks that were here before.
   if (o.surface.includes("|") || o.surface.includes("`") || o.surface.includes("\n")) return null;
+  // codex review (2026-08-18, ops-pipeline#162 PR pass 2, P2): the file header's own "The
+  // ' · ' delimiter invariant" section (above) claims this is "enforced STRUCTURALLY" by
+  // lintLedgerLine splitting into 5 segments — true, but incomplete: main() treats ANY
+  // lintPlan error as FATAL FOR THE ENTIRE RUN (issue #162: "the run fails LOUD"), not a
+  // per-PR skip. A model echoing the literal delimiter back (entirely plausible — it is
+  // this house's own pervasive convention, and the classifier prompt shows it real ledger
+  // lines) would silently abort the whole weekly sweep across all 8 repos over one PR's
+  // text. Reject it HERE instead, at the same layer as the other forbidden characters, so
+  // it resolves to the ordinary, isolated `model_malformed` skip classifyPr already has —
+  // never a run-ending lint failure discovered many steps downstream.
+  if (sentence.includes(" · ") || o.surface.includes(" · ")) return null;
 
   return { visible: true, audience: o.audience as Audience, surface: o.surface.trim(), sentence };
 }

@@ -210,6 +210,15 @@ describe("parseClassifierResponse", () => {
   it("rejects a surface containing a literal |", () => {
     expect(parseClassifierResponse('{"visible": true, "audience": "STAFF", "surface": "PDP | checkout", "sentence": "y"}')).toBeNull();
   });
+  // codex review (2026-08-18, ops-pipeline#162 PR pass 2, P2): a model echoing the ledger's
+  // own " · " delimiter back would otherwise parse clean here and only fail much later, at
+  // lintPlan, which main() treats as FATAL FOR THE ENTIRE RUN — not an isolated per-PR skip.
+  it("rejects a sentence containing the literal ledger delimiter ' · '", () => {
+    expect(parseClassifierResponse('{"visible": true, "audience": "STAFF", "surface": "x", "sentence": "Fabric · Colorway now shown together."}')).toBeNull();
+  });
+  it("rejects a surface containing the literal ledger delimiter ' · '", () => {
+    expect(parseClassifierResponse('{"visible": true, "audience": "STAFF", "surface": "PDP · checkout", "sentence": "y"}')).toBeNull();
+  });
   it("rejects visible:true missing the required text fields", () => {
     expect(parseClassifierResponse('{"visible": true}')).toBeNull();
   });
@@ -247,6 +256,16 @@ describe("lintLedgerLine", () => {
   it("fails on a literal | in the sentence", () => {
     const errors = lintLedgerLine(formatLedgerLine(ledgerEntry({ sentence: "a | b" })));
     expect(errors.some((e) => e.includes("|"))).toBe(true);
+  });
+  // Proves the file header's "delimiter invariant" claim (structural, via segment count) —
+  // NOT a parallel includes(" · ") field check, which would be unreachable dead code: a
+  // segment obtained from `split(" · ")` can never itself contain the string it was split
+  // on. An entry that bypasses parseClassifierResponse's P2 guard (any hand-built
+  // LedgerEntry, per the header's own "regardless of provenance" backstop framing) still
+  // gets caught here, just via the segment-count branch instead of a named field error.
+  it("fails on a literal ' · ' inside surface — via wrong segment count, the structural backstop", () => {
+    const errors = lintLedgerLine(formatLedgerLine(ledgerEntry({ surface: "PDP · checkout" })));
+    expect(errors.some((e) => e.includes("expected 5") && e.includes("got 6"))).toBe(true);
   });
   // codex review (2026-08-18, ops-pipeline#162 PR pass 1, P3): mirrors the sentence-pipe case —
   // surface is a " · "-delimited table segment too.

@@ -103,10 +103,18 @@ jobs:
       # `since` is free-text (an operator-supplied ISO timestamp) -- routed through env:
       # and referenced quoted in the shell, never substituted directly into the run: block
       # (backlog-compliance.yml's codex-driven pattern: a dispatcher-controlled string
-      # landing straight in shell source next to a live GH_TOKEN is an injection surface;
-      # `apply` stays a direct ${{ }} substitution because it's boolean-typed -- GitHub
-      # Actions can only ever produce the literal string '--dry-run' or '' from that
-      # expression, never attacker-controlled text).
+      # landing straight in shell source next to a live GH_TOKEN is an injection surface).
+      #
+      # codex review (2026-08-18, ops-pipeline#162 PR pass 2, P1): `apply` is boolean-typed,
+      # but that alone did NOT make the old direct `${{ cond && '' || '--dry-run' }}`
+      # substitution safe. GitHub Actions' `&&`/`||` return OPERANDS, not a re-coerced
+      # boolean (same semantics as JS): `cond && '' || X` returns `''` when cond is true
+      # (the `&&`'s own right operand) and THEN `'' || X` returns `X`, because `''` is
+      # falsy -- so the expression evaluated to `--dry-run` in EVERY case, apply=true
+      # included, silently defeating the entire apply path (an approved dispatch would
+      # have run forever in dry-run mode, never actually opening the brain PR). Fixed by
+      # making BOTH ternary branches non-empty, truthy-as-text strings ('true'/'false') and
+      # moving the real branch into bash, where `=`/`!=` do not share this pitfall.
       - name: "Run shipped-ledger worker"
         id: run_worker
         working-directory: scripts
@@ -114,8 +122,10 @@ jobs:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SINCE_INPUT: ${{ inputs.since }}
+          APPLY_MODE: ${{ (github.event_name == 'workflow_dispatch' && inputs.apply) && 'true' || 'false' }}
         run: |
-          args=(${{ (github.event_name == 'workflow_dispatch' && inputs.apply) && '' || '--dry-run' }})
+          args=()
+          if [ "$APPLY_MODE" != "true" ]; then args+=(--dry-run); fi
           if [ -n "$SINCE_INPUT" ]; then args+=(--since "$SINCE_INPUT"); fi
           npx tsx shipped-ledger-worker.ts "${args[@]}"
 
