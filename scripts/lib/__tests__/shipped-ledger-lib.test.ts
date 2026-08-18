@@ -205,6 +205,11 @@ describe("parseClassifierResponse", () => {
   it("rejects a sentence containing a literal |", () => {
     expect(parseClassifierResponse('{"visible": true, "audience": "STAFF", "surface": "x", "sentence": "a | b"}')).toBeNull();
   });
+  // codex review (2026-08-18, ops-pipeline#162 PR pass 1, P3): surface renders into the same
+  // markdown tables sentence does — a literal | there is exactly as table-breaking.
+  it("rejects a surface containing a literal |", () => {
+    expect(parseClassifierResponse('{"visible": true, "audience": "STAFF", "surface": "PDP | checkout", "sentence": "y"}')).toBeNull();
+  });
   it("rejects visible:true missing the required text fields", () => {
     expect(parseClassifierResponse('{"visible": true}')).toBeNull();
   });
@@ -242,6 +247,12 @@ describe("lintLedgerLine", () => {
   it("fails on a literal | in the sentence", () => {
     const errors = lintLedgerLine(formatLedgerLine(ledgerEntry({ sentence: "a | b" })));
     expect(errors.some((e) => e.includes("|"))).toBe(true);
+  });
+  // codex review (2026-08-18, ops-pipeline#162 PR pass 1, P3): mirrors the sentence-pipe case —
+  // surface is a " · "-delimited table segment too.
+  it("fails on a literal | in the surface", () => {
+    const errors = lintLedgerLine(formatLedgerLine(ledgerEntry({ surface: "PDP | checkout" })));
+    expect(errors.some((e) => e.includes("surface") && e.includes("|"))).toBe(true);
   });
   it("fails on an audience outside TRADE/DTC/STAFF", () => {
     const errors = lintLedgerLine("- 2026-08-19 · **VIP** · x · y · `bolt-wms#1`");

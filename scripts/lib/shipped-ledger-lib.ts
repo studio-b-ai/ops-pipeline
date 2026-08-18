@@ -387,7 +387,12 @@ export function parseClassifierResponse(text: string): ClassifierResponse | null
   const sentence = o.sentence.trim();
   if (sentence.length === 0 || sentence.length > 200) return null;
   if (sentence.includes("|") || sentence.includes("`") || sentence.includes("\n")) return null;
-  if (o.surface.includes("`") || o.surface.includes("\n")) return null;
+  // codex review (2026-08-18, ops-pipeline#162 PR pass 1, P3): `surface` renders into the
+  // SAME markdown tables `sentence` does (renderDryRunTable, the brain PR body) — a `|` here
+  // ("PDP | checkout") corrupts the table into extra columns exactly like an unescaped `|` in
+  // `sentence` would, so it gets the identical "table-breaking character" ban, not just the
+  // backtick/newline checks that were here before.
+  if (o.surface.includes("|") || o.surface.includes("`") || o.surface.includes("\n")) return null;
 
   return { visible: true, audience: o.audience as Audience, surface: o.surface.trim(), sentence };
 }
@@ -493,6 +498,10 @@ export function lintLedgerLine(line: string): string[] {
   }
 
   if (surfaceSeg.length === 0) errors.push("surface must not be empty");
+  // codex review (2026-08-18, ops-pipeline#162 PR pass 1, P3): surface is a " · "-delimited
+  // TABLE segment exactly like sentence is — a literal | here breaks the same tables a | in
+  // sentence would, so it gets the identical ban (mirrors parseClassifierResponse's matching fix).
+  if (surfaceSeg.includes("|")) errors.push("surface must not contain a literal | (table-breaking character)");
   if (surfaceSeg.includes("`")) errors.push("surface must not contain a backtick");
 
   if (sentenceSeg.length === 0) errors.push("sentence must not be empty");

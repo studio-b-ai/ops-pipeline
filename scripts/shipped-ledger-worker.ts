@@ -102,8 +102,14 @@ const CLASSIFIER_MAX_TOKENS = 500;
 /** One classifier call is one PR's title+body+labels — nowhere near this cap in practice; bounded defensively regardless (Rule #88 cost discipline). */
 const CLASSIFY_MAX_RETRIES = 2;
 
-/** Safety bound, not a paging mechanism (Rule #331) — hitting it exactly is a loud per-repo warning, never a silent truncation. */
-const PR_LIST_LIMIT = 200;
+/**
+ * Safety bound, not a paging mechanism (Rule #331) — hitting it exactly makes `processRepo`
+ * SKIP the repo entirely for this run (see the codex-review comment there) rather than act on
+ * a page that isn't guaranteed complete. 500, not 200: this feature's own seed research found
+ * asthetik-trade-theme alone with 261 merged PRs in a comparable window, so 200 was already
+ * realistically too low for the busiest repo in the fleet (codex review, 2026-08-18 pass 1, P2).
+ */
+const PR_LIST_LIMIT = 500;
 
 /** ~500KB of base64 (~375KB raw text) — comfortably under any realistic ARG_MAX; SHIPPED.md is tens of KB today. If this is ever hit for real, switch putFileContents to `-f content=@<tmpfile>` (gh api reads a field from a file) rather than raising this further. */
 const MAX_INLINE_CONTENT_B64_BYTES = 500_000;
@@ -292,8 +298,26 @@ async function processRepo(
 
   stats.read = fetch.rows.length;
   stats.limitHit = fetch.hitLimit;
+
+  // codex review (2026-08-18, ops-pipeline#162 PR pass 1, P2): a capped page's rows are NOT
+  // guaranteed to be the window's newest N — `gh pr list --search`'s sort order is not a
+  // documented, load-bearing contract this worker can rely on. Proceeding to classify/append
+  // from a possibly-truncated, possibly-unordered page risks `newestDateForRepo` computing the
+  // NEXT run's watermark from whatever the truncated page happened to contain, silently
+  // skipping any PR outside that page FOREVER — falsifying this comment's own prior claim
+  // that a cap hit merely "delays" ledgering by a week. It does not, without this guard.
+  //
+  // Fail safe instead: a capped repo contributes ZERO appends and makes ZERO classifier calls
+  // this run (no cost spent classifying rows we can't trust the completeness of, Rule #88),
+  // and the watermark is left untouched so next run retries the SAME window — loudly, every
+  // run, until either volume drops below PR_LIST_LIMIT or a human raises it. This guarantees
+  // no PR is ever silently lost, only ever delayed with a visible ⚠️ signal (the stats table's
+  // `limitHit` column, already rendered per-repo by `renderStatsTable`/`renderDryRunTable`).
   if (fetch.hitLimit) {
-    console.warn(`[shipped-ledger] ${repo}: hit the ${PR_LIST_LIMIT}-PR fetch cap — this run's window for this repo may be truncated (Rule #331); the NEXT run's watermark still advances from the ledger's newest entry, so nothing is permanently lost, only possibly delayed a week.`);
+    console.warn(
+      `[shipped-ledger] ${repo}: hit the ${PR_LIST_LIMIT}-PR fetch cap — SKIPPING this repo entirely this run (0 classified, 0 appended). The page is not guaranteed complete or newest-first, so acting on it risks the next watermark silently skipping unswept PRs. Raise PR_LIST_LIMIT or investigate why this repo has >${PR_LIST_LIMIT} merged PRs since ${watermark}.`,
+    );
+    return { stats, visibleEntries: [] };
   }
 
   const visibleEntries: LedgerEntry[] = [];
