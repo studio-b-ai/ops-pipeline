@@ -101,13 +101,23 @@ export interface AnchorFacts {
 
 /**
  * Reduce up to three "last restart-class event" candidates to ONE anchor, fail-closed on any
- * ambiguity (design §1.2 step 2): unparsable timestamps, zero candidates, two terminal states
- * within 30 minutes of EACH OTHER (not of `now` — a close PAIR means the fleet's restart picture
- * has two near-simultaneous events and neither can be confidently treated as canonical; #322),
- * or a dangling PLAN on #280 (§ findDanglingPlan). On success, the anchor is the candidate with
- * the LATEST `completedAtIso` — ties are covered by the 30-minute-pair check above, since any two
- * candidates within 30 min of each other (including identical timestamps) already fail closed
- * before a "latest" pick is ever needed.
+ * ambiguity (design §1.2 step 2): unparsable timestamps, zero candidates, two INDEPENDENT
+ * machine sources (`client-asthetik-actions`, `studiob-api-railway`) reaching a terminal state
+ * within 30 minutes of EACH OTHER (not of `now` — a close pair between the two systems means
+ * the fleet's restart picture has two near-simultaneous DIFFERENT events and neither can be
+ * confidently treated as canonical; #322), or a dangling PLAN on #280 (§ findDanglingPlan).
+ *
+ * `manual-end-comment` is deliberately EXCLUDED from that pairwise check: it is a human's
+ * report ON one of the other two events, not a third independent restart target, and is
+ * expected to land within (often seconds of) the machine candidate it corroborates — the
+ * normal, unambiguous case where the #280 END line agrees with the Actions/Railway event it
+ * describes must not permanently fail-closed the scheduler (codex P2, 2026-08-19: the prior
+ * version compared every pair regardless of source, so agreement read as ambiguity).
+ *
+ * On success, the anchor is the candidate with the LATEST `completedAtIso` — ties between the
+ * two machine sources are covered by the 30-minute-pair check above; a `manual-end-comment` tie
+ * with a machine candidate is fine (they describe the same instant) and just picks whichever
+ * carries the marginally later stamp.
  */
 export function computeAnchor(facts: AnchorFacts): AnchorResult {
   if (Number.isNaN(Date.parse(facts.now))) {
@@ -135,8 +145,14 @@ export function computeAnchor(facts: AnchorFacts): AnchorResult {
   }
 
   const THIRTY_MIN_MS = 30 * 60 * 1000;
+  const MACHINE_SOURCES: AnchorSource[] = ["client-asthetik-actions", "studiob-api-railway"];
   for (let i = 0; i < parsed.length; i++) {
     for (let j = i + 1; j < parsed.length; j++) {
+      // Only the two independent machine sources can be genuinely ambiguous with each other —
+      // a `manual-end-comment` candidate is corroboration of one of them, never a third event.
+      if (!MACHINE_SOURCES.includes(parsed[i].c.source) || !MACHINE_SOURCES.includes(parsed[j].c.source)) {
+        continue;
+      }
       if (Math.abs(parsed[i].ms - parsed[j].ms) < THIRTY_MIN_MS) {
         return {
           ok: false,
@@ -541,13 +557,20 @@ export function parseEndComments(comments: RestartTrainComment[]): TrainLedgerEn
 }
 
 /**
- * A dangling PLAN: among all parsed grammar lines, the entry with the LATEST embedded ISO stamp
- * is a PLAN whose own stamped instant is already at-or-before `nowIso`, with nothing (END/START/
- * NOTE — anything non-PLAN) stamped at or after it. We cannot tell whether that PLAN fired, was
- * blocked, or slipped — fail closed rather than guess (#322: silence is not confirmation). This
- * deliberately does NOT try to correlate a PLAN to a specific ticket via free text (the real
+ * A dangling PLAN: ANY parsed PLAN line whose own embedded ISO stamp is already at-or-before
+ * `nowIso`, with nothing (END/START/NOTE — anything non-PLAN) stamped at or after THAT PLAN's
+ * own instant. We cannot tell whether that PLAN fired, was blocked, or slipped — fail closed
+ * rather than guess (#322: silence is not confirmation). Checks every overdue PLAN independently
+ * (oldest first) rather than only the single latest-embedded-stamp entry — a prior version did
+ * the latter and could miss a genuinely overdue PLAN hiding behind an unrelated FUTURE PLAN that
+ * happened to carry a later stamp (codex P2, 2026-08-19: live-reproduced against the real
+ * client-asthetik#280 fixture — a `client-asthetik#281` PLAN stamped 20:15Z was still invisible
+ * at `now=21:00Z` because a later, unrelated `studiob#558` PLAN stamped 22:30Z sorted first).
+ * This deliberately does NOT try to correlate a PLAN to a specific ticket via free text (the real
  * lines embed a repo#number in prose position, not a fixed field) — it is a conservative,
- * ticket-agnostic tripwire: "is the newest thing we know about an unconfirmed promise?"
+ * ticket-agnostic tripwire: "is there an unconfirmed promise whose slot has already passed?"
+ * Reports the OLDEST unconfirmed overdue PLAN when more than one qualifies, since that is the
+ * promise that has been dangling longest.
  */
 export function findDanglingPlan(comments: RestartTrainComment[], nowIso: string): { dangling: boolean; detail?: string } {
   const nowMs = Date.parse(nowIso);
@@ -557,12 +580,18 @@ export function findDanglingPlan(comments: RestartTrainComment[], nowIso: string
   const withMs = entries.map((e) => ({ e, ms: Date.parse(e.isoStamp) })).filter((x) => !Number.isNaN(x.ms));
   if (withMs.length === 0) return { dangling: false };
 
-  withMs.sort((a, b) => b.ms - a.ms);
-  const newest = withMs[0];
-  if (newest.e.kind !== "PLAN") return { dangling: false };
-  if (newest.ms > nowMs) return { dangling: false }; // slot hasn't arrived yet — not dangling
+  const overduePlans = withMs
+    .filter((x) => x.e.kind === "PLAN" && x.ms <= nowMs)
+    .sort((a, b) => a.ms - b.ms); // oldest overdue PLAN first
 
-  return { dangling: true, detail: `${newest.e.commentLogin}'s PLAN ${newest.e.isoStamp} · ${newest.e.detail}` };
+  for (const plan of overduePlans) {
+    const confirmed = withMs.some((x) => x.e.kind !== "PLAN" && x.ms >= plan.ms);
+    if (!confirmed) {
+      return { dangling: true, detail: `${plan.e.commentLogin}'s PLAN ${plan.e.isoStamp} · ${plan.e.detail}` };
+    }
+  }
+
+  return { dangling: false };
 }
 
 // ───────────────────────────── train:ready ticket-building support ─────────────────────────────

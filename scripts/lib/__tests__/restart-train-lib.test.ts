@@ -213,7 +213,7 @@ describe("computeAnchor", () => {
     expect(r).toEqual({ ok: true, anchorIso: "2026-08-19T11:00:00Z", source: "studiob-api-railway", detail: "b" });
   });
 
-  it("fails closed when two candidates are within 30 min of each other", () => {
+  it("fails closed when the two MACHINE sources are within 30 min of each other", () => {
     const r = computeAnchor({
       now: "2026-08-19T12:00:00Z",
       danglingPlan: false,
@@ -224,6 +224,45 @@ describe("computeAnchor", () => {
     });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toMatch(/within 30 min/);
+  });
+
+  it("does NOT fail closed when manual-end-comment corroborates a machine source at the SAME instant (codex P2, 2026-08-19)", () => {
+    // Real recorded values: client-asthetik acuops run 32236101007's job completed_at and the
+    // human #280 END line for the same Heritage publish are IDENTICAL (2026-08-19T09:17:50Z) —
+    // the prior version of computeAnchor treated this normal corroboration as ambiguity and
+    // could never produce an anchor on a night where the human calendar agrees with the machine.
+    const r = computeAnchor({
+      now: "2026-08-19T12:00:00Z",
+      danglingPlan: false,
+      candidates: [
+        { source: "client-asthetik-actions", completedAtIso: "2026-08-19T09:17:50Z", detail: "acuops run 32236101007" },
+        { source: "manual-end-comment", completedAtIso: "2026-08-19T09:17:50Z", detail: "Heritage publish for client-asthetik#276" },
+      ],
+    });
+    expect(r).toEqual({
+      ok: true,
+      anchorIso: "2026-08-19T09:17:50Z",
+      source: "client-asthetik-actions",
+      detail: "acuops run 32236101007",
+    });
+  });
+
+  it("still fails closed when manual-end-comment corroborates ONE machine source while the OTHER machine source is genuinely close (three-candidate case)", () => {
+    const r = computeAnchor({
+      now: "2026-08-19T12:00:00Z",
+      danglingPlan: false,
+      candidates: [
+        { source: "client-asthetik-actions", completedAtIso: "2026-08-19T09:17:50Z", detail: "a" },
+        { source: "manual-end-comment", completedAtIso: "2026-08-19T09:17:50Z", detail: "c" },
+        { source: "studiob-api-railway", completedAtIso: "2026-08-19T09:30:00Z", detail: "b" },
+      ],
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.reason).toMatch(/within 30 min/);
+      expect(r.reason).toMatch(/client-asthetik-actions/);
+      expect(r.reason).toMatch(/studiob-api-railway/);
+    }
   });
 
   it("fails closed on an unparsable candidate timestamp", () => {
@@ -454,17 +493,32 @@ describe("parseTrainLedger + parseEndComments (real client-asthetik#280 fixture)
 });
 
 describe("findDanglingPlan (real client-asthetik#280 fixture)", () => {
-  it("is NOT dangling before the newest PLAN's own stamped slot has arrived", () => {
-    // The latest-by-stamp entry across the real fixture is the 22:30Z `studiob#558` PLAN.
-    const r = findDanglingPlan(REAL_280_COMMENTS, "2026-08-19T21:00:00Z");
+  it("is NOT dangling before ANY PLAN's own stamped slot has arrived", () => {
+    // 20:00Z is before all four real PLAN stamps (earliest is the 20:15Z client-asthetik#281 one).
+    const r = findDanglingPlan(REAL_280_COMMENTS, "2026-08-19T20:00:00Z");
     expect(r.dangling).toBe(false);
   });
 
-  it("IS dangling once that PLAN's slot has passed with nothing newer confirming it", () => {
+  it("IS dangling once the EARLIEST overdue PLAN's slot has passed with nothing confirming it — even though a LATER, unrelated PLAN carries a higher stamp (codex P2, 2026-08-19)", () => {
+    // The real fixture's client-asthetik#281 PLAN is stamped 20:15Z with nothing (END/START/
+    // NOTE) at or after it in the fixture. A prior version of findDanglingPlan only inspected
+    // the single latest-EMBEDDED-STAMP entry across ALL kinds — at now=21:00Z that was the
+    // FUTURE 22:30Z `studiob#558` PLAN (not yet due), so it wrongly reported not-dangling and
+    // stayed blind to the genuinely overdue ca#281 promise the whole fixture already contains.
+    const r = findDanglingPlan(REAL_280_COMMENTS, "2026-08-19T21:00:00Z");
+    expect(r.dangling).toBe(true);
+    expect(r.detail).toMatch(/kbibelhausen/);
+    expect(r.detail).toMatch(/20:15/);
+    expect(r.detail).toMatch(/client-asthetik#281/);
+  });
+
+  it("reports the OLDEST unconfirmed overdue PLAN once several are overdue", () => {
+    // At 23:00Z all four real PLANs are overdue; ca#281 (20:15Z) has been dangling longest and
+    // is still reported first — NOT the 22:30Z studiob#558 PLAN a prior version pointed to.
     const r = findDanglingPlan(REAL_280_COMMENTS, "2026-08-19T23:00:00Z");
     expect(r.dangling).toBe(true);
     expect(r.detail).toMatch(/kbibelhausen/);
-    expect(r.detail).toMatch(/22:30/);
+    expect(r.detail).toMatch(/20:15/);
   });
 
   it("is not dangling with no ledger entries at all", () => {
