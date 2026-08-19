@@ -6,11 +6,14 @@ import {
   computeAnchor,
   computePlanSlots,
   findDanglingPlan,
+  hasTrainConsolidate,
   isBatchBlackoutUtc,
   isBusinessHoursBlockedET,
   orderQueue,
   parseEndComments,
+  parseTrainAfterTokens,
   parseTrainLedger,
+  parseTrainPin,
   planLines,
   repoClassFor,
   windowState,
@@ -466,5 +469,112 @@ describe("findDanglingPlan (real client-asthetik#280 fixture)", () => {
 
   it("is not dangling with no ledger entries at all", () => {
     expect(findDanglingPlan([], "2026-08-19T23:00:00Z")).toEqual({ dangling: false });
+  });
+});
+
+describe("parseTrainPin (synthetic — no real train:ready ticket has ever existed, see fn doc)", () => {
+  it("returns null for comments with no pin line", () => {
+    const c: RestartTrainComment[] = [
+      { id: 1, login: "kbibelhausen", createdAt: "2026-08-19T22:00:00Z", body: "looks good, merging soon" },
+    ];
+    expect(parseTrainPin(c)).toBeNull();
+  });
+
+  it("returns null for an empty comment list", () => {
+    expect(parseTrainPin([])).toBeNull();
+  });
+
+  it("parses a well-formed pin line", () => {
+    const c: RestartTrainComment[] = [
+      {
+        id: 1,
+        login: "train-bot",
+        createdAt: "2026-08-19T22:10:00Z",
+        body: "`TRAIN-PIN 2026-08-19T22:10:00Z · head=abc1234def5678abc1234def5678abc1234def5 · applied-by=kbibelhausen`",
+      },
+    ];
+    expect(parseTrainPin(c)).toEqual({
+      appliedAtIso: "2026-08-19T22:10:00Z",
+      pinnedHeadSha: "abc1234def5678abc1234def5678abc1234def5",
+      appliedBy: "kbibelhausen",
+    });
+  });
+
+  it("a short (abbreviated) sha still parses — length is not validated beyond hex-ness", () => {
+    const c: RestartTrainComment[] = [
+      { id: 1, login: "train-bot", createdAt: "2026-08-19T22:10:00Z", body: "`TRAIN-PIN 2026-08-19T22:10:00Z · head=abc1234 · applied-by=kbibelhausen`" },
+    ];
+    expect(parseTrainPin(c)?.pinnedHeadSha).toBe("abc1234");
+  });
+
+  it("the LATEST pin wins when a PR was re-pinned after a re-label", () => {
+    const c: RestartTrainComment[] = [
+      { id: 1, login: "train-bot", createdAt: "2026-08-19T20:00:00Z", body: "`TRAIN-PIN 2026-08-19T20:00:00Z · head=1111111 · applied-by=kbibelhausen`" },
+      { id: 2, login: "system", createdAt: "2026-08-19T20:30:00Z", body: "head drift detected, label removed" },
+      { id: 3, login: "train-bot", createdAt: "2026-08-19T21:00:00Z", body: "`TRAIN-PIN 2026-08-19T21:00:00Z · head=2222222 · applied-by=kbibelhausen`" },
+    ];
+    expect(parseTrainPin(c)).toEqual({
+      appliedAtIso: "2026-08-19T21:00:00Z",
+      pinnedHeadSha: "2222222",
+      appliedBy: "kbibelhausen",
+    });
+  });
+
+  it("a malformed pin (bad ISO, non-hex sha) does not match and falls through to null", () => {
+    const c: RestartTrainComment[] = [
+      { id: 1, login: "train-bot", createdAt: "2026-08-19T22:10:00Z", body: "`TRAIN-PIN not-a-date · head=zzzzzzz · applied-by=kbibelhausen`" },
+    ];
+    expect(parseTrainPin(c)).toBeNull();
+  });
+});
+
+describe("parseTrainAfterTokens (synthetic)", () => {
+  it("returns an empty array with no train:after tokens present", () => {
+    const c: RestartTrainComment[] = [{ id: 1, login: "k", createdAt: "2026-08-19T22:00:00Z", body: "no dependency here" }];
+    expect(parseTrainAfterTokens(c)).toEqual([]);
+  });
+
+  it("extracts a single token", () => {
+    const c: RestartTrainComment[] = [
+      { id: 1, login: "k", createdAt: "2026-08-19T22:00:00Z", body: "train:after studio-b-ai/client-asthetik#275" },
+    ];
+    expect(parseTrainAfterTokens(c)).toEqual(["studio-b-ai/client-asthetik#275"]);
+  });
+
+  it("extracts multiple distinct tokens across separate comments, deduplicated", () => {
+    const c: RestartTrainComment[] = [
+      { id: 1, login: "k", createdAt: "2026-08-19T22:00:00Z", body: "train:after studio-b-ai/client-asthetik#275" },
+      { id: 2, login: "k", createdAt: "2026-08-19T22:05:00Z", body: "also: train:after studio-b-ai/studiob#558 please" },
+      { id: 3, login: "k", createdAt: "2026-08-19T22:06:00Z", body: "train:after studio-b-ai/client-asthetik#275 (again, same one)" },
+    ];
+    expect(parseTrainAfterTokens(c).sort()).toEqual(
+      ["studio-b-ai/client-asthetik#275", "studio-b-ai/studiob#558"].sort(),
+    );
+  });
+});
+
+describe("hasTrainConsolidate (synthetic)", () => {
+  it("is false with no consolidate token present", () => {
+    const c: RestartTrainComment[] = [{ id: 1, login: "k", createdAt: "2026-08-19T22:00:00Z", body: "just a normal comment" }];
+    expect(hasTrainConsolidate(c)).toBe(false);
+  });
+
+  it("is true when any comment carries the literal token", () => {
+    const c: RestartTrainComment[] = [
+      { id: 1, login: "k", createdAt: "2026-08-19T22:00:00Z", body: "unrelated" },
+      { id: 2, login: "k", createdAt: "2026-08-19T22:05:00Z", body: "train:consolidate — ride ahead of #275" },
+    ];
+    expect(hasTrainConsolidate(c)).toBe(true);
+  });
+
+  it("does not false-positive on a similarly-worded but different token", () => {
+    const c: RestartTrainComment[] = [{ id: 1, login: "k", createdAt: "2026-08-19T22:00:00Z", body: "train:consolidated-report is unrelated text" }];
+    // \b after "consolidate" means "consolidated..." (no boundary between "e" and "d") does NOT match —
+    // this asserts that word-boundary behavior explicitly rather than leaving it implicit.
+    expect(hasTrainConsolidate(c)).toBe(false);
+  });
+
+  it("is false for an empty comment list", () => {
+    expect(hasTrainConsolidate([])).toBe(false);
   });
 });

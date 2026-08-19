@@ -564,3 +564,65 @@ export function findDanglingPlan(comments: RestartTrainComment[], nowIso: string
 
   return { dangling: true, detail: `${newest.e.commentLogin}'s PLAN ${newest.e.isoStamp} · ${newest.e.detail}` };
 }
+
+// ───────────────────────────── train:ready ticket-building support ─────────────────────────────
+
+export interface TrainPinInfo {
+  appliedAtIso: string;
+  pinnedHeadSha: string;
+  appliedBy: string;
+}
+
+const TRAIN_PIN_RE =
+  /`TRAIN-PIN\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z)\s*·\s*head=([0-9a-f]{7,40})\s*·\s*applied-by=([^`]+?)\s*`/;
+
+/**
+ * Parse the `train:ready` PIN comment a PR receives at label-apply time (design §1.1: "The train
+ * records head sha + applied-by + applied-at in a PR comment at label time — the head is pinned
+ * there"). Grammar mirrors the #280 ledger style for consistency:
+ * `` `TRAIN-PIN <ISO> · head=<sha> · applied-by=<login>` ``
+ *
+ * ⚠️ UNVERIFIED-LIVE (see ops-pipeline#172 rung-0 PR body): no `train:ready` ticket has ever
+ * existed on any repo, and the label-apply mechanism that is supposed to POST this comment is a
+ * SEPARATE, not-yet-built piece of work (design §4 "Day 1", CTO-owned) — so unlike
+ * `parseTrainLedger`'s #280 grammar (mirrored from real recorded lines), this grammar is a
+ * PROPOSED CONVENTION invented here because rung 0's `Ticket`-building needs *something*
+ * parseable. Whoever builds the label-apply step must emit exactly this format, or this parser
+ * (and its synthetic-fixture test, since no real example exists to record) needs updating to
+ * match whatever they actually emit instead — flag this explicitly at that build's kickoff
+ * (#464: this parser's first REAL input is part of its ship, not a footnote already covered by
+ * rung 0's).
+ *
+ * Returns null (never throws) when no pin comment is found — the worker excludes that PR from
+ * this tick's queue rather than fabricating a Ticket, matching the design's fail-closed posture;
+ * a label with no pin posted yet is a normal race (the label-apply step hasn't finished), not a
+ * fault. When multiple pin comments exist (a re-label after a head-drift invalidation posts a
+ * NEW one — design §1.1), the LATEST one wins; comments must already be in chronological order
+ * (same input contract as `parseTrainLedger`).
+ */
+export function parseTrainPin(comments: RestartTrainComment[]): TrainPinInfo | null {
+  let found: TrainPinInfo | null = null;
+  for (const c of comments) {
+    const m = c.body.match(TRAIN_PIN_RE);
+    if (m) found = { appliedAtIso: m[1], pinnedHeadSha: m[2], appliedBy: m[3].trim() };
+  }
+  return found;
+}
+
+const TRAIN_AFTER_RE = /train:after\s+([\w.-]+\/[\w.-]+#\d+)/g;
+
+/** Every `train:after <org/repo>#<n>` token across all comments on a PR (design §1.1: "a comment
+ * token", not tied to the pin comment specifically). Deduplicated; order not meaningful —
+ * `orderQueue` treats `afterTokens` as an unordered dependency set. */
+export function parseTrainAfterTokens(comments: RestartTrainComment[]): string[] {
+  const tokens = new Set<string>();
+  for (const c of comments) {
+    for (const m of c.body.matchAll(TRAIN_AFTER_RE)) tokens.add(m[1]);
+  }
+  return [...tokens];
+}
+
+/** Whether any comment on the PR carries the literal `train:consolidate` token (design §1.1). */
+export function hasTrainConsolidate(comments: RestartTrainComment[]): boolean {
+  return comments.some((c) => /train:consolidate\b/.test(c.body));
+}
