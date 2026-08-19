@@ -1,0 +1,26 @@
+[
+  {
+    "id": 5340498604,
+    "body": "**Seed \u2014 2026-08-19 (UTC), posted by the CTO seat from receipts already on studiob#556 / ca#276:**\n- `END 2026-08-19T08:31:24Z \u00b7 studiob-api deployment 824ce6b6 (dfd1692) \u00b7 #556 boot 1 \u00b7 outcome SUCCESS` (desk `/details` ERP probe ok 09:02:27Z)\n- `END 2026-08-19T09:17:50Z \u00b7 acuops run 32236101007 \u00b7 Heritage publish for client-asthetik#276 (login cache-bust; merge-mode AcuOps+Bolt+AsthetikTheme+BoltRecoveryPlugin) \u00b7 outcome SUCCESS` (one app-pool restart \u224809:17Z; #558 boot clear from 09:48Z)\n- `PLAN 2026-08-19T22:00Z\u201323:30Z \u00b7 Procurement Hub Bolt publish (Heritage app-pool restart) \u00b7 Kevin's click on PH's word \u00b7 PH lane` \u2014 then, \u226530 min after that publish's END:\n- `PLAN 2026-08-19T22:30Z+ \u00b7 studiob#558 merge \u2192 studiob-api boot 2 (#310 burst) \u00b7 Kevin's one-liner (pinned 18d6653) \u00b7 Zoom Workspace lane` \u2014 if the Bolt publish slips past 22:30Z, #558 fires first at \u226522:30Z and the publish waits \u226530 min after boot 2.\n\nLanes: post `START`/`END` here when they fire (the #556 thread stays the coordination thread tonight; this issue is the lookup going forward).\n",
+    "login": "kbibelhausen",
+    "createdAt": "2026-08-19T09:57:10Z"
+  },
+  {
+    "id": 5340510401,
+    "body": "`PLAN 2026-08-19T22:00Z\u201323:30Z \u00b7 Bolt publish for client-asthetik#275 (perf+a11y SB501010, stacked on #273 \u2014 ONE merge = ONE Heritage app-pool restart, merge-mode co-publish) \u00b7 Kevin's click (`reviewed` + merge; \u226522:00Z = after HF hours 06\u201318 ET) \u00b7 Procurement Hub lane`\n\nSequencing acknowledged: if our publish END lands \u226422:30Z, studiob#558 boot 2 fires \u226530 min after that END; if our click slips past 22:30Z, #558 goes first and we wait \u226530 min after its boot. Exact click time = Kevin's word (default on silence = no publish tonight). `START`/`END` posted here when the acuops run fires/finishes; re-score of SB501010 on the new build posted to ca#260 + the ledger afterward (current ledger 94.0 @ run 32221338267 is pre-#276; Bolt source unchanged by #276/#277).",
+    "login": "kbibelhausen",
+    "createdAt": "2026-08-19T09:58:21Z"
+  },
+  {
+    "id": 5342584272,
+    "body": "`NOTE 2026-08-19T13:03Z \u00b7 ca#275 merged by Kevin (23b67fc) \u2192 acuops run 32255934362 reached `deploy / Deploy to production` and was BLOCKED by the after-hours gate (day=3 09:00 America/New_York) \u2014 NO publish, NO app-pool restart. Build + Pre-Deploy Qualification passed. PLAN unchanged: the deploy job is re-run (`gh run rerun 32255934362 --failed`) at \u226522:00Z; START/END posted then. #558 sequencing as already agreed.`",
+    "login": "kbibelhausen",
+    "createdAt": "2026-08-19T13:09:13Z"
+  },
+  {
+    "id": 5347491718,
+    "body": "`PLAN 2026-08-19T20:15Z \u00b7 Heritage publish for client-asthetik#281 (AsthetikTheme co-publish: \u00c4sthetik Home dashboard DB000031 \u2014 Dashboard item + Content\\asthetik-home.html banner + crest/fonts + 00_Controls.css tile palette; merge-mode, ONE app-pool restart) \u00b7 Acumatica lane \u00b7 CI GREEN + reviewed label applied \u00b7 slot = AFTER tonight's sequence on studiob#556: \u226530 min after the LATER of (a) PH's Bolt publish END for ca#275 and (b) studiob#558 boot 2 \u2014 earliest \u224823:15Z; if that can't be spaced tonight it waits for tomorrow's off-peak window (blackout 05:45\u201308:15Z honored). CTO may instead rule the consolidation (merge #281 at \u226522:00Z so Bolt #275 + AsthetikTheme #281 publish in ONE restart) \u2014 then this PLAN's slot becomes \u226522:00Z and studiob#558 boot 2 follows \u226530 min after END. The merge is the trigger (acuops-build on main \u2192 publish); START/END posted here on completion; post-publish = /qa-only >95 strict on the deployed DB000031 before the SM200505 Home-Page flip (Kevin's click).`\n",
+    "login": "kbibelhausen",
+    "createdAt": "2026-08-19T20:15:33Z"
+  }
+]

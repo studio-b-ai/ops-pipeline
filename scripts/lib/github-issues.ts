@@ -132,6 +132,10 @@ export interface IssueComment {
   id: number;
   body: string;
   login: string;
+  /** ISO instant the comment was posted — additive for ops-pipeline#172 (restart-train rung 0),
+   * which needs chronological ordering across a comment thread. Existing callers destructuring
+   * `{id, body, login}` are unaffected (structural typing; the field is simply ignored). */
+  createdAt: string;
 }
 
 /**
@@ -141,7 +145,13 @@ export interface IssueComment {
  * Link headers so a long thread's later comments are never silently dropped (Rule #331).
  */
 export function listIssueComments(repo: string, issueNumber: number): IssueComment[] {
-  const out = gh(["api", `repos/${repo}/issues/${issueNumber}/comments`, "--paginate", "--jq", ".[] | {id, body, login: .user.login}"]);
+  const out = gh([
+    "api",
+    `repos/${repo}/issues/${issueNumber}/comments`,
+    "--paginate",
+    "--jq",
+    ".[] | {id, body, login: .user.login, createdAt: .created_at}",
+  ]);
   // `--paginate` concatenates one JSON value per page on its own line, not a single array.
   return out
     .split("\n")
