@@ -85,47 +85,14 @@ import {
   type Ticket,
   type RestartTrainComment,
 } from "./lib/restart-train-lib.js";
+import { parseArgs, parseTarget, CALENDAR_REPO, CALENDAR_ISSUE } from "./lib/restart-train-args.js";
 
-const CALENDAR_REPO = "studio-b-ai/client-asthetik";
-const CALENDAR_ISSUE = 280;
-const DEFAULT_TARGET = "studio-b-ai/ops-pipeline#172";
 const TICKET_REPOS = ["studio-b-ai/studiob", "studio-b-ai/client-asthetik"] as const;
 const CLIENT_ASTHETIK_WORKFLOW_ID = "262954027"; // "AcuOps (Heritage Fabrics)" — live-verified 2026-08-19
 const DEPLOY_JOB_NAME = "deploy / Deploy to production"; // NOT bare "deploy" — see file header
 const STUDIOB_PLATFORM_PROJECT_ID = "433dec0e-6963-4b66-bdd2-6049ba189b81";
 const STUDIOB_API_SERVICE_NAME = "studiob-api";
 const RAILWAY_ENV_NAME = "production";
-
-// ───────────────────────────── flags ─────────────────────────────
-
-interface Flags {
-  dryRun: boolean;
-  now: string;
-  target: string;
-  post: boolean;
-}
-
-function parseArgs(argv: string[]): Flags {
-  if (argv.includes("--fire")) {
-    throw new Error("rung 3 not built — this worker only ever runs --dry-run in rung 0 (ops-pipeline#172)");
-  }
-  const nowIdx = argv.indexOf("--now");
-  if (nowIdx !== -1 && !argv[nowIdx + 1]) throw new Error("--now requires an ISO timestamp");
-  const now = nowIdx !== -1 ? argv[nowIdx + 1] : new Date().toISOString();
-  if (Number.isNaN(Date.parse(now))) throw new Error(`--now is not a parsable ISO timestamp: ${now}`);
-  const targetIdx = argv.indexOf("--target");
-  if (targetIdx !== -1 && !argv[targetIdx + 1]) throw new Error("--target requires <org/repo>#<n>");
-  const target = targetIdx !== -1 ? argv[targetIdx + 1] : DEFAULT_TARGET;
-  if (!/^[\w.-]+\/[\w.-]+#\d+$/.test(target)) throw new Error(`--target must look like org/repo#n, got: ${target}`);
-  const post = argv.includes("--post");
-  return { dryRun: true, now, target, post };
-}
-
-function parseTarget(target: string): { repo: string; number: number } {
-  const m = target.match(/^([\w.-]+\/[\w.-]+)#(\d+)$/);
-  if (!m) throw new Error(`unparsable --target: ${target}`);
-  return { repo: m[1], number: Number(m[2]) };
-}
 
 // ───────────────────────────── READ_DENIED classification ─────────────────────────────
 
