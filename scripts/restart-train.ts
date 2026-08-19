@@ -178,7 +178,12 @@ async function fetchClientAsthetikAnchorCandidate(): Promise<AnchorCandidate | n
 /**
  * Railway studiob-api anchor candidate. Absence of RAILWAY_API_TOKEN (unset locally, present in
  * CI via secrets per the workflow) is "no candidate from this source this run", never an error —
- * the design allows up to 3 candidates and computeAnchor is fail-closed-safe on fewer.
+ * a local/replay run deliberately omits Railway facts. A REAL fetch failure with the token set
+ * THROWS (fail-closed): silently degrading to null would narrow the fact set, and computeAnchor
+ * takes the LATEST of the candidates — fewer candidates can yield an anchor EARLIER than reality
+ * and open the 30-min window too soon. A red no-post cycle is the designed outcome during a
+ * Railway outage (the every-5-minutes cron retries next cycle). Codex pass-4 P2 "degrade to null" REJECTED
+ * on this basis, 2026-08-19.
  */
 async function fetchRailwayAnchorCandidate(): Promise<AnchorCandidate | null> {
   const token = process.env.RAILWAY_API_TOKEN;
