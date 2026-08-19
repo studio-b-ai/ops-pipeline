@@ -363,7 +363,9 @@ export function windowState(nowIso: string, repoClass: RepoClass, anchorIso: str
  * FIFO by `appliedAt`, then two adjustments, then head-drift invalidation:
  *   - `train:after <org/repo>#<n>` — a ticket must not sit ahead of a ticket it names, WHEN that
  *     named ticket is present in this same queue (an unresolvable reference is a no-op: nothing
- *     to reorder against, per brief).
+ *     to reorder against, per brief). A reference to a ticket present in this train but
+ *     invalidated by head drift is NOT absent — the dependent fails closed transitively
+ *     (codex P2, pass 3): scheduling it would publish B before A against the declared order.
  *   - `train:consolidate` — a client-asthetik ticket rides the SAME slot as whichever ticket sits
  *      immediately ahead of it after the above reordering (design §1.1 / Rule #22: one restart,
  *      two PRs). No ticket ahead (first in queue) → falls back to its own slot.
@@ -408,6 +410,12 @@ export function orderQueue(tickets: Ticket[]): QueueEntry[] {
   // cycle) is invalidated, never scheduled. Acyclic queues resolve completely — zero behavior
   // change for every already-tested case.
   const keySet = new Set(ordered.map((t) => key(t)));
+  // codex P2 (2026-08-19 pass 3): keys of tickets present in this train but invalidated by head
+  // drift. They participate in dependency resolution below but NEVER resolve, so a ticket whose
+  // train:after names one (directly or transitively) fails closed instead of scheduling ahead of
+  // its declared order. A dependency entirely absent from the train (already merged / never
+  // labeled) stays a no-op per the brief — that order is already satisfied or vacuous.
+  const driftedKeys = new Set(withValidity.filter((x) => !x.valid).map((x) => key(x.ticket)));
   const resolved = new Set<string>();
   let progress = true;
   while (progress) {
@@ -415,14 +423,30 @@ export function orderQueue(tickets: Ticket[]): QueueEntry[] {
     for (const t of ordered) {
       const k = key(t);
       if (resolved.has(k)) continue;
-      const inQueueDeps = t.afterTokens.filter((d) => keySet.has(d));
+      const inQueueDeps = t.afterTokens.filter((d) => keySet.has(d) || driftedKeys.has(d));
       if (inQueueDeps.every((d) => resolved.has(d))) {
         resolved.add(k);
         progress = true;
       }
     }
   }
-  const cycleInvalid = ordered.filter((t) => !resolved.has(key(t)));
+  // Partition the unresolved: blocked behind a head-drift invalidation (directly or through a
+  // chain) vs a genuine cycle — the reasons must state which (#412: prose matches the fact).
+  const driftBlockedVia = new Map<string, string>();
+  let dbProgress = true;
+  while (dbProgress) {
+    dbProgress = false;
+    for (const t of ordered) {
+      const k = key(t);
+      if (driftBlockedVia.has(k)) continue;
+      const via = t.afterTokens.find((d) => driftedKeys.has(d) || driftBlockedVia.has(d));
+      if (via !== undefined) {
+        driftBlockedVia.set(k, via);
+        dbProgress = true;
+      }
+    }
+  }
+  const cycleInvalid = ordered.filter((t) => !resolved.has(key(t)) && !driftBlockedVia.has(key(t)));
   const schedulable = ordered.filter((t) => resolved.has(key(t)));
 
   const entries: QueueEntry[] = [];
@@ -447,6 +471,19 @@ export function orderQueue(tickets: Ticket[]): QueueEntry[] {
         status: "invalidated",
         ticket: x.ticket,
         reason: `head drift: pinned ${x.ticket.pinnedHeadSha.slice(0, 12)} != current ${x.ticket.currentHeadSha.slice(0, 12)}`,
+      });
+    }
+  }
+
+  for (const t of ordered) {
+    const via = driftBlockedVia.get(key(t));
+    if (via !== undefined) {
+      entries.push({
+        status: "invalidated",
+        ticket: t,
+        reason: `train:after ${via} fails closed: that ticket is in this train but ${
+          driftedKeys.has(via) ? "invalidated by head drift" : "itself blocked behind a head-drift invalidation"
+        } — never scheduling ahead of a declared order (codex P2, 2026-08-19)`,
       });
     }
   }
@@ -636,7 +673,7 @@ export interface TrainPinInfo {
 }
 
 const TRAIN_PIN_RE =
-  /`TRAIN-PIN\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z)\s*·\s*head=([0-9a-f]{7,40})\s*·\s*applied-by=([^`]+?)\s*`/;
+  /`TRAIN-PIN\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z)\s*·\s*head=([0-9a-f]{40})\s*·\s*applied-by=([^`]+?)\s*`/;
 
 /**
  * Parse the `train:ready` PIN comment a PR receives at label-apply time (design §1.1: "The train
@@ -660,7 +697,11 @@ const TRAIN_PIN_RE =
  * a label with no pin posted yet is a normal race (the label-apply step hasn't finished), not a
  * fault. When multiple pin comments exist (a re-label after a head-drift invalidation posts a
  * NEW one — design §1.1), the LATEST one wins; comments must already be in chronological order
- * (same input contract as `parseTrainLedger`).
+ * (same input contract as `parseTrainLedger`). A pin whose head is not a FULL 40-character
+ * sha is treated as no pin at all (codex P3, pass 3): `orderQueue` compares `pinnedHeadSha` to
+ * GitHub's full `headRefOid` with exact equality, so an abbreviated pin could never validate and
+ * would masquerade as permanent head drift — rejecting it at parse yields the truthful
+ * "no valid pin" exclusion instead.
  */
 export function parseTrainPin(comments: RestartTrainComment[]): TrainPinInfo | null {
   let found: TrainPinInfo | null = null;

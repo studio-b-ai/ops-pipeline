@@ -544,32 +544,32 @@ describe("parseTrainPin (synthetic — no real train:ready ticket has ever exist
         id: 1,
         login: "train-bot",
         createdAt: "2026-08-19T22:10:00Z",
-        body: "`TRAIN-PIN 2026-08-19T22:10:00Z · head=abc1234def5678abc1234def5678abc1234def5 · applied-by=kbibelhausen`",
+        body: "`TRAIN-PIN 2026-08-19T22:10:00Z · head=abc1234def5678abc1234def5678abc1234def56 · applied-by=kbibelhausen`",
       },
     ];
     expect(parseTrainPin(c)).toEqual({
       appliedAtIso: "2026-08-19T22:10:00Z",
-      pinnedHeadSha: "abc1234def5678abc1234def5678abc1234def5",
+      pinnedHeadSha: "abc1234def5678abc1234def5678abc1234def56",
       appliedBy: "kbibelhausen",
     });
   });
 
-  it("a short (abbreviated) sha still parses — length is not validated beyond hex-ness", () => {
+  it("a short (abbreviated) sha is REJECTED — orderQueue compares the full 40-char headRefOid, so a short pin could only ever masquerade as head drift (codex P3)", () => {
     const c: RestartTrainComment[] = [
       { id: 1, login: "train-bot", createdAt: "2026-08-19T22:10:00Z", body: "`TRAIN-PIN 2026-08-19T22:10:00Z · head=abc1234 · applied-by=kbibelhausen`" },
     ];
-    expect(parseTrainPin(c)?.pinnedHeadSha).toBe("abc1234");
+    expect(parseTrainPin(c)).toBeNull();
   });
 
   it("the LATEST pin wins when a PR was re-pinned after a re-label", () => {
     const c: RestartTrainComment[] = [
-      { id: 1, login: "train-bot", createdAt: "2026-08-19T20:00:00Z", body: "`TRAIN-PIN 2026-08-19T20:00:00Z · head=1111111 · applied-by=kbibelhausen`" },
+      { id: 1, login: "train-bot", createdAt: "2026-08-19T20:00:00Z", body: "`TRAIN-PIN 2026-08-19T20:00:00Z · head=1111111111111111111111111111111111111111 · applied-by=kbibelhausen`" },
       { id: 2, login: "system", createdAt: "2026-08-19T20:30:00Z", body: "head drift detected, label removed" },
-      { id: 3, login: "train-bot", createdAt: "2026-08-19T21:00:00Z", body: "`TRAIN-PIN 2026-08-19T21:00:00Z · head=2222222 · applied-by=kbibelhausen`" },
+      { id: 3, login: "train-bot", createdAt: "2026-08-19T21:00:00Z", body: "`TRAIN-PIN 2026-08-19T21:00:00Z · head=2222222222222222222222222222222222222222 · applied-by=kbibelhausen`" },
     ];
     expect(parseTrainPin(c)).toEqual({
       appliedAtIso: "2026-08-19T21:00:00Z",
-      pinnedHeadSha: "2222222",
+      pinnedHeadSha: "2222222222222222222222222222222222222222",
       appliedBy: "kbibelhausen",
     });
   });
@@ -675,5 +675,51 @@ describe("orderQueue — train:after cycles fail closed", () => {
     const queued = entries.filter((e) => e.status === "queued");
     expect(queued.map((e) => e.ticket.number)).toEqual([1, 2, 3]);
     expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(0);
+  });
+});
+
+describe("orderQueue — train:after deps on drift-invalidated tickets fail closed (codex P2 pass 3)", () => {
+  const DRIFTED = { pinnedHeadSha: "a".repeat(40), currentHeadSha: "b".repeat(40) };
+
+  it("a ticket depending on a drift-invalidated ticket is invalidated, never scheduled ahead of its declared order", () => {
+    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", ...DRIFTED });
+    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const entries = orderQueue([a, b]);
+    expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
+    const invalidated = entries.filter((e) => e.status === "invalidated");
+    expect(invalidated).toHaveLength(2);
+    const bEntry = invalidated.find((e) => e.ticket.number === 2);
+    expect(bEntry && "reason" in bEntry ? bEntry.reason : "").toMatch(/train:after .* fails closed/);
+    expect(bEntry && "reason" in bEntry ? bEntry.reason : "").toMatch(/invalidated by head drift/);
+  });
+
+  it("the block is transitive: C after B after drifted A invalidates all three, with the chained reason", () => {
+    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", ...DRIFTED });
+    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const entries = orderQueue([a, b, c]);
+    expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
+    expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(3);
+    const cEntry = entries.find((e) => e.status === "invalidated" && e.ticket.number === 3);
+    expect(cEntry && "reason" in cEntry ? cEntry.reason : "").toMatch(/itself blocked behind a head-drift invalidation/);
+  });
+
+  it("negative control (Rule #322): a dep entirely ABSENT from the train stays a no-op — the ticket schedules", () => {
+    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#999"] });
+    const entries = orderQueue([b]);
+    const queued = entries.filter((e) => e.status === "queued");
+    expect(queued).toHaveLength(1);
+    expect(queued[0].ticket.number).toBe(2);
+    expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(0);
+  });
+
+  it("an unrelated schedulable ticket still schedules while the drift-blocked pair is invalidated", () => {
+    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", ...DRIFTED });
+    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z" });
+    const entries = orderQueue([a, b, c]);
+    const queued = entries.filter((e) => e.status === "queued");
+    expect(queued.map((e) => e.ticket.number)).toEqual([3]);
+    expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(2);
   });
 });
