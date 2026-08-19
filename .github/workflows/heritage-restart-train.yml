@@ -1,0 +1,132 @@
+name: Heritage Restart Train
+
+# ops-pipeline#172, rung 0 (CTO seat, Kevin LOCKED option A -- merge authority --
+# 2026-08-19T20:45Z). Full design lives in scripts/restart-train.ts's and
+# scripts/lib/restart-train-lib.ts's header comments; this workflow only mints the fleet
+# App token (repo-hygiene.yml / backlog-staleness.yml's pattern, copied verbatim) and runs
+# the worker with it.
+#
+# Canon: brain vault library/architecture/2026-08-19-heritage-restart-train-design.md
+# (design v0) + library/decisions/2026-08-19-heritage-restart-train-merge-authority-label-gated.md
+# (Kevin LOCKED option A) + this tracker (ops-pipeline#172).
+#
+# RUNG 0 = DRY-RUN ONLY. This workflow computes a clearance anchor + window-law state + an
+# ordered train:ready ticket queue purely from live reads across studio-b-ai/studiob,
+# studio-b-ai/client-asthetik, and studiob-api's Railway deployments, and posts
+# `PLAN (dry-run)` lines on --target (default studio-b-ai/ops-pipeline#172). It fires
+# NOTHING, merges NOTHING, and labels NOTHING -- `--fire` (rung 3's live-merge mode) is not
+# built yet and the worker throws unconditionally if asked for it.
+#
+# HERITAGE_TRAIN_ENABLED (repo variable) does NOT exist yet as of this workflow's merge --
+# the job-level `if:` below means BOTH the scheduled AND the workflow_dispatch-triggered
+# runs are inert until the CTO deliberately creates it as `true`
+# (`gh variable set HERITAGE_TRAIN_ENABLED --repo studio-b-ai/ops-pipeline --body true`).
+# This is deliberate belt-and-suspenders: flipping the repo variable is a SEPARATE
+# deliberate step from merging this file or clicking "Run workflow".
+#
+# Fleet App token required for the same reason as backlog-staleness.yml / repo-hygiene.yml:
+# this worker reads across MULTIPLE org repos (studiob, client-asthetik, ops-pipeline
+# itself) plus Actions run/job data, which a repo-scoped ambient GITHUB_TOKEN structurally
+# cannot do. studiob-fleet-bot's pull_requests:write + contents:write + checks:read +
+# actions:write + workflows:write (granted 2026-08-19 ~21:52Z) plus its pre-existing
+# issues:write + metadata:read covers every read and write (issue/PR/comment/label reads,
+# Actions run+job reads, and posting PLAN/HELD comments -- always on --target, never on a
+# ticket's own PR, never on client-asthetik#280) this worker performs.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *" # every 5 minutes -- GH Actions cron is UTC-only (Rule #94); inert until HERITAGE_TRAIN_ENABLED=true
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Must stay true in rung 0 -- setting this to false is REFUSED by the worker (throws \"rung 3 not built\", the job goes red on purpose). Rung 3 is what will make this a real live-merge mode."
+        required: false
+        type: boolean
+        default: true
+      now:
+        description: "ISO 8601 timestamp overriding the clock (the #464/#471 plant ladder) -- omit for the real current time"
+        required: false
+        type: string
+        default: ""
+      target:
+        description: "org/repo#n where PLAN/HELD lines post -- omit for the default studio-b-ai/ops-pipeline#172. NEVER point this at client-asthetik#280 (that is a READ source, the human calendar)."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heritage-restart-train
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: "Heritage restart train -- rung 0 dry-run scheduler (fleet App token)"
+    runs-on: ubuntu-latest
+    # Job-level gate (brief requirement, verbatim) -- applies to BOTH triggers uniformly, not
+    # just the schedule: the repo variable does not exist yet, so this job is a no-op on
+    # every run (scheduled or dispatched) until the CTO creates it as "true".
+    if: vars.HERITAGE_TRAIN_ENABLED == 'true'
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: "Install deps"
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted unconditionally: every read this worker does (client-asthetik Actions runs +
+      # jobs, #280 comments, train:ready PR lists + their comments, the hold-label check on
+      # --target) needs real org-wide access the ambient GITHUB_TOKEN structurally cannot
+      # provide, and posting PLAN/HELD lines needs issues:write on --target's repo.
+      - name: "Mint fleet installation token"
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: "Fail loud if the fleet token did not mint"
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token -- check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
+          exit 1
+
+      # Untrusted workflow_dispatch string inputs (now/target) travel through env: (real
+      # OS-level env vars, never text-substituted into the run: script text) and are
+      # referenced quoted ("$NOW_INPUT") -- copied verbatim from backlog-staleness.yml's
+      # codex-reviewed fix (a dispatcher-supplied value containing `$(...)`, backticks, or
+      # `;` must never execute as shell syntax with the just-minted fleet App token live in
+      # GH_TOKEN). `dry_run` stays a direct ${{ }} substitution ONLY inside the FIRE_FLAG
+      # boolean expression below, never spliced into run: text -- GitHub Actions can only
+      # ever produce true/false from a boolean-typed input, so there is no attacker-
+      # controlled text flowing through that comparison.
+      - name: "Run restart-train worker"
+        id: run_worker
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
+          FIRE_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) && '--fire' || '' }}
+          NOW_INPUT: ${{ inputs.now }}
+          TARGET_INPUT: ${{ inputs.target }}
+        run: |
+          args=(--post)
+          if [ -n "$FIRE_FLAG" ]; then args+=("--fire"); fi
+          if [ -n "$NOW_INPUT" ]; then args+=(--now "$NOW_INPUT"); fi
+          if [ -n "$TARGET_INPUT" ]; then args+=(--target "$TARGET_INPUT"); fi
+          npx tsx restart-train.ts "${args[@]}"
+
+      # Rule #356: a timeout kill reports "cancelled" SILENTLY unless a SEPARATE if: always()
+      # step names the terminal status explicitly.
+      - name: "Report terminal status"
+        if: always()
+        run: |
+          echo "heritage-restart-train workflow terminal status: ${{ job.status }} (run_worker outcome: ${{ steps.run_worker.outcome }})"
