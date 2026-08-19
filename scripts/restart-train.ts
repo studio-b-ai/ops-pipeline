@@ -65,6 +65,7 @@
  * bare stack trace three layers removed from "which permission").
  */
 
+import { createHash } from "node:crypto";
 import { commentIssue, gh, listIssueComments, type IssueComment } from "./lib/github-issues.js";
 import {
   fetchProjectRefs,
@@ -72,9 +73,13 @@ import {
   latestSuccessfulDeployment,
 } from "./lib/railway-deployment-probes.js";
 import {
+  clampCandidatesToNow,
+  clampCommentsToNow,
+  clampTicketsToNow,
   computeAnchor,
   orderQueue,
   planLines,
+  planStateKey,
   parseEndComments,
   findDanglingPlan,
   parseTrainPin,
@@ -277,16 +282,53 @@ async function fetchTickets(): Promise<Ticket[]> {
 
 // ───────────────────────────── posting (gated behind --post) ─────────────────────────────
 
-async function postLines(target: { repo: string; number: number }, lines: string[], post: boolean): Promise<void> {
+const STATE_MARKER_RE = /<!-- restart-train:state=([0-9a-f]{12}) -->/;
+
+/**
+ * Post the cycle's PLAN lines as ONE comment, deduped on the scheduling-state fingerprint
+ * (`planStateKey` — see its doc for why body equality can't work: clear-now/chained slot
+ * instants churn every cycle by construction). The posted comment carries a hidden
+ * `<!-- restart-train:state=<sha256-12> -->` marker; if the LAST marker-bearing comment on the
+ * target has the same hash, the state hasn't transitioned and nothing is posted (#292 —
+ * post per state transition, never per cycle). Alternation (A → B → A) correctly reposts.
+ * `listIssueComments` paginates the full ascending comment list, so the last-marker scan is
+ * exact, not a window.
+ */
+async function postLines(
+  target: { repo: string; number: number },
+  lines: string[],
+  post: boolean,
+  stateKey: string,
+): Promise<void> {
   console.log(`[restart-train] ${lines.length} line(s) for ${target.repo}#${target.number}:`);
   for (const line of lines) console.log(`  ${line}`);
+  if (lines.length === 0) {
+    console.log("[restart-train] empty plan — nothing to post");
+    return;
+  }
+  const keyHash = createHash("sha256").update(stateKey).digest("hex").slice(0, 12);
+  console.log(`[restart-train] state ${keyHash} :: ${stateKey}`);
   if (!post) {
     console.log("[restart-train] --post not set — not posting (default; tests/manual runs never pass it)");
     return;
   }
-  for (const line of lines) {
-    commentIssue(target.repo, target.number, line);
+  let comments: IssueComment[];
+  try {
+    comments = listIssueComments(target.repo, target.number);
+  } catch (err) {
+    throw classifyReadError(err, "issues:read (target state-dedup check)");
   }
+  let lastPostedHash: string | null = null;
+  for (const c of comments) {
+    const m = STATE_MARKER_RE.exec(c.body);
+    if (m) lastPostedHash = m[1];
+  }
+  if (lastPostedHash === keyHash) {
+    console.log(`[restart-train] scheduling state unchanged since last post (${keyHash}) — not reposting (#292)`);
+    return;
+  }
+  commentIssue(target.repo, target.number, `${lines.join("\n")}\n\n<!-- restart-train:state=${keyHash} -->`);
+  console.log(`[restart-train] posted 1 comment (state ${keyHash})`);
 }
 
 async function postHeldIfNotDuped(
@@ -327,7 +369,14 @@ async function main(): Promise<void> {
     return;
   }
 
-  const calendarComments = await fetchCalendarComments();
+  const rawCalendarComments = await fetchCalendarComments();
+  // Replay clamp (see clampCommentsToNow's doc): no fact from after `now` may be parsed.
+  const calendarComments = clampCommentsToNow(rawCalendarComments, flags.now);
+  if (calendarComments.length !== rawCalendarComments.length) {
+    console.log(
+      `[restart-train] clamp: dropped ${rawCalendarComments.length - calendarComments.length} calendar comment(s) after now=${flags.now}`,
+    );
+  }
   const endEntries = parseEndComments(calendarComments);
   const dangling = findDanglingPlan(calendarComments, flags.now);
 
@@ -347,21 +396,35 @@ async function main(): Promise<void> {
     }
   }
 
+  // Replay clamp again at the candidate layer: a PAST comment can still carry a future-typo'd
+  // END stamp, and the Actions/Railway sources are clamped here too (a replay must not anchor
+  // on a deploy that completed after the replay instant).
+  const clampedCandidates = clampCandidatesToNow(candidates, flags.now);
+  if (clampedCandidates.length !== candidates.length) {
+    console.log(
+      `[restart-train] clamp: dropped ${candidates.length - clampedCandidates.length} anchor candidate(s) after now=${flags.now}`,
+    );
+  }
+
   const anchor = computeAnchor({
     now: flags.now,
-    candidates,
+    candidates: clampedCandidates,
     danglingPlan: dangling.dangling,
     danglingPlanDetail: dangling.detail,
   });
 
   if (!anchor.ok) {
     console.log(`[restart-train] anchor unavailable: ${anchor.reason}`);
-    await postLines(target, planLines([], anchor, flags.now), flags.post);
+    await postLines(target, planLines([], anchor, flags.now), flags.post, planStateKey([], anchor));
     return;
   }
   console.log(`[restart-train] anchor: ${anchor.anchorIso} (${anchor.source}: ${anchor.detail})`);
 
-  const tickets = await fetchTickets();
+  const rawTickets = await fetchTickets();
+  const tickets = clampTicketsToNow(rawTickets, flags.now);
+  if (tickets.length !== rawTickets.length) {
+    console.log(`[restart-train] clamp: dropped ${rawTickets.length - tickets.length} ticket(s) pinned after now=${flags.now}`);
+  }
   console.log(`[restart-train] ${tickets.length} train:ready ticket(s) with a valid pin comment`);
 
   const queue = orderQueue(tickets);
@@ -372,7 +435,7 @@ async function main(): Promise<void> {
   }
 
   const lines = planLines(queue, anchor, flags.now);
-  await postLines(target, lines, flags.post);
+  await postLines(target, lines, flags.post, planStateKey(queue, anchor));
 }
 
 main().catch((err) => {
