@@ -109,7 +109,9 @@ open/retitle/close ONE auto-reconciled issue per finding-holder — the open-iss
 dedup state (Rule #165) — rather than posting to a channel nobody reads (#60).
 `shipped-ledger` reconciles a different way: a branch + PR (never a direct commit, never
 auto-merged, #97) on the file it proposes appending to, keyed by ISO week so a re-run
-updates in place instead of duplicating.
+updates in place instead of duplicating. `heritage-restart-train` is the newest and, at
+its current rung, the simplest: it only posts `PLAN (dry-run)` comment lines to an issue
+thread — no label or merge state to reconcile until later rungs.
 
 ### `backlog-staleness` (ops-pipeline#136)
 
@@ -289,6 +291,21 @@ npx tsx shipped-ledger-worker.ts --dry-run --since 2026-08-15T00:00:00Z
 `--since <ISO>` overrides every repo's computed watermark — **dry-run only** (refused
 together with a live apply run); it exists to manufacture a control case locally even when
 the real watermark has already swept everything genuinely new.
+
+### `heritage-restart-train` (ops-pipeline#172)
+
+Rung 0 of a multi-rung build (Rule #279's second, label-gated exception; Kevin LOCKED
+option A 2026-08-19). A 5-minute cron computes the fleet's restart clearance anchor,
+the window law, and the FIFO `train:ready` queue across `studiob` + `client-asthetik`,
+then posts `PLAN (dry-run)` lines to `--target` (default `ops-pipeline#172`). This rung
+fires, merges, and labels **nothing** — `--fire` throws by design, and the job itself is
+gated `if: vars.HERITAGE_TRAIN_ENABLED == 'true'`, a repo variable that does not exist
+yet, so the cron is inert until someone deliberately sets it.
+
+Full scope, the rung 1–5 ladder, canon pointers, and the env/secret table live in
+[`docs/heritage-restart-train.md`](docs/heritage-restart-train.md).
+
+Local dry-run: `cd scripts && npx tsx restart-train.ts --dry-run --now <ISO>`.
 
 ## Why this exists
 
