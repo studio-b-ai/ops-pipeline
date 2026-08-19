@@ -3,6 +3,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  clampCandidatesToNow,
+  clampCommentsToNow,
+  clampTicketsToNow,
   computeAnchor,
   computePlanSlots,
   findDanglingPlan,
@@ -16,8 +19,10 @@ import {
   parseTrainPin,
   planLines,
   repoClassFor,
+  planStateKey,
   windowState,
   zonedWallClockToUtcMs,
+  type AnchorCandidate,
   type AnchorResult,
   type QueueEntry,
   type RestartTrainComment,
@@ -721,5 +726,146 @@ describe("orderQueue — train:after deps on drift-invalidated tickets fail clos
     const queued = entries.filter((e) => e.status === "queued");
     expect(queued.map((e) => e.ticket.number)).toEqual([3]);
     expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(2);
+  });
+});
+
+// ───────────────────────────── replay clamp (rung-0 acceptance fix, 2026-08-19) ─────────────────────────────
+describe("clampCommentsToNow / clampCandidatesToNow / clampTicketsToNow", () => {
+  it("drops the exact rung-0 acceptance failure: a future END candidate at a --now replay instant", () => {
+    // Replayed at --now 22:20:00Z, the anchor came back 23:19:39Z — ca#281's END, an event that
+    // had not happened yet at the replay instant. The clamp must drop it and keep ca#275's
+    // 22:12:14Z END (the correct anchor for that instant).
+    const candidates: AnchorCandidate[] = [
+      { source: "manual-end-comment", completedAtIso: "2026-08-19T23:19:39Z", detail: "ca#281 END (future)" },
+      { source: "manual-end-comment", completedAtIso: "2026-08-19T22:12:14Z", detail: "ca#275 END (past)" },
+    ];
+    const clamped = clampCandidatesToNow(candidates, "2026-08-19T22:20:00Z");
+    expect(clamped).toHaveLength(1);
+    expect(clamped[0].completedAtIso).toBe("2026-08-19T22:12:14Z");
+  });
+
+  it("keeps a candidate stamped exactly AT now (boundary is inclusive) and drops empty stamps", () => {
+    const candidates: AnchorCandidate[] = [
+      { source: "client-asthetik-actions", completedAtIso: "2026-08-19T22:20:00Z", detail: "at-boundary" },
+      { source: "client-asthetik-actions", completedAtIso: "", detail: "no stamp — cannot be ordered" },
+    ];
+    const clamped = clampCandidatesToNow(candidates, "2026-08-19T22:20:00Z");
+    expect(clamped).toHaveLength(1);
+    expect(clamped[0].detail).toBe("at-boundary");
+  });
+
+  it("clampCommentsToNow makes a future-created comment invisible to ledger parsing", () => {
+    const comments: RestartTrainComment[] = [
+      { id: 1, body: "`END 2026-08-19T22:12:14Z · past`", login: "a", createdAt: "2026-08-19T22:12:20Z" },
+      { id: 2, body: "`END 2026-08-19T23:19:39Z · future`", login: "a", createdAt: "2026-08-19T23:19:40Z" },
+    ];
+    const clamped = clampCommentsToNow(comments, "2026-08-19T22:20:00Z");
+    expect(clamped.map((c) => c.id)).toEqual([1]);
+    const ends = parseEndComments(clamped);
+    expect(ends).toHaveLength(1);
+    expect(ends[0].isoStamp).toBe("2026-08-19T22:12:14Z");
+  });
+
+  it("clampTicketsToNow drops a ticket whose pin was applied after the replay instant", () => {
+    const past = ticket({ number: 1, appliedAt: "2026-08-19T20:00:00Z" });
+    const future = ticket({ number: 2, appliedAt: "2026-08-19T23:00:00Z" });
+    expect(clampTicketsToNow([past, future], "2026-08-19T22:20:00Z")).toEqual([past]);
+  });
+});
+
+// ───────────────────────────── posting state fingerprint (#292 dedup) ─────────────────────────────
+describe("planStateKey", () => {
+  const ok: AnchorResult = { ok: true, anchorIso: "2026-08-19T22:12:14Z", source: "manual-end-comment", detail: "x" };
+
+  it("is IDENTICAL across cycles while rendered PLAN lines churn (the clear-now slot embeds nowIso)", () => {
+    // The incident shape: one clear ticket queued → the rendered line's `@ <slotIso>` is nowIso,
+    // different every cycle — but the scheduling STATE is unchanged, so the key must not move.
+    const q: QueueEntry[] = [{ status: "queued", ticket: ticket({ number: 558 }), slotGroup: 0 }];
+    const linesA = planLines(q, ok, "2026-08-19T23:00:00Z");
+    const linesB = planLines(q, ok, "2026-08-19T23:05:00Z");
+    expect(linesA).not.toEqual(linesB); // the body DOES churn…
+    expect(planStateKey(q, ok)).toBe(planStateKey(q, ok)); // …and the key takes no `now` at all
+    expect(planStateKey(q, ok)).toContain("queued studio-b-ai/studiob#558");
+  });
+
+  it("changes when the anchor moves (a new deploy/END landing is a real transition)", () => {
+    const q: QueueEntry[] = [{ status: "queued", ticket: ticket(), slotGroup: 0 }];
+    const laterAnchor: AnchorResult = { ...ok, anchorIso: "2026-08-19T23:19:39Z" };
+    expect(planStateKey(q, ok)).not.toBe(planStateKey(q, laterAnchor));
+  });
+
+  it("changes when a ticket's verdict changes (queued → invalidated) and keeps the drift shas", () => {
+    const t = ticket({ number: 7 });
+    const queued: QueueEntry[] = [{ status: "queued", ticket: t, slotGroup: 0 }];
+    const invalidated: QueueEntry[] = [
+      { status: "invalidated", ticket: t, reason: "head drift: pinned aaaaaaaaaaaa != current bbbbbbbbbbbb" },
+    ];
+    expect(planStateKey(queued, ok)).not.toBe(planStateKey(invalidated, ok));
+    expect(planStateKey(invalidated, ok)).toContain("head drift: pinned aaaaaaaaaaaa != current bbbbbbbbbbbb");
+  });
+
+  it("changes when the queue gains a ticket, and when consolidation regroups slots", () => {
+    const a = ticket({ number: 1 });
+    const b = ticket({ number: 2 });
+    const one: QueueEntry[] = [{ status: "queued", ticket: a, slotGroup: 0 }];
+    const twoSeparate: QueueEntry[] = [
+      { status: "queued", ticket: a, slotGroup: 0 },
+      { status: "queued", ticket: b, slotGroup: 1 },
+    ];
+    const twoConsolidated: QueueEntry[] = [
+      { status: "queued", ticket: a, slotGroup: 0 },
+      { status: "queued", ticket: b, slotGroup: 0 },
+    ];
+    const keys = [planStateKey(one, ok), planStateKey(twoSeparate, ok), planStateKey(twoConsolidated, ok)];
+    expect(new Set(keys).size).toBe(3);
+  });
+
+  it("anchor-unavailable states key on the reason (one post per distinct reason, not per cycle)", () => {
+    const notOkA: AnchorResult = { ok: false, reason: "no anchor candidates available from any source" };
+    const notOkB: AnchorResult = { ok: false, reason: "dangling PLAN: `PLAN 2026-08-19T21:00Z · x`" };
+    expect(planStateKey([], notOkA)).toBe(planStateKey([], notOkA));
+    expect(planStateKey([], notOkA)).not.toBe(planStateKey([], notOkB));
+    expect(planStateKey([], notOkA)).toContain("anchor-unavailable");
+  });
+});
+
+// ───────────────────────────── bare (un-backticked) ledger lines (rung-0 acceptance fix) ─────────────────────────────
+describe("parseTrainLedger — bare grammar lines (real recorded comment 5348659682)", () => {
+  const BARE_COMMENT: RestartTrainComment[] = JSON.parse(
+    readFileSync(join(__dirname, "fixtures", "restart-train", "issue-280-bare-end-comment.json"), "utf-8"),
+  );
+
+  it("parses the real hand-posted END that carries ZERO backticks (invisible pre-fix — wrong failure direction)", () => {
+    const ends = parseEndComments(BARE_COMMENT);
+    expect(ends).toHaveLength(1);
+    expect(ends[0].isoStamp).toBe("2026-08-19T22:12:14Z");
+    expect(ends[0].detail).toContain("run 32255934362 attempt 2");
+  });
+
+  it("negative control (#322): prose keywords without an ISO date never match", () => {
+    const comments: RestartTrainComment[] = [
+      { id: 1, body: "END of the story — no stamp here.\nPLAN for tomorrow: TBD", login: "a", createdAt: "2026-08-19T22:00:00Z" },
+    ];
+    expect(parseEndComments(comments)).toHaveLength(0);
+  });
+
+  it("negative control (#322): a mid-line bare keyword (not at line start) never matches", () => {
+    const comments: RestartTrainComment[] = [
+      { id: 1, body: "as discussed, the END 2026-08-19T22:12:14Z stamp will be posted separately", login: "a", createdAt: "2026-08-19T22:00:00Z" },
+    ];
+    expect(parseEndComments(comments)).toHaveLength(0);
+  });
+
+  it("a backticked line does not double-match through the bare-line regex", () => {
+    const comments: RestartTrainComment[] = [
+      { id: 1, body: "`END 2026-08-19T22:12:14Z · once only`", login: "a", createdAt: "2026-08-19T22:00:00Z" },
+    ];
+    expect(parseEndComments(comments)).toHaveLength(1);
+  });
+
+  it("positive control (#322): the pre-fix strict parser really WAS blind to this fixture (kept as the incident record)", () => {
+    // Re-assert the failure mode directly: the recorded body contains no backtick at all, so the
+    // span-only regex cannot have matched it — this is the mechanism, not an assumption.
+    expect(BARE_COMMENT[0].body).not.toContain("`");
   });
 });

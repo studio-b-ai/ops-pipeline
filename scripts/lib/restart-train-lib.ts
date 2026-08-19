@@ -566,6 +566,68 @@ export function planLines(queue: QueueEntry[], anchor: AnchorResult, nowIso: str
   );
 }
 
+// ───────────────────────────── replay clamp (facts must be <= now) ─────────────────────────────
+
+/**
+ * A `--now` replay — and, identically, a live run whose ledger carries a typo'd FUTURE stamp —
+ * must never see a fact from after `now`: `computeAnchor` takes the LATEST candidate, so one
+ * future-stamped fact (ca#281's 23:19:39Z END line, replayed at `--now` 22:20Z on 2026-08-19 —
+ * the rung-0 acceptance failure that created these helpers) anchors the window against an event
+ * that "hasn't happened yet". Fail-closed direction, but frozen-by-typo. So the worker clamps
+ * EVERY fact stream to `<= now` before any parsing or anchoring. ISO-8601 Z strings compare
+ * lexicographically, so plain string `<=` is exact; a fact with an empty/missing stamp is
+ * dropped (it can't be ordered against `now`, and every legitimate source stamps).
+ */
+export function clampCommentsToNow(comments: RestartTrainComment[], nowIso: string): RestartTrainComment[] {
+  return comments.filter((c) => c.createdAt && c.createdAt <= nowIso);
+}
+
+/** See `clampCommentsToNow` — the same law applied to anchor candidates. */
+export function clampCandidatesToNow(candidates: AnchorCandidate[], nowIso: string): AnchorCandidate[] {
+  return candidates.filter((c) => c.completedAtIso && c.completedAtIso <= nowIso);
+}
+
+/** See `clampCommentsToNow` — the same law applied to tickets (a pin applied "in the future"
+ * relative to a replay instant did not exist yet at that instant). */
+export function clampTicketsToNow(tickets: Ticket[], nowIso: string): Ticket[] {
+  return tickets.filter((t) => t.appliedAt && t.appliedAt <= nowIso);
+}
+
+// ───────────────────────────── posting state fingerprint (#292 dedup) ─────────────────────────────
+
+/**
+ * Canonical fingerprint of the SCHEDULING STATE a PLAN post describes — the #292 dedup key.
+ *
+ * The every-5-minutes cron re-renders PLAN lines each cycle, and two rendered fields churn by
+ * construction without any real transition: a clear-now slot's `@ <slotIso>` IS `nowIso`
+ * (`computePlanSlots`), and every slot chained after it inherits the churn via the
+ * `simulatedAnchorIso` walk. Naive body-equality dedup therefore never matches while a clear
+ * ticket sits queued — the worker would post every cycle (the rung-0 acceptance-replay finding,
+ * 2026-08-19; the anchor-unavailable path is the same class: one identical line per cycle,
+ * 288/day). The STATE the post exists to convey is exactly: the anchor (a real PAST event — it
+ * moves only when a new deploy or END lands, a genuine transition), each ticket's verdict
+ * (queued/invalidated + why), and the queue order/grouping. Slot instants are derived previews
+ * of that state and are deliberately EXCLUDED — a posted PLAN is as-of its own comment
+ * timestamp (#412), and re-posting it every 5 minutes because "now" moved conveys nothing.
+ * `now` never enters the key. Window-reason clauses don't either (the queued entry itself
+ * carries none): a window OPENING without any queue/anchor change re-renders the same plan the
+ * previous post already dated precisely, so it correctly does not repost — the coarser, quieter
+ * direction. Invalidation reasons stay verbatim (their pinned/current shas distinguish real
+ * drift transitions).
+ */
+export function planStateKey(queue: QueueEntry[], anchor: AnchorResult): string {
+  if (!anchor.ok) return `anchor-unavailable :: ${anchor.reason}`;
+  const parts: string[] = [`anchor ${anchor.anchorIso} (${anchor.source})`];
+  for (const entry of queue) {
+    if (entry.status === "queued") {
+      parts.push(`queued ${entry.ticket.repo}#${entry.ticket.number} g${entry.slotGroup}`);
+    } else {
+      parts.push(`invalidated ${entry.ticket.repo}#${entry.ticket.number} :: ${entry.reason}`);
+    }
+  }
+  return parts.join(" | ");
+}
+
 // ───────────────────────────── #280 ledger parsing ─────────────────────────────
 
 export interface RestartTrainComment {
@@ -593,6 +655,18 @@ export interface TrainLedgerEntry {
 // every observed line on client-asthetik#280 (a stray unrelated backtick span, e.g. `` `/details` ``
 // inside the SAME comment, correctly never matches since it doesn't start with a keyword).
 const LEDGER_LINE_RE = /`(END|START|PLAN|NOTE|HELD)\s+([^`]*)`/g;
+// BARE (un-backticked) grammar lines are ALSO real: client-asthetik#280 comment 5348659682
+// (created 2026-08-19T22:15:45Z, recorded verbatim in fixtures/restart-train/
+// issue-280-bare-end-comment.json) is a hand-posted `END 2026-08-19T22:12:14Z · run
+// 32255934362 attempt 2 · SUCCESS …` with ZERO backticks anywhere in the body. Under the
+// strict-span-only parser that END was invisible, so the anchor fell back to an OLDER END —
+// the wrong failure direction for a restart train (an invisible END means the window opens
+// too soon after the real restart). Found by the rung-0 `--now` replay acceptance, 2026-08-19.
+// Kept deliberately conservative: the keyword must sit at LINE START (modulo whitespace) and
+// must be immediately followed by an ISO date, so prose like "END of the story" or a mid-line
+// mention can never match. A backticked line never double-matches (its line starts with the
+// backtick, not the keyword).
+const BARE_LEDGER_LINE_RE = /(?:^|\n)\s*(END|START|PLAN|NOTE|HELD)\s+(\d{4}-\d{2}-\d{2}T[^\n`]*)/g;
 const ISO_PREFIX_RE =
   /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z)(?:[–-](?:\d{4}-\d{2}-\d{2}T)?\d{2}:\d{2}(?::\d{2})?Z)?/;
 
@@ -605,9 +679,16 @@ const ISO_PREFIX_RE =
 export function parseTrainLedger(comments: RestartTrainComment[]): TrainLedgerEntry[] {
   const entries: TrainLedgerEntry[] = [];
   for (const c of comments) {
+    const raw: Array<{ kind: TrainLedgerEntry["kind"]; rest: string }> = [];
     for (const m of c.body.matchAll(LEDGER_LINE_RE)) {
-      const kind = m[1] as TrainLedgerEntry["kind"];
-      const rest = m[2].trim();
+      raw.push({ kind: m[1] as TrainLedgerEntry["kind"], rest: m[2] });
+    }
+    for (const m of c.body.matchAll(BARE_LEDGER_LINE_RE)) {
+      raw.push({ kind: m[1] as TrainLedgerEntry["kind"], rest: m[2] });
+    }
+    for (const rawEntry of raw) {
+      const kind = rawEntry.kind;
+      const rest = rawEntry.rest.trim();
       const isoMatch = rest.match(ISO_PREFIX_RE);
       const isoStamp = isoMatch ? isoMatch[1] : "";
       // Strip everything up to and including the first ` · ` — handles a plain " · ", a range
