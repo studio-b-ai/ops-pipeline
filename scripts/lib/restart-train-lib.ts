@@ -400,14 +400,39 @@ export function orderQueue(tickets: Ticket[]): QueueEntry[] {
     if (!moved) break;
   }
 
+  // codex P2 (2026-08-19 pass 2): mutually-dependent `train:after` tokens (A after B, B after A)
+  // can never converge — the bounded passes above stop with at least one declared dependency
+  // still violated, and proceeding would publish a plan that schedules an unsatisfiable order.
+  // Fail closed instead (design §5): a Kahn-style resolution pass over the IN-QUEUE dependency
+  // graph; any ticket that cannot resolve (a cycle member, or one transitively blocked behind a
+  // cycle) is invalidated, never scheduled. Acyclic queues resolve completely — zero behavior
+  // change for every already-tested case.
+  const keySet = new Set(ordered.map((t) => key(t)));
+  const resolved = new Set<string>();
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const t of ordered) {
+      const k = key(t);
+      if (resolved.has(k)) continue;
+      const inQueueDeps = t.afterTokens.filter((d) => keySet.has(d));
+      if (inQueueDeps.every((d) => resolved.has(d))) {
+        resolved.add(k);
+        progress = true;
+      }
+    }
+  }
+  const cycleInvalid = ordered.filter((t) => !resolved.has(key(t)));
+  const schedulable = ordered.filter((t) => resolved.has(key(t)));
+
   const entries: QueueEntry[] = [];
   const groupByKey = new Map<string, number>();
   let nextGroup = 0;
-  for (let i = 0; i < ordered.length; i++) {
-    const t = ordered[i];
+  for (let i = 0; i < schedulable.length; i++) {
+    const t = schedulable[i];
     let group: number;
     if (t.consolidate && i > 0) {
-      const prevGroup = groupByKey.get(key(ordered[i - 1]));
+      const prevGroup = groupByKey.get(key(schedulable[i - 1]));
       group = prevGroup !== undefined ? prevGroup : nextGroup++;
     } else {
       group = nextGroup++;
@@ -424,6 +449,14 @@ export function orderQueue(tickets: Ticket[]): QueueEntry[] {
         reason: `head drift: pinned ${x.ticket.pinnedHeadSha.slice(0, 12)} != current ${x.ticket.currentHeadSha.slice(0, 12)}`,
       });
     }
+  }
+
+  for (const t of cycleInvalid) {
+    entries.push({
+      status: "invalidated",
+      ticket: t,
+      reason: `train:after cycle: ${key(t)}'s declared order can never be satisfied (mutual/circular train:after among queued tickets) — failing closed, never scheduled`,
+    });
   }
 
   return entries;

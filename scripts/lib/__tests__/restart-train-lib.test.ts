@@ -632,3 +632,48 @@ describe("hasTrainConsolidate (synthetic)", () => {
     expect(hasTrainConsolidate([])).toBe(false);
   });
 });
+
+// ───────────── orderQueue — train:after cycle fail-closed (codex P2 2026-08-19) ─────────────
+
+describe("orderQueue — train:after cycles fail closed", () => {
+  it("invalidates BOTH members of a mutual train:after cycle and schedules neither", () => {
+    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const entries = orderQueue([a, b]);
+    expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
+    const invalid = entries.filter((e) => e.status === "invalidated");
+    expect(invalid.map((e) => e.ticket.number).sort()).toEqual([1, 2]);
+    for (const e of invalid) {
+      if (e.status === "invalidated") expect(e.reason).toMatch(/train:after cycle/);
+    }
+  });
+
+  it("still schedules an independent ticket alongside an invalidated cycle pair", () => {
+    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z" });
+    const entries = orderQueue([a, b, c]);
+    const queued = entries.filter((e) => e.status === "queued");
+    expect(queued.map((e) => e.ticket.number)).toEqual([3]);
+    expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(2);
+  });
+
+  it("invalidates a ticket transitively blocked behind a cycle (its dep can never merge first)", () => {
+    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const entries = orderQueue([a, b, c]);
+    expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
+    expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(3);
+  });
+
+  it("negative control (Rule #322): an acyclic train:after chain still schedules fully, in order", () => {
+    const a = ticket({ number: 1, appliedAt: "2026-08-19T21:00:00Z" });
+    const b = ticket({ number: 2, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const entries = orderQueue([a, b, c]);
+    const queued = entries.filter((e) => e.status === "queued");
+    expect(queued.map((e) => e.ticket.number)).toEqual([1, 2, 3]);
+    expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(0);
+  });
+});
