@@ -910,4 +910,35 @@ describe("parseTrainLedger — bare grammar lines (real recorded comment 5348659
     // span-only regex cannot have matched it — this is the mechanism, not an assumption.
     expect(BARE_COMMENT[0].body).not.toContain("`");
   });
+
+  it("mixed syntaxes in ONE comment come out in body-scan order (codex pass-2 P2: bare-after-backticked append broke it)", () => {
+    // Bare END first, backticked END second — pre-fix the two matchAll loops appended ALL
+    // backticked matches before ALL bare ones, returning these reversed.
+    const comments: RestartTrainComment[] = [
+      {
+        id: 1,
+        body: "END 2026-08-19T22:12:14Z · bare line posted first\nsome prose between\n`END 2026-08-19T23:19:39Z · backticked line posted second`",
+        login: "a",
+        createdAt: "2026-08-19T23:20:00Z",
+      },
+    ];
+    const entries = parseTrainLedger(comments);
+    expect(entries).toHaveLength(2);
+    expect(entries[0].isoStamp).toBe("2026-08-19T22:12:14Z");
+    expect(entries[1].isoStamp).toBe("2026-08-19T23:19:39Z");
+    // And the reverse arrangement (backticked first) also preserves body order — the sort is
+    // by offset, not by syntax class in either direction.
+    const reversed: RestartTrainComment[] = [
+      {
+        id: 2,
+        body: "`END 2026-08-19T22:12:14Z · backticked first`\nEND 2026-08-19T23:19:39Z · bare second",
+        login: "a",
+        createdAt: "2026-08-19T23:20:00Z",
+      },
+    ];
+    const entries2 = parseTrainLedger(reversed);
+    expect(entries2).toHaveLength(2);
+    expect(entries2[0].isoStamp).toBe("2026-08-19T22:12:14Z");
+    expect(entries2[1].isoStamp).toBe("2026-08-19T23:19:39Z");
+  });
 });

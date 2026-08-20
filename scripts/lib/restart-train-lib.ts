@@ -703,13 +703,18 @@ const ISO_PREFIX_RE =
 export function parseTrainLedger(comments: RestartTrainComment[]): TrainLedgerEntry[] {
   const entries: TrainLedgerEntry[] = [];
   for (const c of comments) {
-    const raw: Array<{ kind: TrainLedgerEntry["kind"]; rest: string }> = [];
+    // Collect BOTH syntaxes with their body offsets, then sort by offset so entries come out
+    // in body-scan order even when one comment mixes backticked and bare lines (codex pass-2
+    // P2, PR #174): two matchAll loops appended bare-after-backticked regardless of position,
+    // violating this function's documented same-comment ordering contract.
+    const raw: Array<{ kind: TrainLedgerEntry["kind"]; rest: string; at: number }> = [];
     for (const m of c.body.matchAll(LEDGER_LINE_RE)) {
-      raw.push({ kind: m[1] as TrainLedgerEntry["kind"], rest: m[2] });
+      raw.push({ kind: m[1] as TrainLedgerEntry["kind"], rest: m[2], at: m.index ?? 0 });
     }
     for (const m of c.body.matchAll(BARE_LEDGER_LINE_RE)) {
-      raw.push({ kind: m[1] as TrainLedgerEntry["kind"], rest: m[2] });
+      raw.push({ kind: m[1] as TrainLedgerEntry["kind"], rest: m[2], at: m.index ?? 0 });
     }
+    raw.sort((a, b) => a.at - b.at);
     for (const rawEntry of raw) {
       const kind = rawEntry.kind;
       const rest = rawEntry.rest.trim();
