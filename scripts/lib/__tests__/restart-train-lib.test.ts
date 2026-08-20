@@ -744,14 +744,56 @@ describe("clampCommentsToNow / clampCandidatesToNow / clampTicketsToNow", () => 
     expect(clamped[0].completedAtIso).toBe("2026-08-19T22:12:14Z");
   });
 
-  it("keeps a candidate stamped exactly AT now (boundary is inclusive) and drops empty stamps", () => {
+  it("keeps a candidate stamped exactly AT now (boundary is inclusive)", () => {
     const candidates: AnchorCandidate[] = [
       { source: "client-asthetik-actions", completedAtIso: "2026-08-19T22:20:00Z", detail: "at-boundary" },
-      { source: "client-asthetik-actions", completedAtIso: "", detail: "no stamp — cannot be ordered" },
+      { source: "client-asthetik-actions", completedAtIso: "2026-08-19T22:20:01Z", detail: "one second future" },
     ];
     const clamped = clampCandidatesToNow(candidates, "2026-08-19T22:20:00Z");
     expect(clamped).toHaveLength(1);
     expect(clamped[0].detail).toBe("at-boundary");
+  });
+
+  it("passes malformed/empty stamps THROUGH so computeAnchor keeps fail-closed ownership (codex P2a)", () => {
+    // The lexicographic-only clamp treated "not-a-date" as > now and silently dropped it —
+    // narrowing the fact set during an API/schema regression instead of failing closed.
+    const candidates: AnchorCandidate[] = [
+      { source: "studiob-api-railway", completedAtIso: "not-a-date", detail: "regressed API shape" },
+      { source: "manual-end-comment", completedAtIso: "", detail: "unstamped" },
+      { source: "manual-end-comment", completedAtIso: "2026-08-19T22:12:14Z", detail: "valid past" },
+    ];
+    const clamped = clampCandidatesToNow(candidates, "2026-08-19T22:20:00Z");
+    expect(clamped).toHaveLength(3); // nothing silently dropped
+    const anchor = computeAnchor({ now: "2026-08-19T22:20:00Z", candidates: clamped, danglingPlan: false });
+    expect(anchor.ok).toBe(false);
+    if (!anchor.ok) expect(anchor.reason).toContain("unparsable candidate timestamp");
+  });
+
+  it("throws on a garbage nowIso instead of silently not clamping", () => {
+    expect(() => clampCandidatesToNow([], "not-a-now")).toThrow(/Unparsable now in replay clamp/);
+  });
+
+  it("comment clamp before pin parsing: a future re-pin is invisible, the live pin schedules (codex P2b)", () => {
+    const oldSha = "a".repeat(40);
+    const newSha = "b".repeat(40);
+    const comments: RestartTrainComment[] = [
+      {
+        id: 1,
+        body: "`TRAIN-PIN 2026-08-19T20:00:00Z · head=" + oldSha + " · applied-by=coo`",
+        login: "b",
+        createdAt: "2026-08-19T20:00:05Z",
+      },
+      {
+        id: 2,
+        body: "`TRAIN-PIN 2026-08-19T23:00:00Z · head=" + newSha + " · applied-by=coo`",
+        login: "b",
+        createdAt: "2026-08-19T23:00:05Z",
+      },
+    ];
+    // Unclamped, parseTrainPin picks the LATEST pin — the future one — which clampTicketsToNow
+    // would then drop wholesale, losing a ticket that WAS schedulable at the instant.
+    expect(parseTrainPin(comments)?.pinnedHeadSha).toBe(newSha);
+    expect(parseTrainPin(clampCommentsToNow(comments, "2026-08-19T22:20:00Z"))?.pinnedHeadSha).toBe(oldSha);
   });
 
   it("clampCommentsToNow makes a future-created comment invisible to ledger parsing", () => {

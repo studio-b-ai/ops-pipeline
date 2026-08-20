@@ -574,23 +574,47 @@ export function planLines(queue: QueueEntry[], anchor: AnchorResult, nowIso: str
  * future-stamped fact (ca#281's 23:19:39Z END line, replayed at `--now` 22:20Z on 2026-08-19 —
  * the rung-0 acceptance failure that created these helpers) anchors the window against an event
  * that "hasn't happened yet". Fail-closed direction, but frozen-by-typo. So the worker clamps
- * EVERY fact stream to `<= now` before any parsing or anchoring. ISO-8601 Z strings compare
- * lexicographically, so plain string `<=` is exact; a fact with an empty/missing stamp is
- * dropped (it can't be ordered against `now`, and every legitimate source stamps).
+ * EVERY fact stream to `<= now` before any parsing or anchoring.
+ *
+ * Comparison is NUMERIC (`Date.parse`), and a stamp that does not parse — malformed or empty —
+ * PASSES THROUGH un-clamped (codex P2a, PR #174 pass 1): the earlier lexicographic-only filter
+ * treated `not-a-date` as > now and silently DROPPED it, converting `computeAnchor`'s
+ * fail-closed `unparsable candidate timestamp` result into a silent fact-set narrowing — an
+ * anchor computed from the OLDER remaining facts opens the window too soon during an API/schema
+ * regression (the exact fail-open direction rung 0 rejected for the Railway probe). The clamp's
+ * only job is ordering against `now`; validity stays owned by the existing downstream
+ * validators. A garbage `nowIso` throws — never a silent no-clamp.
  */
+function keepAtOrBefore(nowIso: string): (stamp: string) => boolean {
+  const nowMs = Date.parse(nowIso);
+  if (Number.isNaN(nowMs)) throw new Error(`Unparsable now in replay clamp: ${nowIso}`);
+  return (stamp) => {
+    if (!stamp) return true; // unstamped — downstream owns rejecting (or ignoring) it
+    const ms = Date.parse(stamp);
+    if (Number.isNaN(ms)) return true; // malformed — preserved for fail-closed downstream validation
+    return ms <= nowMs;
+  };
+}
+
 export function clampCommentsToNow(comments: RestartTrainComment[], nowIso: string): RestartTrainComment[] {
-  return comments.filter((c) => c.createdAt && c.createdAt <= nowIso);
+  const keep = keepAtOrBefore(nowIso);
+  return comments.filter((c) => keep(c.createdAt));
 }
 
-/** See `clampCommentsToNow` — the same law applied to anchor candidates. */
+/** See `keepAtOrBefore` — the same law applied to anchor candidates. */
 export function clampCandidatesToNow(candidates: AnchorCandidate[], nowIso: string): AnchorCandidate[] {
-  return candidates.filter((c) => c.completedAtIso && c.completedAtIso <= nowIso);
+  const keep = keepAtOrBefore(nowIso);
+  return candidates.filter((c) => keep(c.completedAtIso));
 }
 
-/** See `clampCommentsToNow` — the same law applied to tickets (a pin applied "in the future"
- * relative to a replay instant did not exist yet at that instant). */
+/** See `keepAtOrBefore` — the same law applied to tickets. Belt-and-braces with the
+ * comment-level clamp inside the worker's `fetchTickets` (codex P2b, PR #174 pass 1): that one
+ * removes future PIN COMMENTS before `parseTrainPin` picks the latest, so a replay uses the pin
+ * that was live at the instant; this one still catches a pin whose BODY grammar carries a
+ * typo'd future ISO inside a past-created comment. */
 export function clampTicketsToNow(tickets: Ticket[], nowIso: string): Ticket[] {
-  return tickets.filter((t) => t.appliedAt && t.appliedAt <= nowIso);
+  const keep = keepAtOrBefore(nowIso);
+  return tickets.filter((t) => keep(t.appliedAt));
 }
 
 // ───────────────────────────── posting state fingerprint (#292 dedup) ─────────────────────────────

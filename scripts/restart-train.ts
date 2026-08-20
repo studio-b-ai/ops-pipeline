@@ -226,7 +226,7 @@ async function fetchCalendarComments(): Promise<RestartTrainComment[]> {
   }
 }
 
-async function fetchTickets(): Promise<Ticket[]> {
+async function fetchTickets(nowIso: string): Promise<Ticket[]> {
   const tickets: Ticket[] = [];
   for (const repo of TICKET_REPOS) {
     let prsJson: string;
@@ -256,6 +256,13 @@ async function fetchTickets(): Promise<Ticket[]> {
       } catch (err) {
         throw classifyReadError(err, `issues:read (${repo}#${pr.number} comments)`);
       }
+      // Replay clamp BEFORE pin/dependency parsing (codex P2b, PR #174 pass 1): a pin or
+      // train:after/consolidate comment posted after `now` did not exist at the replay
+      // instant — parseTrainPin takes the LATEST pin, so an unclamped future re-pin would
+      // hide the pin that WAS live and get the whole ticket dropped by clampTicketsToNow
+      // instead of scheduled on the old pin. (Label STATE has no history — a replay sees
+      // today's train:ready set; a documented replay-fidelity limitation, not fixable here.)
+      comments = clampCommentsToNow(comments, nowIso);
       const pin = parseTrainPin(comments);
       if (!pin) {
         // No pin comment yet — the label-apply step (separate, CTO-owned, not built by rung 0)
@@ -420,7 +427,7 @@ async function main(): Promise<void> {
   }
   console.log(`[restart-train] anchor: ${anchor.anchorIso} (${anchor.source}: ${anchor.detail})`);
 
-  const rawTickets = await fetchTickets();
+  const rawTickets = await fetchTickets(flags.now);
   const tickets = clampTicketsToNow(rawTickets, flags.now);
   if (tickets.length !== rawTickets.length) {
     console.log(`[restart-train] clamp: dropped ${rawTickets.length - tickets.length} ticket(s) pinned after now=${flags.now}`);
