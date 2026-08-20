@@ -10,6 +10,7 @@ import {
   parseServiceDeploymentsResponse,
   type DeploymentRecord,
 } from "../railway-deployment-probes.js";
+import { keepAtOrBefore } from "../restart-train-lib.js";
 
 describe("parseProjectRefsResponse", () => {
   it("returns services + environments on success", () => {
@@ -127,5 +128,18 @@ describe("latestSuccessfulDeployment", () => {
   it("single SUCCESS entry returns itself", () => {
     const only = dep({ id: "solo" });
     expect(latestSuccessfulDeployment([only])?.id).toBe("solo");
+  });
+
+  it("composes with the worker's source-level replay clamp: filter-then-reduce keeps the pre-instant deploy (codex pass-3 P2)", () => {
+    // Mirrors fetchRailwayAnchorCandidate's exact pattern: deployments updated after the replay
+    // instant are dropped BEFORE the latest-reduce, so a post-instant deploy cannot shadow the
+    // one that should anchor. Pre-fix (reduce-then-clamp), 23:00 would win the reduce and then
+    // be clamped away — the source contributing nothing despite the valid 22:00 deploy.
+    const keep = keepAtOrBefore("2026-08-19T22:30:00Z");
+    const deployments = [
+      dep({ id: "pre-instant", status: "SUCCESS", updatedAt: "2026-08-19T22:00:00Z" }),
+      dep({ id: "post-instant", status: "SUCCESS", updatedAt: "2026-08-19T23:00:00Z" }),
+    ];
+    expect(latestSuccessfulDeployment(deployments.filter((d) => keep(d.updatedAt)))?.id).toBe("pre-instant");
   });
 });

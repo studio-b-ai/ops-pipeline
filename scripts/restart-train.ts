@@ -77,6 +77,8 @@ import {
   clampCommentsToNow,
   clampTicketsToNow,
   computeAnchor,
+  keepAtOrBefore,
+  latestEndAnchorCandidate,
   orderQueue,
   planLines,
   planStateKey,
@@ -138,7 +140,12 @@ async function checkHold(target: { repo: string; number: number }): Promise<{ he
  * "path?k=v&k2=v2"`), NOT `-f k=v` without `-X GET` — live-verified 2026-08-19: bare `-f` flags
  * default `gh api` to a POST, which 404s against this GET-only collection endpoint.
  */
-async function fetchClientAsthetikAnchorCandidate(): Promise<AnchorCandidate | null> {
+async function fetchClientAsthetikAnchorCandidate(nowIso: string): Promise<AnchorCandidate | null> {
+  // Source-level replay clamp (codex pass-3 P2, PR #174): filter runs to completed_at <= now
+  // BEFORE picking the latest — clamping after the reduce lets a run completed after the replay
+  // instant shadow the earlier run that should anchor. keepAtOrBefore passes malformed stamps
+  // through; a malformed winner is rejected fail-closed by computeAnchor downstream.
+  const stampOk = keepAtOrBefore(nowIso);
   let runsJson: string;
   try {
     runsJson = gh([
@@ -168,7 +175,11 @@ async function fetchClientAsthetikAnchorCandidate(): Promise<AnchorCandidate | n
     const deployJob = jobs.find(
       (j) => j.name === DEPLOY_JOB_NAME && j.conclusion === "success" && j.completed_at,
     );
-    if (deployJob?.completed_at && (!best || deployJob.completed_at > best.completedAtIso)) {
+    if (
+      deployJob?.completed_at &&
+      stampOk(deployJob.completed_at) &&
+      (!best || deployJob.completed_at > best.completedAtIso)
+    ) {
       best = { completedAtIso: deployJob.completed_at, runId };
     }
   }
@@ -190,7 +201,7 @@ async function fetchClientAsthetikAnchorCandidate(): Promise<AnchorCandidate | n
  * Railway outage (the every-5-minutes cron retries next cycle). Codex pass-4 P2 "degrade to null" REJECTED
  * on this basis, 2026-08-19.
  */
-async function fetchRailwayAnchorCandidate(): Promise<AnchorCandidate | null> {
+async function fetchRailwayAnchorCandidate(nowIso: string): Promise<AnchorCandidate | null> {
   const token = process.env.RAILWAY_API_TOKEN;
   if (!token) return null;
 
@@ -207,7 +218,11 @@ async function fetchRailwayAnchorCandidate(): Promise<AnchorCandidate | null> {
   }
   const deploysResult = await fetchServiceDeployments(token, STUDIOB_PLATFORM_PROJECT_ID, env.id, service.id, 10);
   if (!deploysResult.ok) throw new Error(`Railway deployments fetch failed: ${deploysResult.error}`);
-  const latest = latestSuccessfulDeployment(deploysResult.deployments);
+  // Source-level replay clamp (codex pass-3 P2, PR #174) — same law as the Actions source:
+  // drop deployments updated after `now` BEFORE the latest-reduce so a post-instant deployment
+  // cannot shadow the one that should anchor. Malformed stamps pass through per keepAtOrBefore.
+  const stampOk = keepAtOrBefore(nowIso);
+  const latest = latestSuccessfulDeployment(deploysResult.deployments.filter((d) => stampOk(d.updatedAt)));
   if (!latest) return null;
   return {
     source: "studiob-api-railway",
@@ -388,24 +403,17 @@ async function main(): Promise<void> {
   const dangling = findDanglingPlan(calendarComments, flags.now);
 
   const candidates: AnchorCandidate[] = [];
-  const clientAsthetikCandidate = await fetchClientAsthetikAnchorCandidate();
+  const clientAsthetikCandidate = await fetchClientAsthetikAnchorCandidate(flags.now);
   if (clientAsthetikCandidate) candidates.push(clientAsthetikCandidate);
-  const railwayCandidate = await fetchRailwayAnchorCandidate();
+  const railwayCandidate = await fetchRailwayAnchorCandidate(flags.now);
   if (railwayCandidate) candidates.push(railwayCandidate);
-  if (endEntries.length > 0) {
-    const latestEnd = endEntries.reduce((a, b) => (a.isoStamp > b.isoStamp ? a : b));
-    if (latestEnd.isoStamp) {
-      candidates.push({
-        source: "manual-end-comment",
-        completedAtIso: latestEnd.isoStamp,
-        detail: latestEnd.detail,
-      });
-    }
-  }
+  const endCandidate = latestEndAnchorCandidate(endEntries, flags.now);
+  if (endCandidate) candidates.push(endCandidate);
 
-  // Replay clamp again at the candidate layer: a PAST comment can still carry a future-typo'd
-  // END stamp, and the Actions/Railway sources are clamped here too (a replay must not anchor
-  // on a deploy that completed after the replay instant).
+  // Belt-and-braces candidate-layer clamp: every source above already clamps its RAW stream
+  // before its latest-reduce (codex pass-3 P2 — reduce-then-clamp let a future fact shadow a
+  // valid older one from the same source), so this layer should drop nothing in the normal
+  // path; it stays as defense-in-depth for any future source added without its own clamp.
   const clampedCandidates = clampCandidatesToNow(candidates, flags.now);
   if (clampedCandidates.length !== candidates.length) {
     console.log(

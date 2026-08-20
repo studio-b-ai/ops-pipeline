@@ -27,6 +27,8 @@ import {
   type QueueEntry,
   type RestartTrainComment,
   type Ticket,
+  keepAtOrBefore,
+  latestEndAnchorCandidate,
 } from "../restart-train-lib.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -940,5 +942,57 @@ describe("parseTrainLedger — bare grammar lines (real recorded comment 5348659
     expect(entries2).toHaveLength(2);
     expect(entries2[0].isoStamp).toBe("2026-08-19T22:12:14Z");
     expect(entries2[1].isoStamp).toBe("2026-08-19T23:19:39Z");
+  });
+});
+
+// ───────────────────────────── source-level replay clamp (codex pass-3 P2) ─────────────────────────────
+describe("latestEndAnchorCandidate — clamp BEFORE the latest-reduce", () => {
+  const entry = (isoStamp: string, detail: string) => ({
+    kind: "END" as const,
+    isoStamp,
+    detail,
+    commentId: 1,
+    commentCreatedAt: "2026-08-19T22:00:00Z",
+    commentLogin: "a",
+  });
+
+  it("a future-stamped END cannot shadow an older valid END from the same source (the pass-3 defect)", () => {
+    // Pre-fix: reduce picked the 23:59 END, the candidate-layer clamp dropped it, and the
+    // source contributed NOTHING — though the 22:12 END was valid at now=22:20.
+    const c = latestEndAnchorCandidate(
+      [entry("2026-08-19T22:12:14Z", "valid older"), entry("2026-08-19T23:59:00Z", "future typo")],
+      "2026-08-19T22:20:00Z",
+    );
+    expect(c).not.toBeNull();
+    expect(c?.completedAtIso).toBe("2026-08-19T22:12:14Z");
+    expect(c?.source).toBe("manual-end-comment");
+  });
+
+  it("all ENDs after now → null (no candidate from this source), not a future anchor", () => {
+    expect(
+      latestEndAnchorCandidate([entry("2026-08-19T23:59:00Z", "future")], "2026-08-19T22:20:00Z"),
+    ).toBeNull();
+  });
+
+  it("empty entry list → null; all-empty stamps → null (pre-existing empty-stamp guard preserved)", () => {
+    expect(latestEndAnchorCandidate([], "2026-08-19T22:20:00Z")).toBeNull();
+    expect(latestEndAnchorCandidate([entry("", "no stamp")], "2026-08-19T22:20:00Z")).toBeNull();
+  });
+
+  it("a malformed stamp passes the clamp and flows to computeAnchor's fail-closed rejection (P2a law)", () => {
+    const c = latestEndAnchorCandidate(
+      [entry("2026-08-19T22:12:14Z", "valid"), entry("not-a-date", "garbage")],
+      "2026-08-19T22:20:00Z",
+    );
+    // Lexicographic reduce: "not-a-date" > "2026-…", so the garbage wins the reduce — and is
+    // then rejected BY NAME downstream, never silently skipped (stop-the-train, not fail-open).
+    expect(c?.completedAtIso).toBe("not-a-date");
+    const anchor = computeAnchor({ now: "2026-08-19T22:20:00Z", candidates: [c!], danglingPlan: false });
+    expect(anchor.ok).toBe(false);
+    if (!anchor.ok) expect(anchor.reason).toContain("unparsable candidate timestamp");
+  });
+
+  it("keepAtOrBefore throws on garbage now (never a silent no-clamp)", () => {
+    expect(() => keepAtOrBefore("nonsense")).toThrow(/Unparsable now in replay clamp/);
   });
 });

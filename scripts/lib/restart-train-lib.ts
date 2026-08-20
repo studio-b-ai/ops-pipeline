@@ -585,7 +585,7 @@ export function planLines(queue: QueueEntry[], anchor: AnchorResult, nowIso: str
  * only job is ordering against `now`; validity stays owned by the existing downstream
  * validators. A garbage `nowIso` throws — never a silent no-clamp.
  */
-function keepAtOrBefore(nowIso: string): (stamp: string) => boolean {
+export function keepAtOrBefore(nowIso: string): (stamp: string) => boolean {
   const nowMs = Date.parse(nowIso);
   if (Number.isNaN(nowMs)) throw new Error(`Unparsable now in replay clamp: ${nowIso}`);
   return (stamp) => {
@@ -615,6 +615,34 @@ export function clampCandidatesToNow(candidates: AnchorCandidate[], nowIso: stri
 export function clampTicketsToNow(tickets: Ticket[], nowIso: string): Ticket[] {
   const keep = keepAtOrBefore(nowIso);
   return tickets.filter((t) => keep(t.appliedAt));
+}
+
+/**
+ * Reduce the #280 END entries to ONE anchor candidate, clamping to `now` BEFORE the
+ * latest-reduce (codex pass-3 P2, PR #174): reducing first and clamping after lets a
+ * future-stamped END (a typo in a past-created comment, or any END after a replay instant)
+ * SHADOW an older valid END from the same source — the reduce picks the future one, the
+ * candidate-layer clamp drops it, and the source contributes nothing even though a valid
+ * candidate existed at or before `now`. Malformed/empty stamps pass the clamp per
+ * `keepAtOrBefore`'s law; a malformed stamp that wins the lexicographic reduce flows to
+ * `computeAnchor`, which rejects it fail-closed by name — a garbage stamp on the load-bearing
+ * calendar is a stop-the-train event, never silently skipped. All-empty stamps yield null
+ * (no candidate from this source), matching the pre-existing empty-stamp guard.
+ */
+export function latestEndAnchorCandidate(
+  endEntries: TrainLedgerEntry[],
+  nowIso: string,
+): AnchorCandidate | null {
+  const keep = keepAtOrBefore(nowIso);
+  const eligible = endEntries.filter((e) => keep(e.isoStamp));
+  if (eligible.length === 0) return null;
+  const latestEnd = eligible.reduce((a, b) => (a.isoStamp > b.isoStamp ? a : b));
+  if (!latestEnd.isoStamp) return null;
+  return {
+    source: "manual-end-comment",
+    completedAtIso: latestEnd.isoStamp,
+    detail: latestEnd.detail,
+  };
 }
 
 // ───────────────────────────── posting state fingerprint (#292 dedup) ─────────────────────────────
