@@ -566,6 +566,120 @@ export function planLines(queue: QueueEntry[], anchor: AnchorResult, nowIso: str
   );
 }
 
+// ───────────────────────────── replay clamp (facts must be <= now) ─────────────────────────────
+
+/**
+ * A `--now` replay — and, identically, a live run whose ledger carries a typo'd FUTURE stamp —
+ * must never see a fact from after `now`: `computeAnchor` takes the LATEST candidate, so one
+ * future-stamped fact (ca#281's 23:19:39Z END line, replayed at `--now` 22:20Z on 2026-08-19 —
+ * the rung-0 acceptance failure that created these helpers) anchors the window against an event
+ * that "hasn't happened yet". Fail-closed direction, but frozen-by-typo. So the worker clamps
+ * EVERY fact stream to `<= now` before any parsing or anchoring.
+ *
+ * Comparison is NUMERIC (`Date.parse`), and a stamp that does not parse — malformed or empty —
+ * PASSES THROUGH un-clamped (codex P2a, PR #174 pass 1): the earlier lexicographic-only filter
+ * treated `not-a-date` as > now and silently DROPPED it, converting `computeAnchor`'s
+ * fail-closed `unparsable candidate timestamp` result into a silent fact-set narrowing — an
+ * anchor computed from the OLDER remaining facts opens the window too soon during an API/schema
+ * regression (the exact fail-open direction rung 0 rejected for the Railway probe). The clamp's
+ * only job is ordering against `now`; validity stays owned by the existing downstream
+ * validators. A garbage `nowIso` throws — never a silent no-clamp.
+ */
+export function keepAtOrBefore(nowIso: string): (stamp: string) => boolean {
+  const nowMs = Date.parse(nowIso);
+  if (Number.isNaN(nowMs)) throw new Error(`Unparsable now in replay clamp: ${nowIso}`);
+  return (stamp) => {
+    if (!stamp) return true; // unstamped — downstream owns rejecting (or ignoring) it
+    const ms = Date.parse(stamp);
+    if (Number.isNaN(ms)) return true; // malformed — preserved for fail-closed downstream validation
+    return ms <= nowMs;
+  };
+}
+
+export function clampCommentsToNow(comments: RestartTrainComment[], nowIso: string): RestartTrainComment[] {
+  const keep = keepAtOrBefore(nowIso);
+  return comments.filter((c) => keep(c.createdAt));
+}
+
+/** See `keepAtOrBefore` — the same law applied to anchor candidates. */
+export function clampCandidatesToNow(candidates: AnchorCandidate[], nowIso: string): AnchorCandidate[] {
+  const keep = keepAtOrBefore(nowIso);
+  return candidates.filter((c) => keep(c.completedAtIso));
+}
+
+/** See `keepAtOrBefore` — the same law applied to tickets. Belt-and-braces with the
+ * comment-level clamp inside the worker's `fetchTickets` (codex P2b, PR #174 pass 1): that one
+ * removes future PIN COMMENTS before `parseTrainPin` picks the latest, so a replay uses the pin
+ * that was live at the instant; this one still catches a pin whose BODY grammar carries a
+ * typo'd future ISO inside a past-created comment. */
+export function clampTicketsToNow(tickets: Ticket[], nowIso: string): Ticket[] {
+  const keep = keepAtOrBefore(nowIso);
+  return tickets.filter((t) => keep(t.appliedAt));
+}
+
+/**
+ * Reduce the #280 END entries to ONE anchor candidate, clamping to `now` BEFORE the
+ * latest-reduce (codex pass-3 P2, PR #174): reducing first and clamping after lets a
+ * future-stamped END (a typo in a past-created comment, or any END after a replay instant)
+ * SHADOW an older valid END from the same source — the reduce picks the future one, the
+ * candidate-layer clamp drops it, and the source contributes nothing even though a valid
+ * candidate existed at or before `now`. Malformed/empty stamps pass the clamp per
+ * `keepAtOrBefore`'s law; a malformed stamp that wins the lexicographic reduce flows to
+ * `computeAnchor`, which rejects it fail-closed by name — a garbage stamp on the load-bearing
+ * calendar is a stop-the-train event, never silently skipped. All-empty stamps yield null
+ * (no candidate from this source), matching the pre-existing empty-stamp guard.
+ */
+export function latestEndAnchorCandidate(
+  endEntries: TrainLedgerEntry[],
+  nowIso: string,
+): AnchorCandidate | null {
+  const keep = keepAtOrBefore(nowIso);
+  const eligible = endEntries.filter((e) => keep(e.isoStamp));
+  if (eligible.length === 0) return null;
+  const latestEnd = eligible.reduce((a, b) => (a.isoStamp > b.isoStamp ? a : b));
+  if (!latestEnd.isoStamp) return null;
+  return {
+    source: "manual-end-comment",
+    completedAtIso: latestEnd.isoStamp,
+    detail: latestEnd.detail,
+  };
+}
+
+// ───────────────────────────── posting state fingerprint (#292 dedup) ─────────────────────────────
+
+/**
+ * Canonical fingerprint of the SCHEDULING STATE a PLAN post describes — the #292 dedup key.
+ *
+ * The every-5-minutes cron re-renders PLAN lines each cycle, and two rendered fields churn by
+ * construction without any real transition: a clear-now slot's `@ <slotIso>` IS `nowIso`
+ * (`computePlanSlots`), and every slot chained after it inherits the churn via the
+ * `simulatedAnchorIso` walk. Naive body-equality dedup therefore never matches while a clear
+ * ticket sits queued — the worker would post every cycle (the rung-0 acceptance-replay finding,
+ * 2026-08-19; the anchor-unavailable path is the same class: one identical line per cycle,
+ * 288/day). The STATE the post exists to convey is exactly: the anchor (a real PAST event — it
+ * moves only when a new deploy or END lands, a genuine transition), each ticket's verdict
+ * (queued/invalidated + why), and the queue order/grouping. Slot instants are derived previews
+ * of that state and are deliberately EXCLUDED — a posted PLAN is as-of its own comment
+ * timestamp (#412), and re-posting it every 5 minutes because "now" moved conveys nothing.
+ * `now` never enters the key. Window-reason clauses don't either (the queued entry itself
+ * carries none): a window OPENING without any queue/anchor change re-renders the same plan the
+ * previous post already dated precisely, so it correctly does not repost — the coarser, quieter
+ * direction. Invalidation reasons stay verbatim (their pinned/current shas distinguish real
+ * drift transitions).
+ */
+export function planStateKey(queue: QueueEntry[], anchor: AnchorResult): string {
+  if (!anchor.ok) return `anchor-unavailable :: ${anchor.reason}`;
+  const parts: string[] = [`anchor ${anchor.anchorIso} (${anchor.source})`];
+  for (const entry of queue) {
+    if (entry.status === "queued") {
+      parts.push(`queued ${entry.ticket.repo}#${entry.ticket.number} g${entry.slotGroup}`);
+    } else {
+      parts.push(`invalidated ${entry.ticket.repo}#${entry.ticket.number} :: ${entry.reason}`);
+    }
+  }
+  return parts.join(" | ");
+}
+
 // ───────────────────────────── #280 ledger parsing ─────────────────────────────
 
 export interface RestartTrainComment {
@@ -593,6 +707,18 @@ export interface TrainLedgerEntry {
 // every observed line on client-asthetik#280 (a stray unrelated backtick span, e.g. `` `/details` ``
 // inside the SAME comment, correctly never matches since it doesn't start with a keyword).
 const LEDGER_LINE_RE = /`(END|START|PLAN|NOTE|HELD)\s+([^`]*)`/g;
+// BARE (un-backticked) grammar lines are ALSO real: client-asthetik#280 comment 5348659682
+// (created 2026-08-19T22:15:45Z, recorded verbatim in fixtures/restart-train/
+// issue-280-bare-end-comment.json) is a hand-posted `END 2026-08-19T22:12:14Z · run
+// 32255934362 attempt 2 · SUCCESS …` with ZERO backticks anywhere in the body. Under the
+// strict-span-only parser that END was invisible, so the anchor fell back to an OLDER END —
+// the wrong failure direction for a restart train (an invisible END means the window opens
+// too soon after the real restart). Found by the rung-0 `--now` replay acceptance, 2026-08-19.
+// Kept deliberately conservative: the keyword must sit at LINE START (modulo whitespace) and
+// must be immediately followed by an ISO date, so prose like "END of the story" or a mid-line
+// mention can never match. A backticked line never double-matches (its line starts with the
+// backtick, not the keyword).
+const BARE_LEDGER_LINE_RE = /(?:^|\n)\s*(END|START|PLAN|NOTE|HELD)\s+(\d{4}-\d{2}-\d{2}T[^\n`]*)/g;
 const ISO_PREFIX_RE =
   /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z)(?:[–-](?:\d{4}-\d{2}-\d{2}T)?\d{2}:\d{2}(?::\d{2})?Z)?/;
 
@@ -605,9 +731,21 @@ const ISO_PREFIX_RE =
 export function parseTrainLedger(comments: RestartTrainComment[]): TrainLedgerEntry[] {
   const entries: TrainLedgerEntry[] = [];
   for (const c of comments) {
+    // Collect BOTH syntaxes with their body offsets, then sort by offset so entries come out
+    // in body-scan order even when one comment mixes backticked and bare lines (codex pass-2
+    // P2, PR #174): two matchAll loops appended bare-after-backticked regardless of position,
+    // violating this function's documented same-comment ordering contract.
+    const raw: Array<{ kind: TrainLedgerEntry["kind"]; rest: string; at: number }> = [];
     for (const m of c.body.matchAll(LEDGER_LINE_RE)) {
-      const kind = m[1] as TrainLedgerEntry["kind"];
-      const rest = m[2].trim();
+      raw.push({ kind: m[1] as TrainLedgerEntry["kind"], rest: m[2], at: m.index ?? 0 });
+    }
+    for (const m of c.body.matchAll(BARE_LEDGER_LINE_RE)) {
+      raw.push({ kind: m[1] as TrainLedgerEntry["kind"], rest: m[2], at: m.index ?? 0 });
+    }
+    raw.sort((a, b) => a.at - b.at);
+    for (const rawEntry of raw) {
+      const kind = rawEntry.kind;
+      const rest = rawEntry.rest.trim();
       const isoMatch = rest.match(ISO_PREFIX_RE);
       const isoStamp = isoMatch ? isoMatch[1] : "";
       // Strip everything up to and including the first ` · ` — handles a plain " · ", a range

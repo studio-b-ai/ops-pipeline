@@ -65,6 +65,7 @@
  * bare stack trace three layers removed from "which permission").
  */
 
+import { createHash } from "node:crypto";
 import { commentIssue, gh, listIssueComments, type IssueComment } from "./lib/github-issues.js";
 import {
   fetchProjectRefs,
@@ -72,9 +73,15 @@ import {
   latestSuccessfulDeployment,
 } from "./lib/railway-deployment-probes.js";
 import {
+  clampCandidatesToNow,
+  clampCommentsToNow,
+  clampTicketsToNow,
   computeAnchor,
+  keepAtOrBefore,
+  latestEndAnchorCandidate,
   orderQueue,
   planLines,
+  planStateKey,
   parseEndComments,
   findDanglingPlan,
   parseTrainPin,
@@ -133,7 +140,12 @@ async function checkHold(target: { repo: string; number: number }): Promise<{ he
  * "path?k=v&k2=v2"`), NOT `-f k=v` without `-X GET` — live-verified 2026-08-19: bare `-f` flags
  * default `gh api` to a POST, which 404s against this GET-only collection endpoint.
  */
-async function fetchClientAsthetikAnchorCandidate(): Promise<AnchorCandidate | null> {
+async function fetchClientAsthetikAnchorCandidate(nowIso: string): Promise<AnchorCandidate | null> {
+  // Source-level replay clamp (codex pass-3 P2, PR #174): filter runs to completed_at <= now
+  // BEFORE picking the latest — clamping after the reduce lets a run completed after the replay
+  // instant shadow the earlier run that should anchor. keepAtOrBefore passes malformed stamps
+  // through; a malformed winner is rejected fail-closed by computeAnchor downstream.
+  const stampOk = keepAtOrBefore(nowIso);
   let runsJson: string;
   try {
     runsJson = gh([
@@ -163,7 +175,11 @@ async function fetchClientAsthetikAnchorCandidate(): Promise<AnchorCandidate | n
     const deployJob = jobs.find(
       (j) => j.name === DEPLOY_JOB_NAME && j.conclusion === "success" && j.completed_at,
     );
-    if (deployJob?.completed_at && (!best || deployJob.completed_at > best.completedAtIso)) {
+    if (
+      deployJob?.completed_at &&
+      stampOk(deployJob.completed_at) &&
+      (!best || deployJob.completed_at > best.completedAtIso)
+    ) {
       best = { completedAtIso: deployJob.completed_at, runId };
     }
   }
@@ -185,7 +201,7 @@ async function fetchClientAsthetikAnchorCandidate(): Promise<AnchorCandidate | n
  * Railway outage (the every-5-minutes cron retries next cycle). Codex pass-4 P2 "degrade to null" REJECTED
  * on this basis, 2026-08-19.
  */
-async function fetchRailwayAnchorCandidate(): Promise<AnchorCandidate | null> {
+async function fetchRailwayAnchorCandidate(nowIso: string): Promise<AnchorCandidate | null> {
   const token = process.env.RAILWAY_API_TOKEN;
   if (!token) return null;
 
@@ -202,7 +218,11 @@ async function fetchRailwayAnchorCandidate(): Promise<AnchorCandidate | null> {
   }
   const deploysResult = await fetchServiceDeployments(token, STUDIOB_PLATFORM_PROJECT_ID, env.id, service.id, 10);
   if (!deploysResult.ok) throw new Error(`Railway deployments fetch failed: ${deploysResult.error}`);
-  const latest = latestSuccessfulDeployment(deploysResult.deployments);
+  // Source-level replay clamp (codex pass-3 P2, PR #174) — same law as the Actions source:
+  // drop deployments updated after `now` BEFORE the latest-reduce so a post-instant deployment
+  // cannot shadow the one that should anchor. Malformed stamps pass through per keepAtOrBefore.
+  const stampOk = keepAtOrBefore(nowIso);
+  const latest = latestSuccessfulDeployment(deploysResult.deployments.filter((d) => stampOk(d.updatedAt)));
   if (!latest) return null;
   return {
     source: "studiob-api-railway",
@@ -221,7 +241,7 @@ async function fetchCalendarComments(): Promise<RestartTrainComment[]> {
   }
 }
 
-async function fetchTickets(): Promise<Ticket[]> {
+async function fetchTickets(nowIso: string): Promise<Ticket[]> {
   const tickets: Ticket[] = [];
   for (const repo of TICKET_REPOS) {
     let prsJson: string;
@@ -251,6 +271,13 @@ async function fetchTickets(): Promise<Ticket[]> {
       } catch (err) {
         throw classifyReadError(err, `issues:read (${repo}#${pr.number} comments)`);
       }
+      // Replay clamp BEFORE pin/dependency parsing (codex P2b, PR #174 pass 1): a pin or
+      // train:after/consolidate comment posted after `now` did not exist at the replay
+      // instant — parseTrainPin takes the LATEST pin, so an unclamped future re-pin would
+      // hide the pin that WAS live and get the whole ticket dropped by clampTicketsToNow
+      // instead of scheduled on the old pin. (Label STATE has no history — a replay sees
+      // today's train:ready set; a documented replay-fidelity limitation, not fixable here.)
+      comments = clampCommentsToNow(comments, nowIso);
       const pin = parseTrainPin(comments);
       if (!pin) {
         // No pin comment yet — the label-apply step (separate, CTO-owned, not built by rung 0)
@@ -277,16 +304,53 @@ async function fetchTickets(): Promise<Ticket[]> {
 
 // ───────────────────────────── posting (gated behind --post) ─────────────────────────────
 
-async function postLines(target: { repo: string; number: number }, lines: string[], post: boolean): Promise<void> {
+const STATE_MARKER_RE = /<!-- restart-train:state=([0-9a-f]{12}) -->/;
+
+/**
+ * Post the cycle's PLAN lines as ONE comment, deduped on the scheduling-state fingerprint
+ * (`planStateKey` — see its doc for why body equality can't work: clear-now/chained slot
+ * instants churn every cycle by construction). The posted comment carries a hidden
+ * `<!-- restart-train:state=<sha256-12> -->` marker; if the LAST marker-bearing comment on the
+ * target has the same hash, the state hasn't transitioned and nothing is posted (#292 —
+ * post per state transition, never per cycle). Alternation (A → B → A) correctly reposts.
+ * `listIssueComments` paginates the full ascending comment list, so the last-marker scan is
+ * exact, not a window.
+ */
+async function postLines(
+  target: { repo: string; number: number },
+  lines: string[],
+  post: boolean,
+  stateKey: string,
+): Promise<void> {
   console.log(`[restart-train] ${lines.length} line(s) for ${target.repo}#${target.number}:`);
   for (const line of lines) console.log(`  ${line}`);
+  if (lines.length === 0) {
+    console.log("[restart-train] empty plan — nothing to post");
+    return;
+  }
+  const keyHash = createHash("sha256").update(stateKey).digest("hex").slice(0, 12);
+  console.log(`[restart-train] state ${keyHash} :: ${stateKey}`);
   if (!post) {
     console.log("[restart-train] --post not set — not posting (default; tests/manual runs never pass it)");
     return;
   }
-  for (const line of lines) {
-    commentIssue(target.repo, target.number, line);
+  let comments: IssueComment[];
+  try {
+    comments = listIssueComments(target.repo, target.number);
+  } catch (err) {
+    throw classifyReadError(err, "issues:read (target state-dedup check)");
   }
+  let lastPostedHash: string | null = null;
+  for (const c of comments) {
+    const m = STATE_MARKER_RE.exec(c.body);
+    if (m) lastPostedHash = m[1];
+  }
+  if (lastPostedHash === keyHash) {
+    console.log(`[restart-train] scheduling state unchanged since last post (${keyHash}) — not reposting (#292)`);
+    return;
+  }
+  commentIssue(target.repo, target.number, `${lines.join("\n")}\n\n<!-- restart-train:state=${keyHash} -->`);
+  console.log(`[restart-train] posted 1 comment (state ${keyHash})`);
 }
 
 async function postHeldIfNotDuped(
@@ -327,41 +391,55 @@ async function main(): Promise<void> {
     return;
   }
 
-  const calendarComments = await fetchCalendarComments();
+  const rawCalendarComments = await fetchCalendarComments();
+  // Replay clamp (see clampCommentsToNow's doc): no fact from after `now` may be parsed.
+  const calendarComments = clampCommentsToNow(rawCalendarComments, flags.now);
+  if (calendarComments.length !== rawCalendarComments.length) {
+    console.log(
+      `[restart-train] clamp: dropped ${rawCalendarComments.length - calendarComments.length} calendar comment(s) after now=${flags.now}`,
+    );
+  }
   const endEntries = parseEndComments(calendarComments);
   const dangling = findDanglingPlan(calendarComments, flags.now);
 
   const candidates: AnchorCandidate[] = [];
-  const clientAsthetikCandidate = await fetchClientAsthetikAnchorCandidate();
+  const clientAsthetikCandidate = await fetchClientAsthetikAnchorCandidate(flags.now);
   if (clientAsthetikCandidate) candidates.push(clientAsthetikCandidate);
-  const railwayCandidate = await fetchRailwayAnchorCandidate();
+  const railwayCandidate = await fetchRailwayAnchorCandidate(flags.now);
   if (railwayCandidate) candidates.push(railwayCandidate);
-  if (endEntries.length > 0) {
-    const latestEnd = endEntries.reduce((a, b) => (a.isoStamp > b.isoStamp ? a : b));
-    if (latestEnd.isoStamp) {
-      candidates.push({
-        source: "manual-end-comment",
-        completedAtIso: latestEnd.isoStamp,
-        detail: latestEnd.detail,
-      });
-    }
+  const endCandidate = latestEndAnchorCandidate(endEntries, flags.now);
+  if (endCandidate) candidates.push(endCandidate);
+
+  // Belt-and-braces candidate-layer clamp: every source above already clamps its RAW stream
+  // before its latest-reduce (codex pass-3 P2 — reduce-then-clamp let a future fact shadow a
+  // valid older one from the same source), so this layer should drop nothing in the normal
+  // path; it stays as defense-in-depth for any future source added without its own clamp.
+  const clampedCandidates = clampCandidatesToNow(candidates, flags.now);
+  if (clampedCandidates.length !== candidates.length) {
+    console.log(
+      `[restart-train] clamp: dropped ${candidates.length - clampedCandidates.length} anchor candidate(s) after now=${flags.now}`,
+    );
   }
 
   const anchor = computeAnchor({
     now: flags.now,
-    candidates,
+    candidates: clampedCandidates,
     danglingPlan: dangling.dangling,
     danglingPlanDetail: dangling.detail,
   });
 
   if (!anchor.ok) {
     console.log(`[restart-train] anchor unavailable: ${anchor.reason}`);
-    await postLines(target, planLines([], anchor, flags.now), flags.post);
+    await postLines(target, planLines([], anchor, flags.now), flags.post, planStateKey([], anchor));
     return;
   }
   console.log(`[restart-train] anchor: ${anchor.anchorIso} (${anchor.source}: ${anchor.detail})`);
 
-  const tickets = await fetchTickets();
+  const rawTickets = await fetchTickets(flags.now);
+  const tickets = clampTicketsToNow(rawTickets, flags.now);
+  if (tickets.length !== rawTickets.length) {
+    console.log(`[restart-train] clamp: dropped ${rawTickets.length - tickets.length} ticket(s) pinned after now=${flags.now}`);
+  }
   console.log(`[restart-train] ${tickets.length} train:ready ticket(s) with a valid pin comment`);
 
   const queue = orderQueue(tickets);
@@ -372,7 +450,7 @@ async function main(): Promise<void> {
   }
 
   const lines = planLines(queue, anchor, flags.now);
-  await postLines(target, lines, flags.post);
+  await postLines(target, lines, flags.post, planStateKey(queue, anchor));
 }
 
 main().catch((err) => {
