@@ -14,7 +14,7 @@ import {
   type LiveSnapshot,
   type Manifest,
 } from "../grants-drift-classify.js";
-import type { InstallationGrant, MemberGrant, ProbeResult, TeamDetail } from "../grants-drift-probes.js";
+import type { InstallationGrant, MemberGrant, ProbeResult, TeamDetail, TeamSummary } from "../grants-drift-probes.js";
 
 // GitHub grant-role vocabulary, named rather than inlined at each `role:` fixture site — this
 // codebase's global pre-write guard heuristically flags any `role: "<word>"` shape as a possible
@@ -311,6 +311,7 @@ describe("classifyGrantSurface", () => {
       orgSettings: { ok: true, data: { default_repository_permission: "none", two_factor_requirement_enabled: false } },
       members: { ok: true, data: [{ login: "kbibelhausen", role: ROLE_ADMIN }] },
       outsideCollaborators: { ok: true, data: [] },
+      teamList: { ok: true, data: [{ slug: "platform-admins" }] },
       teamDetails,
       directGrants: { ok: true, data: [{ repo: "acumatica-mcp", login: "kbibelhausen", role: ROLE_ADMIN }] },
       installations: { ok: true, data: [{ app_slug: "claude", repository_selection: "all", permissions: { contents: ROLE_WRITE } }] },
@@ -324,8 +325,32 @@ describe("classifyGrantSurface", () => {
       expect(r.status).toBe(STATUS_OK);
     }
     expect(results.map((r) => r.entity).sort()).toEqual(
-      ["direct-grants", "installation/claude", "org-members", "org-settings", "outside-collaborators", "team/platform-admins"].sort(),
+      [
+        "direct-grants",
+        "installation/claude",
+        "org-members",
+        "org-settings",
+        "outside-collaborators",
+        "team-list",
+        "team/platform-admins",
+      ].sort(),
     );
+  });
+
+  it("flags a team-list probe failure as its own PROBE FAILED entity, independent of team/<slug> results (codex P2, pass 2)", () => {
+    // The exact scenario codex flagged: the top-level list probe fails in isolation (e.g. a
+    // transient error scoped only to that endpoint) while every manifest-known team's OWN detail
+    // probe still succeeds -- classifyTeam has no way to know a live-only team went undiscovered,
+    // so team-list is the only entity that can say so.
+    const snapshot = okSnapshot();
+    snapshot.teamList = { ok: false, error: "gh: Internal Server Error (HTTP 500)", httpStatus: 500 };
+    const results = classifyGrantSurface(manifest, snapshot);
+    const teamListResult = results.find((r) => r.entity === "team-list");
+    expect(teamListResult?.status).toBe(STATUS_PROBE_FAILED);
+    expect(teamListResult?.detail[0]).toContain("HTTP 500");
+    // The manifest-known team's own result is UNAFFECTED -- it has its own successful probe.
+    const platformAdminsResult = results.find((r) => r.entity === "team/platform-admins");
+    expect(platformAdminsResult?.status).toBe(STATUS_OK);
   });
 
   it("maps a probe failure straight to a PROBE FAILED entity result, never diffed", () => {

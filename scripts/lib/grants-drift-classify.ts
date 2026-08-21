@@ -6,7 +6,7 @@
 // team/installation exists on only one side) lives in classifyGrantSurface, which composes them.
 //
 // Entity vocabulary (exact strings used in issue titles via buildSeverityTitle):
-//   org-settings | org-members | outside-collaborators | team/<slug> | direct-grants |
+//   org-settings | org-members | outside-collaborators | team-list | team/<slug> | direct-grants |
 //   installation/<app_slug>
 //
 // Status vocabulary lives in the STATUS_* constants below (not inline string literals) so a
@@ -21,6 +21,7 @@ import type {
   MemberGrant,
   ProbeResult,
   TeamDetail,
+  TeamSummary,
 } from "./grants-drift-probes.js";
 
 export const STATUS_OK = "OK" as const;
@@ -86,6 +87,13 @@ export interface LiveSnapshot {
   orgSettings: ProbeResult<{ default_repository_permission: string; two_factor_requirement_enabled: boolean }>;
   members: ProbeResult<MemberGrant[]>;
   outsideCollaborators: ProbeResult<string[]>;
+  /**
+   * The raw top-level team-list probe (`GET /orgs/{org}/teams`), carried through unchanged
+   * alongside `teamDetails` (which the orchestrator derives from it). Classified into its own
+   * `team-list` entity below — see that block for why this is needed even though `teamDetails`
+   * already covers every manifest-known team.
+   */
+  teamList: ProbeResult<TeamSummary[]>;
   teamDetails: Map<string, ProbeResult<TeamDetail | null>>;
   directGrants: ProbeResult<DirectGrant[]>;
   installations: ProbeResult<InstallationGrant[]>;
@@ -249,6 +257,23 @@ export function classifyGrantSurface(manifest: Manifest, snapshot: LiveSnapshot)
   } else {
     const c = classifyOutsideCollaborators(manifest.outside_collaborators, snapshot.outsideCollaborators.data);
     results.push({ entity: "outside-collaborators", status: c.status, detail: c.detail });
+  }
+
+  // team-list: the top-level team-list probe's OWN success/failure, classified independently of
+  // every team/<slug> result below (codex review P2, pass 2, ops#178: a `probeTeamSlugs` failure
+  // that's isolated from the per-team detail calls -- e.g. a transient error or a permission gap
+  // scoped only to the list endpoint -- previously had NO entity representation at all. The
+  // orchestrator falls back to manifest-only slugs when this probe fails, so every manifest-known
+  // team still classifies correctly (PROBE FAILED there would be wrong -- those teams ARE
+  // readable), but a live-only team unknown to the manifest becomes silently undiscoverable: no
+  // DRIFT, no PROBE FAILED, nothing. This entity is what makes THAT gap loud. It is
+  // OK/PROBE-FAILED only -- DRIFT never applies here, since "an unexpected team exists" is already
+  // `team/<slug>` DRIFT once discovery succeeds; this entity only answers "could we discover the
+  // live team list at all this run."
+  if (!snapshot.teamList.ok) {
+    results.push({ entity: "team-list", status: STATUS_PROBE_FAILED, detail: [snapshot.teamList.error] });
+  } else {
+    results.push({ entity: "team-list", status: STATUS_OK, detail: [] });
   }
 
   const manifestTeamBySlug = new Map(manifest.teams.map((t) => [t.slug, t]));

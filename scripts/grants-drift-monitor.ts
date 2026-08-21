@@ -35,7 +35,10 @@
  * own all-projects-failed behavior exactly (its per-project PROBE FAILED issues open in the same
  * loop as the blanket MONITOR BLIND check, not instead of it): each issue names which specific
  * entity's state is unverified, and all of them auto-close together once the permission gap
- * closes and drift/no-drift becomes knowable again.
+ * closes and drift/no-drift becomes knowable again. `team-list` is one more such entity, off the
+ * top-level team-list probe directly (codex review P2, pass 2) — distinct from any individual
+ * `team/<slug>` PROBE FAILED, since the list probe can fail in isolation while manifest-known
+ * teams' own detail probes keep succeeding.
  *
  * `--dry-run` (or workflow_dispatch input `dry_run`) runs every real probe AND a real
  * `gh issue list` (there's no meaningful secrets-free classify-only mode — reading live grant
@@ -206,8 +209,11 @@ async function main(): Promise<void> {
 
   // Team detail union: every manifest-known slug, PLUS every live-discovered slug when the
   // top-level team list probe succeeded. When it fails, only manifest-known slugs are attempted —
-  // each will independently come back PROBE FAILED (same permission gap), which is correct: we
-  // simply can't discover a live-only team we have no other way to name.
+  // each manifest-known team still classifies correctly off its own probeTeamDetail call (which
+  // can succeed independently of the list endpoint), but a live-only team unknown to the manifest
+  // becomes undiscoverable this run. That gap is no longer silent: classifyGrantSurface emits its
+  // own `team-list` entity straight off `teamSlugsResult` (passed through below), independent of
+  // whatever this fallback does — codex review P2, pass 2, ops#178.
   const manifestSlugs = manifest.teams.map((t) => t.slug);
   const liveSlugs = teamSlugsResult.ok ? teamSlugsResult.data.map((t) => t.slug) : [];
   const slugUnion = [...new Set([...manifestSlugs, ...liveSlugs])].sort();
@@ -220,6 +226,7 @@ async function main(): Promise<void> {
     orgSettings: orgSettingsResult,
     members: membersResult,
     outsideCollaborators: outsideCollaboratorsResult,
+    teamList: teamSlugsResult,
     teamDetails,
     directGrants: directGrantsResult,
     installations: installationsResult,
