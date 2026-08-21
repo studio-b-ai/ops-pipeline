@@ -87,7 +87,7 @@ const MANIFEST_FILE = join(HERE, "grants.manifest.yaml");
 
 const REPO = "studio-b-ai/ops-pipeline";
 const LABEL = "grants-drift";
-const LABEL_DESCRIPTION = "grants-drift-monitor alert state (open = live org grants no longer match the manifest, or a probe failing)";
+const LABEL_DESCRIPTION = "grants-drift-monitor alert state (open = live grant differs from manifest, or a probe failed)";
 const BLIND_TITLE = "[grants-drift] MONITOR BLIND — fleet-bot lacks org read permissions (Kevin click pending, ops#178)";
 
 // ───────────────────────────── manifest ─────────────────────────────
