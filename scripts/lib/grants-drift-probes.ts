@@ -179,9 +179,24 @@ export interface TeamDetail {
 /**
  * Full detail for one team (members + per-repo role), addressed directly by slug — this does NOT
  * depend on probeTeamSlugs succeeding first, since every manifest-known slug is addressable on
- * its own. `data: null` means the team genuinely does not exist live (a 404 on either sub-call),
- * which is drift-relevant LIVE DATA, not a probe failure — distinct from every other error shape,
- * which means "we don't know" and IS a probe failure (Rule #401's absence-vs-unknown distinction).
+ * its own. `data: null` means one of the two sub-calls 404'd.
+ *
+ * ⚠️ FALSIFIED (ops#184, 2026-08-21): this used to claim "means the team genuinely does not exist
+ * live" and treated that as settled, drift-relevant LIVE DATA. It is not settled — a 404 here is
+ * AMBIGUOUS, not proof of absence. GitHub returns the SAME 404 (not 403) on
+ * `orgs/{org}/teams/{slug}/members` for a token that lacks org Members:read as it does for a
+ * genuinely-deleted team. The fleet App token's first real firing (run 32514881056) read all 4
+ * manifest teams as `data: null` under a Members:read-less token and produced 4 false DRIFT
+ * verdicts before this was caught — the exact "404-as-absence oracle" this docstring endorsed,
+ * un-negative-controlled against a blind token (Rule #322).
+ *
+ * This function has no visibility into whether OTHER org-level probes succeeded this run, so it
+ * cannot disambiguate on its own — disambiguation is classify-time, not probe-time:
+ * `classifyGrantSurface` (lib/grants-drift-classify.ts) now trusts `data: null` as genuine live
+ * absence only when the top-level team-list probe (probeTeamSlugs) ALSO succeeded this run AND
+ * the slug is confirmed absent from that listing — corroborated absence, not a bare 404. Every
+ * other error shape here still means "we don't know" and IS a probe failure (Rule #401's
+ * absence-vs-unknown distinction — correct in general, just mis-applied to the 404 case above).
  */
 export function probeTeamDetail(org: string, slug: string): ProbeResult<TeamDetail | null> {
   const membersRes = ghApiListStrings(`orgs/${org}/teams/${slug}/members`, ".[].login");

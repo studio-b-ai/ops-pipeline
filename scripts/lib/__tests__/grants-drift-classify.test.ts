@@ -378,3 +378,171 @@ describe("classifyGrantSurface", () => {
     expect(installResult?.status).toBe(STATUS_PROBE_FAILED);
   });
 });
+
+// ops#184: a token with degraded org-level visibility (some org-level probes failing, some
+// "succeeding" with a hollowed-out response) can hand teams/members classifiers absence evidence
+// that is indistinguishable, on the data alone, from a real removal -- an empty-200 org-members
+// list, a 404 team read. These regression cases pin the demotion behavior against the exact shape
+// of the run that surfaced it, then prove the surrounding cases are unaffected in both directions
+// (Rule #322): full visibility still classifies a genuinely-absent team as DRIFT, and a team-list
+// success specifically -- not overall visibility -- is what corroborates a per-team 404.
+describe("classifyGrantSurface — ops#184 degraded-visibility regression", () => {
+  // Mirrors the manifest shape behind the real false-positive run (32514881056, 2026-08-21): four
+  // teams, two members, one installation, no direct grants.
+  const manifest: Manifest = {
+    org: "studio-b-ai",
+    org_settings: { default_repository_permission: "none", two_factor_requirement_enabled: true },
+    members: [
+      { login: "kbibelhausen", role: ROLE_ADMIN },
+      { login: "naelmkt", role: ROLE_MEMBER },
+    ],
+    outside_collaborators: [],
+    teams: [
+      { slug: "asthetik-marketing", members: ["naelmkt"], repos: { "asthetik-portal": ROLE_WRITE } },
+      { slug: "client-stakeholders", members: ["naelmkt"], repos: {} },
+      { slug: "consultants", members: [], repos: {} },
+      { slug: "platform-admins", members: ["kbibelhausen"], repos: { "ops-pipeline": ROLE_ADMIN } },
+    ],
+    direct_repo_grants: [],
+    installations: [{ app_slug: "studiob-fleet-bot", repository_selection: "all", permissions: { contents: ROLE_WRITE } }],
+  };
+  const teamSlugs = manifest.teams.map((t) => t.slug);
+
+  // T-agnostic failed probe: the `ok: false` branch of `ProbeResult<T>` doesn't depend on `T` at
+  // all, so this single value is reusable for every failed org-level probe below regardless of
+  // that probe's own success-shape type.
+  const forbidden: ProbeResult<never> = { ok: false, error: "gh: Resource not accessible by integration (HTTP 403)", httpStatus: 403 };
+
+  it(
+    "exact Actions-run shape (ops#184, run 32514881056): empty-200 members + all-404 teams + " +
+      "failed team-list/org-settings/outside-collaborators/installations -> zero DRIFT from " +
+      "teams/members (all demoted to PROBE FAILED), isMonitorBlind still false",
+    () => {
+      const teamDetails = new Map<string, ProbeResult<TeamDetail | null>>();
+      for (const slug of teamSlugs) {
+        teamDetails.set(slug, { ok: true, data: null }); // every per-team read 404'd
+      }
+      const snapshot: LiveSnapshot = {
+        orgSettings: forbidden,
+        members: { ok: true, data: [] }, // empty-200: both manifest members look "missing"
+        outsideCollaborators: forbidden,
+        teamList: forbidden,
+        teamDetails,
+        directGrants: { ok: true, data: [] },
+        installations: forbidden,
+      };
+
+      const results = classifyGrantSurface(manifest, snapshot);
+
+      // Headline assertion: the false-positive class this issue exists to kill.
+      expect(results.filter((r) => r.status === STATUS_DRIFT)).toEqual([]);
+
+      const membersResult = results.find((r) => r.entity === "org-members");
+      expect(membersResult?.status).toBe(STATUS_PROBE_FAILED);
+      expect(membersResult?.detail.length).toBeGreaterThan(0);
+      expect(membersResult?.detail.every((d) => d.includes("unverifiable while org-level visibility is degraded"))).toBe(true);
+
+      for (const slug of teamSlugs) {
+        const teamResult = results.find((r) => r.entity === `team/${slug}`);
+        expect(teamResult?.status).toBe(STATUS_PROBE_FAILED);
+        expect(teamResult?.detail[0]).toContain("org-level visibility is degraded");
+        expect(teamResult?.detail[0]).toContain("ops#184");
+      }
+
+      // The probes that were openly PROBE FAILED stay PROBE FAILED -- unaffected, pre-existing
+      // behavior this fix must not touch.
+      for (const entity of ["org-settings", "outside-collaborators", "team-list"]) {
+        expect(results.find((r) => r.entity === entity)?.status).toBe(STATUS_PROBE_FAILED);
+      }
+      expect(results.find((r) => r.entity === "installation/studiob-fleet-bot")?.status).toBe(STATUS_PROBE_FAILED);
+
+      // direct-grants had a real, successful, matching read this run -- correctly OK, exactly as
+      // the real run showed (the one entity the real run did not misclassify).
+      expect(results.find((r) => r.entity === "direct-grants")?.status).toBe(STATUS_OK);
+
+      // isMonitorBlind's own operational definition is untouched by this fix: this shape has ONE
+      // successful org-level probe (members returned a real, if empty, 200), so isMonitorBlind
+      // correctly still reports false -- the exact residual gap #184 exists to close (a token can
+      // partially blind specific reads while isMonitorBlind, an all-dark check, sees one live
+      // probe and stays quiet).
+      expect(isMonitorBlind([snapshot.orgSettings, snapshot.members, snapshot.outsideCollaborators, snapshot.teamList, snapshot.installations])).toBe(
+        false,
+      );
+    },
+  );
+
+  function fullVisibilitySnapshot(genuinelyAbsentSlug: string): LiveSnapshot {
+    const teamDetails = new Map<string, ProbeResult<TeamDetail | null>>();
+    for (const team of manifest.teams) {
+      if (team.slug === genuinelyAbsentSlug) {
+        teamDetails.set(team.slug, { ok: true, data: null });
+        continue;
+      }
+      teamDetails.set(team.slug, {
+        ok: true,
+        data: { members: team.members, repos: Object.entries(team.repos).map(([repo, role]) => ({ repo, role })) },
+      });
+    }
+    return {
+      orgSettings: { ok: true, data: manifest.org_settings },
+      members: {
+        ok: true,
+        data: [
+          { login: "kbibelhausen", role: ROLE_ADMIN },
+          { login: "naelmkt", role: ROLE_MEMBER },
+        ],
+      },
+      outsideCollaborators: { ok: true, data: [] },
+      teamList: { ok: true, data: teamSlugs.filter((s) => s !== genuinelyAbsentSlug).map((slug) => ({ slug })) },
+      teamDetails,
+      directGrants: { ok: true, data: [] },
+      installations: { ok: true, data: manifest.installations },
+    };
+  }
+
+  it("full-visibility shape: verdicts unchanged from pre-#184 behavior, including a genuinely-absent team still DRIFT (negative control)", () => {
+    const results = classifyGrantSurface(manifest, fullVisibilitySnapshot("consultants"));
+
+    for (const slug of ["asthetik-marketing", "client-stakeholders", "platform-admins"]) {
+      expect(results.find((r) => r.entity === `team/${slug}`)?.status).toBe(STATUS_OK);
+    }
+    const consultantsResult = results.find((r) => r.entity === "team/consultants");
+    expect(consultantsResult?.status).toBe(STATUS_DRIFT);
+    expect(consultantsResult?.detail).toEqual(['team "consultants" expected, not found live']);
+
+    expect(results.find((r) => r.entity === "org-members")?.status).toBe(STATUS_OK);
+    expect(results.find((r) => r.entity === "org-settings")?.status).toBe(STATUS_OK);
+    expect(results.find((r) => r.entity === "outside-collaborators")?.status).toBe(STATUS_OK);
+    expect(results.find((r) => r.entity === "team-list")?.status).toBe(STATUS_OK);
+    expect(results.find((r) => r.entity === "direct-grants")?.status).toBe(STATUS_OK);
+    expect(results.find((r) => r.entity === "installation/studiob-fleet-bot")?.status).toBe(STATUS_OK);
+  });
+
+  it(
+    "mixed case: team-list itself succeeded and confirms the slug absent, so a per-team 404 still " +
+      "classifies DRIFT even though a SIBLING org-level probe (org-settings) failed this run -- " +
+      "honest absence preserved; demotion is team-list-specific, not a blanket reaction to any " +
+      "degraded probe",
+    () => {
+      const snapshot = fullVisibilitySnapshot("consultants");
+      snapshot.orgSettings = forbidden;
+
+      const results = classifyGrantSurface(manifest, snapshot);
+
+      // org-settings itself is correctly PROBE FAILED -- unrelated to this test's point.
+      expect(results.find((r) => r.entity === "org-settings")?.status).toBe(STATUS_PROBE_FAILED);
+
+      // team-list read fine this run and confirmed "consultants" absent from the live listing --
+      // that corroboration is what lets the 404 stand as genuine DRIFT, independent of
+      // org-settings having failed alongside it.
+      const consultantsResult = results.find((r) => r.entity === "team/consultants");
+      expect(consultantsResult?.status).toBe(STATUS_DRIFT);
+      expect(consultantsResult?.detail).toEqual(['team "consultants" expected, not found live']);
+
+      // The other three teams, whose live reads all matched the manifest, are unaffected.
+      for (const slug of ["asthetik-marketing", "client-stakeholders", "platform-admins"]) {
+        expect(results.find((r) => r.entity === `team/${slug}`)?.status).toBe(STATUS_OK);
+      }
+    },
+  );
+});

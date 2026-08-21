@@ -121,19 +121,55 @@ export function classifyOrgSettings(
   return { status: detail.length === 0 ? STATUS_OK : STATUS_DRIFT, detail };
 }
 
-export function classifyMembers(expected: ManifestMember[], live: MemberGrant[]): { status: OkOrDrift; detail: string[] } {
+/**
+ * `orgLevelVisibilityDegraded` (ops#184, default false so every pre-existing 2-arg call site and
+ * test keeps its exact prior behavior): true when the org-members read succeeded this run but a
+ * SIBLING org-level probe didn't. An empty-200 `orgs/{org}/members` response under a token missing
+ * Members:read is indistinguishable, on this function's inputs alone, from a real all-members
+ * removal — both hand `classifyMembers` an `expected` that has no match in `live`. When degraded,
+ * "expected X, missing live" is demoted to an unverifiable PROBE-FAILED-worthy line instead of
+ * DRIFT. Role-mismatch and surplus-member lines are computed from rows GitHub actually RETURNED —
+ * affirmative evidence a degraded read can only under-produce, never fabricate — so those stay
+ * DRIFT unconditionally, same as before. If every detail line ends up demoted (no affirmative
+ * drift survives), the entity's status is PROBE FAILED, not OK: absence went unconfirmed, it
+ * wasn't ruled out.
+ */
+export function classifyMembers(
+  expected: ManifestMember[],
+  live: MemberGrant[],
+  orgLevelVisibilityDegraded = false,
+): { status: EntityStatus; detail: string[] } {
   const detail: string[] = [];
+  let affirmativeDrift = false;
+  let demotedAbsence = false;
   const liveByLogin = new Map(live.map((m) => [m.login, m.role]));
   const expectedLogins = new Set(expected.map((m) => m.login));
   for (const e of expected) {
     const liveRole = liveByLogin.get(e.login);
-    if (liveRole === undefined) detail.push(`member ${e.login}: expected role ${e.role}, missing live`);
-    else if (liveRole !== e.role) detail.push(`member ${e.login}: expected role ${e.role}, live role ${liveRole}`);
+    if (liveRole === undefined) {
+      if (orgLevelVisibilityDegraded) {
+        demotedAbsence = true;
+        detail.push(
+          `member ${e.login}: expected role ${e.role}, missing live — unverifiable while org-level visibility is degraded (see ops#184)`,
+        );
+      } else {
+        affirmativeDrift = true;
+        detail.push(`member ${e.login}: expected role ${e.role}, missing live`);
+      }
+    } else if (liveRole !== e.role) {
+      affirmativeDrift = true;
+      detail.push(`member ${e.login}: expected role ${e.role}, live role ${liveRole}`);
+    }
   }
   for (const l of live) {
-    if (!expectedLogins.has(l.login)) detail.push(`member ${l.login}: present live (role ${l.role}), not in manifest`);
+    if (!expectedLogins.has(l.login)) {
+      affirmativeDrift = true;
+      detail.push(`member ${l.login}: present live (role ${l.role}), not in manifest`);
+    }
   }
-  return { status: detail.length === 0 ? STATUS_OK : STATUS_DRIFT, detail };
+  if (affirmativeDrift) return { status: STATUS_DRIFT, detail };
+  if (demotedAbsence) return { status: STATUS_PROBE_FAILED, detail };
+  return { status: STATUS_OK, detail };
 }
 
 export function classifyOutsideCollaborators(expected: string[], live: string[]): { status: OkOrDrift; detail: string[] } {
@@ -238,6 +274,30 @@ export function classifyInstallation(
 export function classifyGrantSurface(manifest: Manifest, snapshot: LiveSnapshot): EntityResult[] {
   const results: EntityResult[] = [];
 
+  // ops#184: degraded-visibility flag -- true when ANY org-level probe failed this run. Same
+  // five-probe set isMonitorBlind consumes below (direct-grants deliberately excluded -- see that
+  // function's docstring: it needs only repo Metadata:read and works independently of the
+  // org-level permission gap), but the WEAKER "any failed" condition, not isMonitorBlind's "every
+  // failed" (all-dark). A token missing exactly one org-level grant (e.g. Members:read) still
+  // partially blinds specific reads even while OTHER org-level probes keep succeeding --
+  // isMonitorBlind correctly stays false in that shape (its operational definition is deliberate
+  // and untouched here), but a probe that "succeeds" under a partially-blind token can still
+  // return absence evidence (an empty-200 member list, a 404 team read) that looks exactly like
+  // confirmed live data. This flag is what lets the classifiers below tell the difference. The
+  // first real firing (run 32514881056, 2026-08-21) produced exactly this shape: 4 team reads
+  // 404'd and org-members read back empty-200, all while org-settings, outside-collaborators,
+  // team-list, and installations were openly PROBE FAILED under the same fleet App token pending
+  // its org Administration:read + Members:read grant -- 5 false DRIFT verdicts from absence
+  // evidence a degraded token can only under-produce, never fabricate.
+  const orgLevelProbes = [
+    snapshot.orgSettings,
+    snapshot.members,
+    snapshot.outsideCollaborators,
+    snapshot.teamList,
+    snapshot.installations,
+  ];
+  const orgLevelVisibilityDegraded = orgLevelProbes.some((p) => !p.ok);
+
   if (!snapshot.orgSettings.ok) {
     results.push({ entity: "org-settings", status: STATUS_PROBE_FAILED, detail: [snapshot.orgSettings.error] });
   } else {
@@ -248,7 +308,7 @@ export function classifyGrantSurface(manifest: Manifest, snapshot: LiveSnapshot)
   if (!snapshot.members.ok) {
     results.push({ entity: "org-members", status: STATUS_PROBE_FAILED, detail: [snapshot.members.error] });
   } else {
-    const c = classifyMembers(manifest.members, snapshot.members.data);
+    const c = classifyMembers(manifest.members, snapshot.members.data, orgLevelVisibilityDegraded);
     results.push({ entity: "org-members", status: c.status, detail: c.detail });
   }
 
@@ -278,6 +338,11 @@ export function classifyGrantSurface(manifest: Manifest, snapshot: LiveSnapshot)
 
   const manifestTeamBySlug = new Map(manifest.teams.map((t) => [t.slug, t]));
   const teamSlugUnion = new Set<string>([...manifestTeamBySlug.keys(), ...snapshot.teamDetails.keys()]);
+  // ops#184: the live team-list, when readable this run, corroborates a per-team 404 as genuine
+  // absence. `null` when the team-list probe itself failed -- absence can never be corroborated in
+  // that case, so every uncorroborated 404 below falls through to PROBE FAILED regardless of what
+  // the (unreadable) list would have said.
+  const liveTeamListSlugs = snapshot.teamList.ok ? new Set(snapshot.teamList.data.map((t) => t.slug)) : null;
   for (const slug of [...teamSlugUnion].sort()) {
     const entity = `team/${slug}`;
     const probe = snapshot.teamDetails.get(slug);
@@ -288,6 +353,25 @@ export function classifyGrantSurface(manifest: Manifest, snapshot: LiveSnapshot)
     if (!probe.ok) {
       results.push({ entity, status: STATUS_PROBE_FAILED, detail: [probe.error] });
       continue;
+    }
+    // ops#184: `data: null` means the per-team detail read 404'd. GitHub returns that SAME 404 --
+    // not 403 -- when the token lacks Members:read, indistinguishable on this response alone from
+    // a genuinely-deleted team (probeTeamDetail's docstring, corrected in this PR, used to claim
+    // otherwise). Trust it as live absence (-> DRIFT "not found live", via classifyTeam below)
+    // ONLY when the team-list probe succeeded this run AND the slug is confirmed absent from that
+    // listing -- corroborated absence, not a bare 404. Otherwise the read is unverifiable.
+    if (probe.data === null) {
+      const corroboratedAbsent = liveTeamListSlugs !== null && !liveTeamListSlugs.has(slug);
+      if (!corroboratedAbsent) {
+        results.push({
+          entity,
+          status: STATUS_PROBE_FAILED,
+          detail: [
+            `team "${slug}" read returned not-found while org-level visibility is degraded — absence unverifiable (see ops#184)`,
+          ],
+        });
+        continue;
+      }
     }
     const c = classifyTeam(manifestTeamBySlug.get(slug) ?? null, probe.data);
     results.push({ entity, status: c.status, detail: c.detail });
