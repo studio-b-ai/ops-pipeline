@@ -140,6 +140,10 @@ function closeComment(entity: string, fromStatus: string): string {
   return `Live state now matches \`scripts/grants.manifest.yaml\` for \`${entity}\` (was ${fromStatus}). Auto-closed by the grants drift monitor.`;
 }
 
+function orphanCloseComment(entity: string): string {
+  return `\`${entity}\` is no longer tracked -- removed from both \`scripts/grants.manifest.yaml\` and live GitHub state (e.g. a team or App installation was deleted and the manifest entry deleted to acknowledge it). Auto-closed by the grants drift monitor.`;
+}
+
 function blindBody(): string {
   return [
     "**MONITOR BLIND** — every top-level org grant probe (org settings, members, outside collaborators, team list, App installations) failed this run, consistent with the studiob-fleet-bot App still lacking org **Administration: read** + **Members: read**.",
@@ -252,6 +256,25 @@ async function main(): Promise<void> {
       planned.push({ kind: "retitle", num: open.issue.number, newTitle: title, comment: retitleComment(r.entity, open.status, r.status, r.detail) });
     } else if (action === "close" && open) {
       planned.push({ kind: "close", num: open.issue.number, comment: closeComment(r.entity, open.status) });
+    }
+  }
+
+  // 3b. Orphan sweep (codex P1 pass, live-caught): an entity can vanish from `results` entirely
+  //     when it's removed from BOTH the manifest and live state in the same run -- e.g. a team or
+  //     App installation is deleted live and its manifest entry is deleted in the same PR to
+  //     acknowledge that (the manifest's own header: "A manifest edit is an ACKNOWLEDGMENT of a
+  //     deliberate grant change"). `classifyGrantSurface` never emits a vanished entity again, so
+  //     the reconcile loop above (which only walks `results`) never revisits its previously-open
+  //     issue -- an upsert-only reconcile over a narrowed entity set never reconciles removals
+  //     (Rule #379). Close any open per-entity issue whose entity no longer appears in `results`
+  //     at all. Excludes the MONITOR BLIND issue by exact title: its own " — " would otherwise
+  //     parse into a bogus "MONITOR BLIND" pseudo-entity via `openByEntity`, and that issue is
+  //     already reconciled separately in step 4 below via the exact-title map, not this one.
+  const trackedEntities = new Set(results.map((r) => r.entity));
+  for (const [entity, open] of openByEntity) {
+    if (open.issue.title === BLIND_TITLE) continue;
+    if (!trackedEntities.has(entity)) {
+      planned.push({ kind: "close", num: open.issue.number, comment: orphanCloseComment(entity) });
     }
   }
 
