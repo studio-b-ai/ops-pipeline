@@ -54,8 +54,10 @@ function ghApiOnce<T>(path: string): ProbeResult<T> {
 }
 
 /**
- * Paginated list GET. `jqFilter` must produce one JSON value per line (gh's --jq applies the
- * filter to each page's response independently and --paginate concatenates the output).
+ * Paginated list GET. `jqFilter` must produce one JSON *object or array* value per line (gh's
+ * --jq applies the filter to each page's response independently and --paginate concatenates the
+ * output). Do NOT use this for a filter whose result is a bare top-level string (e.g. `.[].login`)
+ * -- see ghApiListStrings() below for why.
  */
 function ghApiList<T>(path: string, jqFilter: string): ProbeResult<T[]> {
   try {
@@ -64,6 +66,29 @@ function ghApiList<T>(path: string, jqFilter: string): ProbeResult<T[]> {
       .split("\n")
       .filter((line) => line.trim().length > 0)
       .map((line) => JSON.parse(line) as T);
+    return { ok: true, data: items };
+  } catch (err) {
+    return toProbeFailure(err);
+  }
+}
+
+/**
+ * Paginated list GET for a jq filter whose result is a bare top-level STRING (e.g. `.[].login`,
+ * `.[].name`). `gh api --jq` emits RAW (unquoted) text for a top-level string result -- not valid
+ * JSON -- while an object/array-shaped result (ghApiList's case) is unaffected and still comes
+ * back as real per-line JSON. Live-verified 2026-08-21 against orgs/studio-b-ai/members: `--jq
+ * '.[].login'` prints `kbibelhausen` (no quotes), and `JSON.parse("kbibelhausen")` throws
+ * "Unexpected token 'k' ... is not valid JSON" -- the exact failure this dry-run caught on
+ * org-members, every team/<slug> (team membership), and direct-grants (repo name listing) before
+ * this helper existed. Each line IS the string value directly; no JSON.parse needed or wanted.
+ */
+function ghApiListStrings(path: string, jqFilter: string): ProbeResult<string[]> {
+  try {
+    const out = gh(["api", path, "--paginate", "--jq", jqFilter]);
+    const items = out
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
     return { ok: true, data: items };
   } catch (err) {
     return toProbeFailure(err);
@@ -112,9 +137,9 @@ export interface MemberGrant {
 }
 
 export function probeMembers(org: string): ProbeResult<MemberGrant[]> {
-  const all = ghApiList<string>(`orgs/${org}/members`, ".[].login");
+  const all = ghApiListStrings(`orgs/${org}/members`, ".[].login");
   if (!all.ok) return all;
-  const admins = ghApiList<string>(`orgs/${org}/members?role=admin`, ".[].login");
+  const admins = ghApiListStrings(`orgs/${org}/members?role=admin`, ".[].login");
   if (!admins.ok) return admins;
   const adminSet = new Set(admins.data);
   return { ok: true, data: all.data.map((login) => ({ login, role: adminSet.has(login) ? "admin" : "member" })) };
@@ -125,7 +150,7 @@ export function probeMembers(org: string): ProbeResult<MemberGrant[]> {
 // ---------------------------------------------------------------------------------------------
 
 export function probeOutsideCollaborators(org: string): ProbeResult<string[]> {
-  return ghApiList<string>(`orgs/${org}/outside_collaborators`, ".[].login");
+  return ghApiListStrings(`orgs/${org}/outside_collaborators`, ".[].login");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -159,7 +184,7 @@ export interface TeamDetail {
  * which means "we don't know" and IS a probe failure (Rule #401's absence-vs-unknown distinction).
  */
 export function probeTeamDetail(org: string, slug: string): ProbeResult<TeamDetail | null> {
-  const membersRes = ghApiList<string>(`orgs/${org}/teams/${slug}/members`, ".[].login");
+  const membersRes = ghApiListStrings(`orgs/${org}/teams/${slug}/members`, ".[].login");
   if (!membersRes.ok) {
     if (membersRes.httpStatus === 404) return { ok: true, data: null };
     return membersRes;
@@ -183,7 +208,7 @@ export interface DirectGrant {
 }
 
 function probeAllRepoNames(org: string): ProbeResult<string[]> {
-  return ghApiList<string>(`orgs/${org}/repos`, ".[].name");
+  return ghApiListStrings(`orgs/${org}/repos`, ".[].name");
 }
 
 function probeDirectCollaboratorsForRepo(org: string, repo: string): ProbeResult<DirectGrant[]> {
