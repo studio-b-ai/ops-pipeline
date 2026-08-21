@@ -1,0 +1,94 @@
+name: Grants Drift Monitor
+
+# ops-pipeline#178 -- weekly guard over the studio-b-ai org's GitHub grant surface (org
+# settings, members, outside collaborators, teams, direct repo collaborator grants, App
+# installations) against scripts/grants.manifest.yaml. Full design lives in the issue's
+# design comment and in scripts/grants-drift-monitor.ts's header comment; this workflow
+# only mints the fleet App token (backlog-staleness.yml's pattern, copied verbatim) and
+# runs the monitor with it.
+#
+# Fleet App token required because most of this monitor's reads are ORG-level (org
+# settings, org members, teams, App installations), which a repo-scoped ambient
+# GITHUB_TOKEN structurally cannot reach -- and because the monitor's issue writes (always
+# on studio-b-ai/ops-pipeline itself, per ops-pipeline#178) need issues:write regardless.
+# studiob-fleet-bot's installation needs org Administration:read + Members:read for the
+# org-level reads to succeed -- until that permission is granted (Kevin-gated, ops#178
+# design comment), those probes 403 and the monitor opens/keeps a single MONITOR BLIND
+# issue + exits 1. The direct-repo-collaborator leg only needs repo Metadata:read (already
+# granted) and works independently of that gap.
+
+on:
+  schedule:
+    - cron: "0 10 * * 1" # weekly, Monday 10:00 UTC (~6 AM ET) -- GH Actions cron is UTC-only (Rule #94); off the overnight batch window (Rule #356)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real reads throughout (every grant-surface probe) -- zero issue mutations on ops-pipeline, preview only"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grants-drift-monitor
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: "Grants drift monitor -- org grant-surface guard (fleet App token)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: "Install deps"
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted UNCONDITIONALLY -- including on a dry run: Rule #376, a dry run that reads
+      # nothing proves nothing, and every read this monitor does (org settings, members,
+      # outside collaborators, teams, App installations, ~100+ repos' direct collaborators)
+      # needs real org-wide access the ambient GITHUB_TOKEN structurally cannot provide.
+      - name: "Mint fleet installation token"
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: "Fail loud if the fleet token did not mint"
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token -- check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
+          exit 1
+
+      # dry_run is the ONLY workflow_dispatch input this workflow takes, and it's
+      # boolean-typed -- GitHub Actions can only ever produce the literal string
+      # '--dry-run' or '' from this expression, so (unlike backlog-staleness.yml's
+      # free-text `now`/`repos` inputs) there's no attacker-controlled text flowing through
+      # a direct ${{ }} substitution here at all; still routed through env: rather than
+      # inlined into the run: script, matching house style.
+      - name: "Run grants-drift monitor"
+        id: run_monitor
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          DRY_RUN_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+        run: |
+          args=()
+          if [ -n "$DRY_RUN_FLAG" ]; then args+=("--dry-run"); fi
+          npx tsx grants-drift-monitor.ts "${args[@]}"
+
+      # Rule #356: a timeout kill reports "cancelled" SILENTLY unless a SEPARATE if: always()
+      # step names the terminal status explicitly.
+      - name: "Report terminal status"
+        if: always()
+        run: |
+          echo "grants-drift-monitor workflow terminal status: ${{ job.status }} (run_monitor outcome: ${{ steps.run_monitor.outcome }})"

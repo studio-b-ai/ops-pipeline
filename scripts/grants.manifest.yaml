@@ -1,0 +1,75 @@
+# grants.manifest.yaml — expected GitHub org grant surface (guard: grants-drift-monitor.ts, ops#178).
+# A manifest edit is an ACKNOWLEDGMENT of a deliberate grant change — update it in the same PR
+# that acknowledges the change, or revert the live grant. Seeded 2026-08-21 from live probes.
+# NOTE: studiob-fleet-bot's row is seeded with its POST-grant expected permissions
+# (organization_administration:read + members:read pending a Kevin click, ops#178) — before the
+# click the App cannot read /orgs/{org}/installations at all, so this cannot false-fire.
+# Change-owners: the naelmkt entries are owned by the Publicity lane (CoS design input,
+# ops#178 c-5364638685). Steady state = NO new human grants — Nael's product-lane access
+# resolves as a vault-mirror manifest tier, not a repo grant; any human-grant drift is
+# by-construction unexpected.
+org: studio-b-ai
+org_settings:
+  default_repository_permission: none
+  two_factor_requirement_enabled: false
+members:
+  - login: kbibelhausen
+    role: admin
+  - login: naelmkt
+    role: member
+outside_collaborators: []
+teams:
+  - slug: asthetik-marketing
+    members: [kbibelhausen, naelmkt]
+    repos:
+      asthetik-marketing: write
+  - slug: client-stakeholders
+    members: [kbibelhausen]
+    repos:
+      client-asthetik: read
+  - slug: consultants
+    members: [kbibelhausen]
+    repos:
+      acumatica-mcp: write
+      infra-config: write
+      claude-code-config: write
+      client-asthetik: write
+      hubspot-mcp: write
+      studiob-templates: write
+      studiob-qa: write
+  - slug: platform-admins
+    members: [kbibelhausen]
+    repos:
+      acumatica-mcp: admin
+      infra-config: admin
+      claude-code-config: admin
+      client-asthetik: admin
+      hubspot-mcp: admin
+      studiob-templates: admin
+      studiob-qa: admin
+direct_repo_grants:
+  - repo: acumatica-mcp
+    login: kbibelhausen
+    role: admin
+  - repo: wasala
+    login: kbibelhausen
+    role: admin
+installations:
+  - app_slug: railway-app
+    repository_selection: all
+    permissions: {actions: write, administration: write, checks: write, contents: write, deployments: write, members: read, metadata: read, pull_requests: write, statuses: write, workflows: write}
+  - app_slug: claude
+    repository_selection: all
+    permissions: {actions: read, checks: write, contents: write, discussions: write, issues: write, metadata: read, pull_requests: write, repository_hooks: write, workflows: write}
+  # acuops-agent all-repos is a DELIBERATE 8/21 superset (Kevin at the keyboard, UI repo-picker
+  # erroring; ops#178 c-5365331476) — a narrowing candidate is queued there. A selection flip in
+  # EITHER direction fires DRIFT.
+  - app_slug: acuops-agent
+    repository_selection: all
+    permissions: {actions: write, actions_variables: write, contents: write, issues: write, metadata: read, packages: read, pull_requests: write, repository_hooks: write, repository_projects: write, workflows: write}
+  - app_slug: renovate
+    repository_selection: all
+    permissions: {administration: read, checks: write, contents: write, issues: write, members: read, metadata: read, packages: read, pull_requests: write, statuses: write, vulnerability_alerts: read, workflows: write}
+  - app_slug: studiob-fleet-bot
+    repository_selection: all
+    permissions: {actions: write, checks: read, contents: write, issues: write, members: read, metadata: read, organization_administration: read, pull_requests: write, workflows: write}
