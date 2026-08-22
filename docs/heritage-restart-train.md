@@ -16,7 +16,7 @@ It posts `PLAN (dry-run)` lines to `--target` (default `studio-b-ai/ops-pipeline
 
 - Does not merge, label, or touch any PR in `studiob` or `client-asthetik`.
 - Does not fire anything — `--fire` throws `"rung 3 not built"` unconditionally; dry-run is the only mode this build supports.
-- Is inert by default: the cron job is gated `if: vars.HERITAGE_TRAIN_ENABLED == 'true'`; that repo variable does not exist yet, so the workflow no-ops on every scheduled tick until someone deliberately sets it.
+- Is gated by a repo variable: the cron job runs only under `if: vars.HERITAGE_TRAIN_ENABLED == 'true'`. **Live since 2026-08-20T00:39Z** — the variable was set to `true` that night (`gh variable list --repo studio-b-ai/ops-pipeline`), and the scheduler has been posting to `ops-pipeline#172` since (first live `HELD` receipt from `studiob-fleet-bot` 2026-08-21T19:55Z, while a `train:hold` was on the tracker). Unsetting it (or setting anything other than `true`) makes every tick no-op again.
 - Does not post to client-asthetik#280 (the human calendar) — only to `--target`.
 
 ## Ladder above rung 0 (from `ops-pipeline#172`)
