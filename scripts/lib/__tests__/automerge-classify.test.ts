@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyDiffFile,
   classifyPrDiffClass,
+  evaluateMergeReadiness,
   gateDecision,
   gateDecisionForClass,
   isRollupClean,
@@ -694,5 +695,38 @@ describe("gateDecisionForClass", () => {
     });
     expect(v2.decision).toBe(v1.decision);
     expect(v2.reasons).toEqual(v1.reasons);
+  });
+});
+
+describe("evaluateMergeReadiness (ci-rollup leg — Rule #471 both-directions control)", () => {
+  // A fully-ready baseline; each test flips exactly ONE field so that field alone is
+  // proven to gate the decision (Rule #322: negative controls first).
+  const ready = { state: "OPEN", isDraft: false, ciClean: true, mergeStateStatus: "CLEAN" };
+
+  it("known-GOOD: OPEN, non-draft, CI-clean, mergeStateStatus=CLEAN is ready (the gate still passes clean PRs)", () => {
+    const r = evaluateMergeReadiness(ready);
+    expect(r.ready).toBe(true);
+    expect(r.detail).toContain("isDraft=false");
+  });
+
+  it("known-BAD (the #471 non-default-verdict plant): a DRAFT that greens on everything else is NOT ready", () => {
+    // theme#549 (2026-08-24): GitHub reports mergeStateStatus=CLEAN for an otherwise-
+    // mergeable draft, so the isDraft leg is the ONLY thing that catches it. Without the
+    // isDraft term this input passes the readiness leg and burns the paid review call.
+    const r = evaluateMergeReadiness({ ...ready, isDraft: true });
+    expect(r.ready).toBe(false);
+    expect(r.detail).toContain("isDraft=true");
+  });
+
+  it("declines a non-OPEN PR (MERGED)", () => {
+    expect(evaluateMergeReadiness({ ...ready, state: "MERGED" }).ready).toBe(false);
+  });
+
+  it("declines a CI-red PR", () => {
+    expect(evaluateMergeReadiness({ ...ready, ciClean: false }).ready).toBe(false);
+  });
+
+  it("declines a non-CLEAN mergeStateStatus (BLOCKED)", () => {
+    expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "BLOCKED" }).ready).toBe(false);
   });
 });

@@ -9,7 +9,7 @@
  * human, which is the normal, unremarkable outcome (never a red CI run for "waiting").
  *
  * Legs (ALL required):
- *   1. PR is OPEN, `mergeStateStatus === "CLEAN"`, and every CI check is green
+ *   1. PR is OPEN, NON-DRAFT, `mergeStateStatus === "CLEAN"`, and every CI check is green
  *      (`isRollupClean`) — checked FIRST and cheaply, before any diff fetch or API
  *      spend (Rule #88: probe before committing spend).
  *   2. the PR's file set resolves to EXACTLY ONE PR-level diff class
@@ -64,6 +64,7 @@ import { execFileSync } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   classifyPrDiffClass,
+  evaluateMergeReadiness,
   gateDecisionForClass,
   isRollupClean,
   reconcileFileClasses,
@@ -101,7 +102,12 @@ interface PrJson {
   author: PrAuthor;
   labels: PrLabel[];
   state: string; // OPEN | CLOSED | MERGED
-  mergeStateStatus: string; // CLEAN | BEHIND | BLOCKED | DIRTY | DRAFT | HAS_HOOKS | UNKNOWN | UNSTABLE
+  /** GitHub reports mergeStateStatus=CLEAN for an otherwise-mergeable DRAFT — draftness
+   *  is this SEPARATE boolean, NOT a mergeStateStatus value. The ci-rollup readiness leg
+   *  gates on it (ops-pipeline#202); without it a draft passes the leg, burns the paid
+   *  review call, then fails at the SHA-pinned merge "still a draft". */
+  isDraft: boolean;
+  mergeStateStatus: string; // CLEAN | BEHIND | BLOCKED | DIRTY | HAS_HOOKS | UNKNOWN | UNSTABLE (NOT "DRAFT" — that is isDraft)
   additions: number;
   deletions: number;
   headRefOid: string;
@@ -122,7 +128,7 @@ interface PrJson {
 function fetchPr(repo: string, pr: number): PrJson {
   const out = gh([
     "pr", "view", String(pr), "--repo", repo,
-    "--json", "author,labels,state,mergeStateStatus,additions,deletions,headRefOid,baseRefName,statusCheckRollup,files,changedFiles",
+    "--json", "author,labels,state,isDraft,mergeStateStatus,additions,deletions,headRefOid,baseRefName,statusCheckRollup,files,changedFiles",
   ]);
   return JSON.parse(out) as PrJson;
 }
@@ -287,9 +293,19 @@ async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[],
   const totalChangedLines = prJson.additions + prJson.deletions;
   const ciClean = isRollupClean(prJson.statusCheckRollup);
 
-  // ── Leg "ci-rollup" (cheap, no diff fetch, no API spend): state + CI + merge readiness ──
-  if (prJson.state !== "OPEN" || !ciClean || prJson.mergeStateStatus !== "CLEAN") {
-    const detail = `state=${prJson.state} ciClean=${ciClean} mergeStateStatus=${prJson.mergeStateStatus}`;
+  // ── Leg "ci-rollup" (cheap, no diff fetch, no API spend): state + non-draft + CI +
+  //    merge readiness. isDraft is checked here because GitHub reports
+  //    mergeStateStatus=CLEAN for an otherwise-mergeable DRAFT (ops-pipeline#202) — a
+  //    mergeStateStatus-only check passes a draft, burns the paid review call, then
+  //    fails at the SHA-pinned merge "still a draft". Pure predicate: evaluateMergeReadiness. ──
+  const readiness = evaluateMergeReadiness({
+    state: prJson.state,
+    isDraft: prJson.isDraft,
+    ciClean,
+    mergeStateStatus: prJson.mergeStateStatus,
+  });
+  if (!readiness.ready) {
+    const detail = readiness.detail;
     console.log(`[wait] pr-automerge-gate ${repo}#${pr}: short-circuit — ${detail}. No diff fetch, no review call.`);
     console.log(
       formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "ci-rollup", reasons: [detail] }),

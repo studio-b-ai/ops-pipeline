@@ -712,3 +712,35 @@ export function isRollupClean(rollup: RollupItem[]): boolean {
 
   return true;
 }
+
+export interface MergeReadinessInput {
+  /** PR.state — OPEN | CLOSED | MERGED. */
+  state: string;
+  /** PR.isDraft — a SEPARATE boolean from mergeStateStatus (see below). */
+  isDraft: boolean;
+  /** Result of isRollupClean(statusCheckRollup). */
+  ciClean: boolean;
+  /** PR.mergeStateStatus — CLEAN | BEHIND | BLOCKED | DIRTY | HAS_HOOKS | UNKNOWN | UNSTABLE. */
+  mergeStateStatus: string;
+}
+
+/**
+ * Pure predicate for the cheap "ci-rollup" readiness leg — refuses BEFORE any diff
+ * fetch or paid review call (Rule #88).
+ *
+ * The load-bearing subtlety is `isDraft`. GitHub reports `mergeStateStatus === "CLEAN"`
+ * for a DRAFT PR that is otherwise mergeable — draftness is NOT a mergeStateStatus value
+ * (GitHub does not surface "DRAFT" there for an otherwise-clean draft; it is a separate
+ * boolean). So a mergeStateStatus-only check calls a draft merge-ready, the pipeline
+ * burns the paid independent-review call, and the SHA-pinned `gh pr merge` then fails
+ * "Pull Request is still a draft" — after the spend, and mis-logged downstream as a
+ * TOCTOU/head-moved race (Rules #412/#470). Gating on isDraft here fails closed cheaply
+ * and emits an accurate receipt. Live-proven on theme#549 (2026-08-24). ops-pipeline#202.
+ * Rules #279/#412/#464/#471.
+ */
+export function evaluateMergeReadiness(input: MergeReadinessInput): { ready: boolean; detail: string } {
+  const ready =
+    input.state === "OPEN" && !input.isDraft && input.ciClean && input.mergeStateStatus === "CLEAN";
+  const detail = `state=${input.state} isDraft=${input.isDraft} ciClean=${input.ciClean} mergeStateStatus=${input.mergeStateStatus}`;
+  return { ready, detail };
+}
