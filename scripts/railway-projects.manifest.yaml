@@ -26,8 +26,11 @@ projects:
     name: aesthetik-production # tonight's incident project — Rule #302 family origin
   - id: "433dec0e-6963-4b66-bdd2-6049ba189b81"
     name: studiob-platform
-  - id: "4a91ebb7-ca74-4b6d-b0de-cb7df897902a"
-    name: shuttle
+  # shuttle (4a91ebb7) REMOVED 2026-08-28 — project deliberately deleted in the 8/23 Shuttle
+  # sunset (brain library/decisions/2026-08-23-shuttle-sunset-executed.md). A manifest row for a
+  # deleted project is a perpetual `PROBE FAILED` issue (ops#205): the union treats this list as
+  # authoritative presence, so retirements MUST remove their row here (Rule #366 — a retirement
+  # retires ALL legs; the sunset census wrongly assumed pure dynamic discovery, Rule #399).
   - id: "f5ac41ed-733e-4ecc-b68c-a5ba02b9dd96"
     name: gi-lint
   - id: "ad6f97b7-5b83-4104-b857-3550cebffff0"
