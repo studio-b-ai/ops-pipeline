@@ -563,16 +563,25 @@ async function isTicketInFlight(
 }
 
 /**
- * Posts the `CLICK DUE` line to BOTH the queue-head PR (via `postAuthorityReceipt` —
- * label-authority.ts's existing write-only PR-comment helper, reused per Rule #283 rather than
- * forking a new poster) and `--target` (via `commentIssue`, the same seam
- * `postLines`/`postHeldIfNotDuped` already use). Deduped against the QUEUE-HEAD PR's OWN
+ * Posts the `CLICK DUE` line to BOTH `--target` (via `commentIssue`, the same seam
+ * `postLines`/`postHeldIfNotDuped` already use) and the queue-head PR (via
+ * `postAuthorityReceipt` — label-authority.ts's existing write-only PR-comment helper, reused
+ * per Rule #283 rather than forking a new poster). Deduped against the QUEUE-HEAD PR's OWN
  * comment history via a `restart-train:click-due=<hash>` marker distinct from `postLines`'
  * `restart-train:state=` marker — `--target` accumulates PLAN/HELD noise from every OTHER
  * ticket too, so only the queue-head PR's own thread can correctly answer "have I already told
  * a human to click merge on THIS PR at THIS pinned head" (#292: once per state transition, not
- * per cron cycle). The `--target` mirror carries no marker of its own — it is posted in the
- * same call, gated by the same dedup check, so it can never drift out of sync with it.
+ * per cron cycle).
+ *
+ * Write ORDER is deliberate (codex review, rung 1 PR): the marker-carrying PR post goes LAST,
+ * not first. `gh` calls are not transactional — either write can fail independently — and the
+ * marker is the ONLY durable "already told a human" fact this function leaves behind. Marker
+ * write LAST means a partial failure always resolves to "retry both on the next cron cycle"
+ * (worst case: one harmless duplicate `--target` mirror line) rather than "the marker silently
+ * committed, so the dedup check at the top skips ALL further attempts forever" — a permanently
+ * dropped mirror with no self-healing path, since the queue head's `pinnedHeadSha` (part of the
+ * state key) doesn't change while it's stuck waiting on a human to click. Rule #4: a rare
+ * duplicate notice is a strictly better failure mode than a silent, permanent, unretriable one.
  */
 async function postClickDue(
   target: { repo: string; number: number },
@@ -605,8 +614,10 @@ async function postClickDue(
     console.log(`[restart-train] --page: CLICK DUE state unchanged since last post (${keyHash}) — not reposting (#292)`);
     return;
   }
-  postAuthorityReceipt(ticket.repo, ticket.number, `${line}\n\n<!-- restart-train:click-due=${keyHash} -->`);
+  // Mirror first, marker-carrying PR post LAST — see the doc comment above for why the order
+  // matters under partial write failure.
   commentIssue(target.repo, target.number, line);
+  postAuthorityReceipt(ticket.repo, ticket.number, `${line}\n\n<!-- restart-train:click-due=${keyHash} -->`);
   console.log(
     `[restart-train] --page: posted CLICK DUE (state ${keyHash}) to ${ticket.repo}#${ticket.number} + mirror on ${target.repo}#${target.number}`,
   );

@@ -54,8 +54,10 @@ alongside `--post`). Once, for the queue head only:
 
 the worker posts exactly ONE `CLICK DUE` comment on the queue-head PR itself (plus a mirror on
 `--target`), asking a human to click merge. A red/pending rollup posts a HELD-style deduped line
-instead (Rule #89 — never page a human to a red-CI PR). `CLICK DUE` only ever **asks** a human to
-click merge; it never clicks for them — that capability doesn't exist until rung 3.
+on `--target` only instead (Rule #89 — never page a human to a red-CI PR; reuses the same
+`postHeldIfNotDuped` rung 0 already posts HELD through, so there's no separate HELD posting
+primitive for Leg B). `CLICK DUE` only ever **asks** a human to click merge; it never clicks for
+them — that capability doesn't exist until rung 3.
 
 ## What this build does NOT do
 
@@ -63,8 +65,10 @@ click merge; it never clicks for them — that capability doesn't exist until ru
   scheduling plus label-authority plus paging is the entire capability surface of this build.
 - Does not touch branch protection.
 - Does not post to client-asthetik#280 (the human calendar) under any leg — it stays a
-  READ-ONLY source. Writes land on `--target` and, for Leg A's stale-label receipts and Leg B's
-  `CLICK DUE`/HELD lines, the ticket's own PR — never `#280`.
+  READ-ONLY source. Writes land on `--target` (PLAN, HELD — both leg-0-style and Leg B's
+  rollup-not-green case — plus the `CLICK DUE` mirror) and, for Leg A's stale-label receipts and
+  Leg B's `CLICK DUE`, additionally on the ticket's own PR — never `#280`. HELD lines are
+  `--target`-only; they never land on a ticket's own PR.
 - ⚠️ Unlike rung 0 alone, this build DOES touch a PR's labels (strips a stale `train:ready`, Leg
   A) and DOES comment on PRs beyond `--target` (Leg A's stale-label receipts, Leg B's `CLICK
   DUE`) — both strictly narrower than a merge and both gated behind `--post`, same as every other
