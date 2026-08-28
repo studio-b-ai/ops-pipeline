@@ -47,9 +47,19 @@ export interface Ticket {
   repo: string; // "org/repo"
   number: number;
   repoClass: RepoClass;
-  /** ISO instant the `train:ready` label was applied — the FIFO sort key. */
-  appliedAt: string;
-  /** Head sha recorded at label-apply time (the pin comment, per design §1.1). */
+  /** ISO instant the authorizing `train:ready` LabeledEvent's server `createdAt` — the FIFO
+   * sort key. Sourced from GraphQL `timelineItems` (label-authority.ts's
+   * `fetchAuthorityTimeline` + `evaluateLabelAuthority`, ops-pipeline#172 rung 1), never
+   * parsed from a comment body — see that file's header for why (v1's D1 defect). */
+  labeledAt: string;
+  /** Head sha at label-authority evaluation time. Rung 1 sets this to the PR's CURRENT
+   * `headRefOid` at fetch time (no separate pin comment is written or read, #172 rung 1) —
+   * `evaluateLabelAuthority`'s AUTHORIZED verdict already certifies no commit/force-push
+   * timeline item sits after the authorizing LabeledEvent, so the head observed at fetch
+   * time IS the head that's been live since labeling. `currentHeadSha` below stays a
+   * separate field so `orderQueue`'s head-drift check remains a real (if here
+   * always-passing at fetch time) guard against drift introduced between fetch and
+   * scheduling. */
   pinnedHeadSha: string;
   /** Head sha as of THIS read (from the PR API) — a mismatch means the PR moved after being
    * queued and must never be scheduled blind (design §5 / Rule #136). */
@@ -176,7 +186,7 @@ const ET_ZONE = "America/New_York";
  * recorded `END`/`PLAN`/`NOTE` line in the fixture matches this). Raw `Date#toISOString()` always
  * appends `.SSS`, which would render PLAN lines in a format nobody on #280 has ever posted — every
  * internally-computed instant (window-law jumps) renders through this, never `.toISOString()`
- * directly. Facts passed in from callers (anchors, appliedAt) are echoed verbatim and are NOT
+ * directly. Facts passed in from callers (anchors, labeledAt) are echoed verbatim and are NOT
  * reformatted here — only instants this module itself computes. */
 function toIsoSeconds(ms: number): string {
   return new Date(Math.floor(ms / 1000) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -360,7 +370,7 @@ export function windowState(nowIso: string, repoClass: RepoClass, anchorIso: str
 // ───────────────────────────── queue ordering ─────────────────────────────
 
 /**
- * FIFO by `appliedAt`, then two adjustments, then head-drift invalidation:
+ * FIFO by `labeledAt`, then two adjustments, then head-drift invalidation:
  *   - `train:after <org/repo>#<n>` — a ticket must not sit ahead of a ticket it names, WHEN that
  *     named ticket is present in this same queue (an unresolvable reference is a no-op: nothing
  *     to reorder against, per brief). A reference to a ticket present in this train but
@@ -378,7 +388,7 @@ export function orderQueue(tickets: Ticket[]): QueueEntry[] {
   const withValidity = tickets.map((t) => ({ ticket: t, valid: t.currentHeadSha === t.pinnedHeadSha }));
   const validTickets = withValidity.filter((x) => x.valid).map((x) => x.ticket);
 
-  const ordered = [...validTickets].sort((a, b) => Date.parse(a.appliedAt) - Date.parse(b.appliedAt));
+  const ordered = [...validTickets].sort((a, b) => Date.parse(a.labeledAt) - Date.parse(b.labeledAt));
 
   const indexOf = (k: string) => ordered.findIndex((t) => key(t) === k);
   const MAX_PASSES = ordered.length + 2;
@@ -607,14 +617,22 @@ export function clampCandidatesToNow(candidates: AnchorCandidate[], nowIso: stri
   return candidates.filter((c) => keep(c.completedAtIso));
 }
 
-/** See `keepAtOrBefore` — the same law applied to tickets. Belt-and-braces with the
- * comment-level clamp inside the worker's `fetchTickets` (codex P2b, PR #174 pass 1): that one
- * removes future PIN COMMENTS before `parseTrainPin` picks the latest, so a replay uses the pin
- * that was live at the instant; this one still catches a pin whose BODY grammar carries a
- * typo'd future ISO inside a past-created comment. */
+/** See `keepAtOrBefore` — the same law applied to tickets, keyed on `labeledAt`. Rung 1
+ * (label-authority v2, ops-pipeline#172): this is now the ONLY replay-fidelity guard on ticket
+ * timing — there is no more upstream "pin comment" to clamp separately before a body-grammar
+ * parse picks the latest one (the prior belt-and-braces pairing with a comment-level clamp
+ * inside `fetchTickets` no longer applies; the old comment-pin parser and its comment clamp are
+ * gone outright — see the rung 1 PR body). A future-stamped `labeledAt` can only arise from a
+ * malformed/incorrect `createdAt` on the
+ * authorizing LabeledEvent itself (GraphQL server data, not user-editable comment text) — this
+ * filter is the fail-closed backstop against exactly that, matching every other fact stream's
+ * replay contract. Non-LABELED timeline items carry no `createdAt` at all (only the LabeledEvent
+ * GraphQL fragment requests it — see label-authority.ts), so clamping the full timeline itself
+ * isn't even possible with the data `fetchAuthorityTimeline` returns; `labeledAt` on the
+ * already-assembled `Ticket` is the one clampable instant in this data flow. */
 export function clampTicketsToNow(tickets: Ticket[], nowIso: string): Ticket[] {
   const keep = keepAtOrBefore(nowIso);
-  return tickets.filter((t) => keep(t.appliedAt));
+  return tickets.filter((t) => keep(t.labeledAt));
 }
 
 /**
@@ -692,7 +710,7 @@ export interface RestartTrainComment {
 }
 
 export interface TrainLedgerEntry {
-  kind: "END" | "START" | "PLAN" | "NOTE" | "HELD";
+  kind: "END" | "START" | "PLAN" | "NOTE" | "HELD" | "CLICK DUE";
   /** The stamp's own leading ISO instant (a PLAN range's end, if any, is folded into `detail` as
    * prose — nothing in rung 0 needs the range end structurally). Empty string if the line had no
    * parseable leading ISO stamp (kept rather than dropped, so a malformed line is still visible). */
@@ -703,10 +721,15 @@ export interface TrainLedgerEntry {
   commentLogin: string;
 }
 
-// First token inside a backtick span must be exactly one of the five grammar keywords, matching
+// First token inside a backtick span must be exactly one of the six grammar keywords, matching
 // every observed line on client-asthetik#280 (a stray unrelated backtick span, e.g. `` `/details` ``
 // inside the SAME comment, correctly never matches since it doesn't start with a keyword).
-const LEDGER_LINE_RE = /`(END|START|PLAN|NOTE|HELD)\s+([^`]*)`/g;
+// "CLICK DUE" (rung 1 Leg B, ops-pipeline#172) is the one two-word keyword — the literal space
+// inside the alternative is matched as-is, then `\s+` still requires at least one MORE whitespace
+// char before the ISO stamp, exactly like every other keyword ("CLICK DUE 2026-…" is required,
+// not "CLICK DUE2026-…"). Rule #235: this comment is the atomic-correction target the day #172
+// widened the union — update the count here whenever the union changes again.
+const LEDGER_LINE_RE = /`(END|START|PLAN|NOTE|HELD|CLICK DUE)\s+([^`]*)`/g;
 // BARE (un-backticked) grammar lines are ALSO real: client-asthetik#280 comment 5348659682
 // (created 2026-08-19T22:15:45Z, recorded verbatim in fixtures/restart-train/
 // issue-280-bare-end-comment.json) is a hand-posted `END 2026-08-19T22:12:14Z · run
@@ -718,7 +741,7 @@ const LEDGER_LINE_RE = /`(END|START|PLAN|NOTE|HELD)\s+([^`]*)`/g;
 // must be immediately followed by an ISO date, so prose like "END of the story" or a mid-line
 // mention can never match. A backticked line never double-matches (its line starts with the
 // backtick, not the keyword).
-const BARE_LEDGER_LINE_RE = /(?:^|\n)\s*(END|START|PLAN|NOTE|HELD)\s+(\d{4}-\d{2}-\d{2}T[^\n`]*)/g;
+const BARE_LEDGER_LINE_RE = /(?:^|\n)\s*(END|START|PLAN|NOTE|HELD|CLICK DUE)\s+(\d{4}-\d{2}-\d{2}T[^\n`]*)/g;
 const ISO_PREFIX_RE =
   /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z)(?:[–-](?:\d{4}-\d{2}-\d{2}T)?\d{2}:\d{2}(?::\d{2})?Z)?/;
 
@@ -764,6 +787,13 @@ export function parseEndComments(comments: RestartTrainComment[]): TrainLedgerEn
   return parseTrainLedger(comments).filter((e) => e.kind === "END");
 }
 
+/** The `CLICK DUE <ISO> · ...` lines THIS worker posts (rung 1 Leg B, ops-pipeline#172) — the
+ * in-flight check's source: a CLICK DUE with no later END means a paged-but-not-yet-completed
+ * restart, and paging the NEXT ticket on top of it would be a double-restart collision. */
+export function parseClickDueComments(comments: RestartTrainComment[]): TrainLedgerEntry[] {
+  return parseTrainLedger(comments).filter((e) => e.kind === "CLICK DUE");
+}
+
 /**
  * A dangling PLAN: ANY parsed PLAN line whose own embedded ISO stamp is already at-or-before
  * `nowIso`, with nothing (END/START/NOTE — anything non-PLAN) stamped at or after THAT PLAN's
@@ -802,53 +832,87 @@ export function findDanglingPlan(comments: RestartTrainComment[], nowIso: string
   return { dangling: false };
 }
 
-// ───────────────────────────── train:ready ticket-building support ─────────────────────────────
-
-export interface TrainPinInfo {
-  appliedAtIso: string;
-  pinnedHeadSha: string;
-  appliedBy: string;
-}
-
-const TRAIN_PIN_RE =
-  /`TRAIN-PIN\s+(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z)\s*·\s*head=([0-9a-f]{40})\s*·\s*applied-by=([^`]+?)\s*`/;
+// ───────────────────────────── CLICK DUE rendering + dedup (rung 1 Leg B, ops-pipeline#172) ─────────────────────────────
 
 /**
- * Parse the `train:ready` PIN comment a PR receives at label-apply time (design §1.1: "The train
- * records head sha + applied-by + applied-at in a PR comment at label time — the head is pinned
- * there"). Grammar mirrors the #280 ledger style for consistency:
- * `` `TRAIN-PIN <ISO> · head=<sha> · applied-by=<login>` ``
- *
- * ⚠️ UNVERIFIED-LIVE (see ops-pipeline#172 rung-0 PR body): no `train:ready` ticket has ever
- * existed on any repo, and the label-apply mechanism that is supposed to POST this comment is a
- * SEPARATE, not-yet-built piece of work (design §4 "Day 1", CTO-owned) — so unlike
- * `parseTrainLedger`'s #280 grammar (mirrored from real recorded lines), this grammar is a
- * PROPOSED CONVENTION invented here because rung 0's `Ticket`-building needs *something*
- * parseable. Whoever builds the label-apply step must emit exactly this format, or this parser
- * (and its synthetic-fixture test, since no real example exists to record) needs updating to
- * match whatever they actually emit instead — flag this explicitly at that build's kickoff
- * (#464: this parser's first REAL input is part of its ship, not a footnote already covered by
- * rung 0's).
- *
- * Returns null (never throws) when no pin comment is found — the worker excludes that PR from
- * this tick's queue rather than fabricating a Ticket, matching the design's fail-closed posture;
- * a label with no pin posted yet is a normal race (the label-apply step hasn't finished), not a
- * fault. When multiple pin comments exist (a re-label after a head-drift invalidation posts a
- * NEW one — design §1.1), the LATEST one wins; comments must already be in chronological order
- * (same input contract as `parseTrainLedger`). A pin whose head is not a FULL 40-character
- * sha is treated as no pin at all (codex P3, pass 3): `orderQueue` compares `pinnedHeadSha` to
- * GitHub's full `headRefOid` with exact equality, so an abbreviated pin could never validate and
- * would masquerade as permanent head drift — rejecting it at parse yields the truthful
- * "no valid pin" exclusion instead.
+ * Deterministic per-(PR, pinned head) fingerprint for the `CLICK DUE` dedup marker — mirrors
+ * `planStateKey`'s pattern above: the caller (restart-train.ts's `postClickDue`) hashes this
+ * string the same way `postLines` hashes `planStateKey`'s output (sha256, sliced to 12 hex
+ * chars) and embeds it as a distinct `<!-- restart-train:click-due=<hash> -->` marker, so a
+ * repeat cron cycle against the SAME PR+head never reposts (#292 — post once per state
+ * transition), while a NEW head (a force-push after paging) correctly gets a fresh CLICK DUE.
  */
-export function parseTrainPin(comments: RestartTrainComment[]): TrainPinInfo | null {
-  let found: TrainPinInfo | null = null;
-  for (const c of comments) {
-    const m = c.body.match(TRAIN_PIN_RE);
-    if (m) found = { appliedAtIso: m[1], pinnedHeadSha: m[2], appliedBy: m[3].trim() };
-  }
-  return found;
+export function clickDueStateKey(repo: string, number: number, pinnedHeadSha: string): string {
+  return `click-due :: ${repo}#${number} @ ${pinnedHeadSha}`;
 }
+
+/**
+ * Formats the `CLICK DUE` line posted to BOTH the queue-head PR and `--target` — byte-identical
+ * on both surfaces (the mirror line stays unambiguous since the PR is named explicitly in the
+ * same line). Rule #412: claims exactly what is true, never "merging" or "deployed" — the line
+ * only ever says a human still has to click. `headSha` is embedded FULL (not truncated to 12
+ * chars like other diagnostic prose in this file) so it matches `clickDueStateKey`'s own
+ * untruncated key byte-for-byte.
+ *
+ * `anchorIso`/`anchorSource` are echoed verbatim (external facts, same convention as `planLines`'
+ * `anchor=${anchor.anchorIso}`). The leading stamp is different: it goes through `toIsoSeconds`
+ * even though `nowIso` is itself a caller-supplied fact — NOT because this line reformats an
+ * external fact (the doc comment above `toIsoSeconds` reserves verbatim-echo for exactly that),
+ * but because THIS specific line is round-tripped by THIS module's own `parseClickDueComments`
+ * (the in-flight check reads back its own past CLICK DUE lines via `ISO_PREFIX_RE`, which cannot
+ * match a `.SSS`-suffixed instant). `flags.now` defaults to a raw `Date#toISOString()` on every
+ * real scheduled run (the workflow only ever populates `NOW_INPUT` on `workflow_dispatch`) —
+ * leaving this unnormalized would silently defeat the in-flight safety gate on every production
+ * cycle, not just a rare replay edge case.
+ */
+export function formatClickDueLine(
+  repo: string,
+  number: number,
+  headSha: string,
+  nowIso: string,
+  anchorIso: string,
+  anchorSource: string,
+): string {
+  const stamp = toIsoSeconds(Date.parse(nowIso));
+  return `\`CLICK DUE ${stamp} · ${repo}#${number} · head=${headSha} · window CLEAR (anchor ${anchorIso} · ${anchorSource}) — a human merges this PR; the train observes END before the next ticket.\``;
+}
+
+/**
+ * The in-flight check's pure core (rung 1 Leg B, ops-pipeline#172): is the most recently posted
+ * `CLICK DUE`'s own leading stamp NEWER than the current anchor? `lastClickDueIso === null`
+ * (no prior CLICK DUE has ever been posted) resolves to `false` — nothing has been paged, so
+ * nothing can be in flight. Otherwise fails CLOSED (returns `true` = still in flight) whenever
+ * either stamp fails to parse — the double-restart-collision hazard this guards against is
+ * strictly worse than one missed paging cycle (Rule #4).
+ *
+ * Why comparing against the LIVE anchor is sufficient, with no separate END-tracking: a CLICK
+ * DUE's stamp is the instant it was POSTED, always at-or-before the anchor value in force at
+ * that same moment (the anchor is by construction an already-completed past fact). On every
+ * later cycle where the paged restart has NOT yet completed, the anchor is unchanged, so the
+ * comparison stays "in flight". `computeAnchor` only advances `anchorIso` PAST a CLICK DUE's own
+ * stamp once a genuinely NEW restart-completion fact (client-asthetik Actions success, Railway
+ * deploy, or a manual END on #280) lands — which by construction happens AFTER the human clicks
+ * merge and the restart finishes — flipping the comparison to "clear" at exactly the right
+ * moment, with no separate bookkeeping needed.
+ */
+export function isClickDueStillInFlight(lastClickDueIso: string | null, anchorIso: string): boolean {
+  if (lastClickDueIso === null) return false;
+  const lastMs = Date.parse(lastClickDueIso);
+  const anchorMs = Date.parse(anchorIso);
+  return Number.isNaN(lastMs) || Number.isNaN(anchorMs) || lastMs > anchorMs;
+}
+
+// ───────────────────────────── train:after / train:consolidate token parsing ─────────────────────────────
+//
+// train:ready ticket ASSEMBLY itself (label authority, staleness, `labeledAt`) moved to
+// label-authority.ts + restart-train.ts's `fetchTickets` in rung 1 (ops-pipeline#172) — the
+// old comment-grammar pin parser and its info type/regex this section used to hold were v1's D1
+// defect (authority from a parseable comment body, never GitHub-attributed, and the label-apply/
+// pin-emitter it depended on was never built — see the rung 1 PR body for the full history) and
+// are deleted outright, not superseded in place. The two helpers remaining below are unrelated
+// to authority: `train:after`/`train:consolidate` are ORDERING hints only, and staying
+// comment-text-derived is fail-safe (worst case is a delayed or non-consolidated slot, never an
+// unauthorized restart) — see the rung 1 PR body.
 
 const TRAIN_AFTER_RE = /train:after\s+([\w.-]+\/[\w.-]+#\d+)/g;
 

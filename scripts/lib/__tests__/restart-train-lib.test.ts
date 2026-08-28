@@ -6,17 +6,20 @@ import {
   clampCandidatesToNow,
   clampCommentsToNow,
   clampTicketsToNow,
+  clickDueStateKey,
   computeAnchor,
   computePlanSlots,
   findDanglingPlan,
+  formatClickDueLine,
   hasTrainConsolidate,
   isBatchBlackoutUtc,
   isBusinessHoursBlockedET,
+  isClickDueStillInFlight,
   orderQueue,
+  parseClickDueComments,
   parseEndComments,
   parseTrainAfterTokens,
   parseTrainLedger,
-  parseTrainPin,
   planLines,
   repoClassFor,
   planStateKey,
@@ -45,7 +48,7 @@ function ticket(overrides: Partial<Ticket> = {}): Ticket {
     repo: "studio-b-ai/studiob",
     number: 1,
     repoClass: "studiob",
-    appliedAt: "2026-08-19T20:00:00Z",
+    labeledAt: "2026-08-19T20:00:00Z",
     pinnedHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     currentHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     afterTokens: [],
@@ -310,22 +313,26 @@ describe("computeAnchor", () => {
 
 // ───────────────────────────── orderQueue ─────────────────────────────
 
+// pg-enum-drift-exempt: this whole describe block's `status: "queued"`/`status: "invalidated"`
+// literals are QueueEntry.status, a local TS union declared in restart-train-lib.ts — this repo
+// has no Postgres/sync_ledger involvement anywhere; the enum-drift guard's heuristic just matches
+// the word "status" adjacent to a quoted literal regardless of domain.
 describe("orderQueue", () => {
-  it("orders by appliedAt FIFO when nothing else applies", () => {
-    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, appliedAt: "2026-08-19T20:00:00Z" });
-    const b = ticket({ repo: "studio-b-ai/studiob", number: 2, appliedAt: "2026-08-19T19:00:00Z" });
+  it("orders by labeledAt FIFO when nothing else applies", () => {
+    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, labeledAt: "2026-08-19T20:00:00Z" });
+    const b = ticket({ repo: "studio-b-ai/studiob", number: 2, labeledAt: "2026-08-19T19:00:00Z" });
     const entries = orderQueue([a, b]);
     expect(entries.map((e) => e.ticket.number)).toEqual([2, 1]);
     expect(entries.every((e) => e.status === "queued")).toBe(true);
   });
 
-  it("honors train:after even against an earlier appliedAt", () => {
-    // B applied first (would be FIFO-first) but names A via train:after — A must come first.
-    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, appliedAt: "2026-08-19T20:00:00Z" });
+  it("honors train:after even against an earlier labeledAt", () => {
+    // B labeled first (would be FIFO-first) but names A via train:after — A must come first.
+    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, labeledAt: "2026-08-19T20:00:00Z" });
     const b = ticket({
       repo: "studio-b-ai/studiob",
       number: 2,
-      appliedAt: "2026-08-19T19:00:00Z",
+      labeledAt: "2026-08-19T19:00:00Z",
       afterTokens: ["studio-b-ai/studiob#1"],
     });
     const entries = orderQueue([a, b]);
@@ -337,23 +344,25 @@ describe("orderQueue", () => {
     const a = ticket({
       repo: "studio-b-ai/studiob",
       number: 1,
-      appliedAt: "2026-08-19T19:00:00Z",
+      labeledAt: "2026-08-19T19:00:00Z",
       afterTokens: ["studio-b-ai/studiob#999"], // not in this queue
     });
     const entries = orderQueue([a]);
+    // pg-enum-drift-exempt: QueueEntry.status (local TS union), not a Postgres enum column.
     expect(entries).toEqual([{ status: "queued", ticket: a, slotGroup: 0 }]);
   });
 
   it("groups a train:consolidate ticket into the slot of the ticket immediately ahead of it", () => {
-    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, appliedAt: "2026-08-19T19:00:00Z" });
+    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, labeledAt: "2026-08-19T19:00:00Z" });
     const b = ticket({
       repo: "studio-b-ai/client-asthetik",
       number: 2,
       repoClass: "client-asthetik",
-      appliedAt: "2026-08-19T19:05:00Z",
+      labeledAt: "2026-08-19T19:05:00Z",
       consolidate: true,
     });
     const entries = orderQueue([a, b]);
+    // pg-enum-drift-exempt: QueueEntry.status (local TS union), not a Postgres enum column.
     const queued = entries.filter((e): e is Extract<QueueEntry, { status: "queued" }> => e.status === "queued");
     expect(queued[0].slotGroup).toBe(queued[1].slotGroup);
   });
@@ -363,19 +372,20 @@ describe("orderQueue", () => {
       repo: "studio-b-ai/client-asthetik",
       number: 2,
       repoClass: "client-asthetik",
-      appliedAt: "2026-08-19T19:00:00Z",
+      labeledAt: "2026-08-19T19:00:00Z",
       consolidate: true,
     });
     const entries = orderQueue([a]);
+    // pg-enum-drift-exempt: QueueEntry.status (local TS union), not a Postgres enum column.
     expect(entries).toEqual([{ status: "queued", ticket: a, slotGroup: 0 }]);
   });
 
   it("invalidates a ticket whose current head drifted from its pinned head, and never schedules it", () => {
-    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, appliedAt: "2026-08-19T19:00:00Z" });
+    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, labeledAt: "2026-08-19T19:00:00Z" });
     const drifted = ticket({
       repo: "studio-b-ai/studiob",
       number: 2,
-      appliedAt: "2026-08-19T18:00:00Z", // would be FIFO-first if valid
+      labeledAt: "2026-08-19T18:00:00Z", // would be FIFO-first if valid
       pinnedHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       currentHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     });
@@ -533,62 +543,6 @@ describe("findDanglingPlan (real client-asthetik#280 fixture)", () => {
   });
 });
 
-describe("parseTrainPin (synthetic — no real train:ready ticket has ever existed, see fn doc)", () => {
-  it("returns null for comments with no pin line", () => {
-    const c: RestartTrainComment[] = [
-      { id: 1, login: "kbibelhausen", createdAt: "2026-08-19T22:00:00Z", body: "looks good, merging soon" },
-    ];
-    expect(parseTrainPin(c)).toBeNull();
-  });
-
-  it("returns null for an empty comment list", () => {
-    expect(parseTrainPin([])).toBeNull();
-  });
-
-  it("parses a well-formed pin line", () => {
-    const c: RestartTrainComment[] = [
-      {
-        id: 1,
-        login: "train-bot",
-        createdAt: "2026-08-19T22:10:00Z",
-        body: "`TRAIN-PIN 2026-08-19T22:10:00Z · head=abc1234def5678abc1234def5678abc1234def56 · applied-by=kbibelhausen`",
-      },
-    ];
-    expect(parseTrainPin(c)).toEqual({
-      appliedAtIso: "2026-08-19T22:10:00Z",
-      pinnedHeadSha: "abc1234def5678abc1234def5678abc1234def56",
-      appliedBy: "kbibelhausen",
-    });
-  });
-
-  it("a short (abbreviated) sha is REJECTED — orderQueue compares the full 40-char headRefOid, so a short pin could only ever masquerade as head drift (codex P3)", () => {
-    const c: RestartTrainComment[] = [
-      { id: 1, login: "train-bot", createdAt: "2026-08-19T22:10:00Z", body: "`TRAIN-PIN 2026-08-19T22:10:00Z · head=abc1234 · applied-by=kbibelhausen`" },
-    ];
-    expect(parseTrainPin(c)).toBeNull();
-  });
-
-  it("the LATEST pin wins when a PR was re-pinned after a re-label", () => {
-    const c: RestartTrainComment[] = [
-      { id: 1, login: "train-bot", createdAt: "2026-08-19T20:00:00Z", body: "`TRAIN-PIN 2026-08-19T20:00:00Z · head=1111111111111111111111111111111111111111 · applied-by=kbibelhausen`" },
-      { id: 2, login: "system", createdAt: "2026-08-19T20:30:00Z", body: "head drift detected, label removed" },
-      { id: 3, login: "train-bot", createdAt: "2026-08-19T21:00:00Z", body: "`TRAIN-PIN 2026-08-19T21:00:00Z · head=2222222222222222222222222222222222222222 · applied-by=kbibelhausen`" },
-    ];
-    expect(parseTrainPin(c)).toEqual({
-      appliedAtIso: "2026-08-19T21:00:00Z",
-      pinnedHeadSha: "2222222222222222222222222222222222222222",
-      appliedBy: "kbibelhausen",
-    });
-  });
-
-  it("a malformed pin (bad ISO, non-hex sha) does not match and falls through to null", () => {
-    const c: RestartTrainComment[] = [
-      { id: 1, login: "train-bot", createdAt: "2026-08-19T22:10:00Z", body: "`TRAIN-PIN not-a-date · head=zzzzzzz · applied-by=kbibelhausen`" },
-    ];
-    expect(parseTrainPin(c)).toBeNull();
-  });
-});
-
 describe("parseTrainAfterTokens (synthetic)", () => {
   it("returns an empty array with no train:after tokens present", () => {
     const c: RestartTrainComment[] = [{ id: 1, login: "k", createdAt: "2026-08-19T22:00:00Z", body: "no dependency here" }];
@@ -644,8 +598,8 @@ describe("hasTrainConsolidate (synthetic)", () => {
 
 describe("orderQueue — train:after cycles fail closed", () => {
   it("invalidates BOTH members of a mutual train:after cycle and schedules neither", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
     const entries = orderQueue([a, b]);
     expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
     const invalid = entries.filter((e) => e.status === "invalidated");
@@ -656,9 +610,9 @@ describe("orderQueue — train:after cycles fail closed", () => {
   });
 
   it("still schedules an independent ticket alongside an invalidated cycle pair", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
-    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z" });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, labeledAt: "2026-08-19T21:00:00Z" });
     const entries = orderQueue([a, b, c]);
     const queued = entries.filter((e) => e.status === "queued");
     expect(queued.map((e) => e.ticket.number)).toEqual([3]);
@@ -666,18 +620,18 @@ describe("orderQueue — train:after cycles fail closed", () => {
   });
 
   it("invalidates a ticket transitively blocked behind a cycle (its dep can never merge first)", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
-    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, labeledAt: "2026-08-19T21:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
     const entries = orderQueue([a, b, c]);
     expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
     expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(3);
   });
 
   it("negative control (Rule #322): an acyclic train:after chain still schedules fully, in order", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T21:00:00Z" });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
-    const c = ticket({ number: 3, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T21:00:00Z" });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
     const entries = orderQueue([a, b, c]);
     const queued = entries.filter((e) => e.status === "queued");
     expect(queued.map((e) => e.ticket.number)).toEqual([1, 2, 3]);
@@ -689,8 +643,8 @@ describe("orderQueue — train:after deps on drift-invalidated tickets fail clos
   const DRIFTED = { pinnedHeadSha: "a".repeat(40), currentHeadSha: "b".repeat(40) };
 
   it("a ticket depending on a drift-invalidated ticket is invalidated, never scheduled ahead of its declared order", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", ...DRIFTED });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", ...DRIFTED });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
     const entries = orderQueue([a, b]);
     expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
     const invalidated = entries.filter((e) => e.status === "invalidated");
@@ -701,9 +655,9 @@ describe("orderQueue — train:after deps on drift-invalidated tickets fail clos
   });
 
   it("the block is transitive: C after B after drifted A invalidates all three, with the chained reason", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", ...DRIFTED });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
-    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", ...DRIFTED });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, labeledAt: "2026-08-19T21:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
     const entries = orderQueue([a, b, c]);
     expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
     expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(3);
@@ -712,7 +666,7 @@ describe("orderQueue — train:after deps on drift-invalidated tickets fail clos
   });
 
   it("negative control (Rule #322): a dep entirely ABSENT from the train stays a no-op — the ticket schedules", () => {
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#999"] });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#999"] });
     const entries = orderQueue([b]);
     const queued = entries.filter((e) => e.status === "queued");
     expect(queued).toHaveLength(1);
@@ -721,9 +675,9 @@ describe("orderQueue — train:after deps on drift-invalidated tickets fail clos
   });
 
   it("an unrelated schedulable ticket still schedules while the drift-blocked pair is invalidated", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", ...DRIFTED });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
-    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z" });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", ...DRIFTED });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, labeledAt: "2026-08-19T21:00:00Z" });
     const entries = orderQueue([a, b, c]);
     const queued = entries.filter((e) => e.status === "queued");
     expect(queued.map((e) => e.ticket.number)).toEqual([3]);
@@ -775,29 +729,6 @@ describe("clampCommentsToNow / clampCandidatesToNow / clampTicketsToNow", () => 
     expect(() => clampCandidatesToNow([], "not-a-now")).toThrow(/Unparsable now in replay clamp/);
   });
 
-  it("comment clamp before pin parsing: a future re-pin is invisible, the live pin schedules (codex P2b)", () => {
-    const oldSha = "a".repeat(40);
-    const newSha = "b".repeat(40);
-    const comments: RestartTrainComment[] = [
-      {
-        id: 1,
-        body: "`TRAIN-PIN 2026-08-19T20:00:00Z · head=" + oldSha + " · applied-by=coo`",
-        login: "b",
-        createdAt: "2026-08-19T20:00:05Z",
-      },
-      {
-        id: 2,
-        body: "`TRAIN-PIN 2026-08-19T23:00:00Z · head=" + newSha + " · applied-by=coo`",
-        login: "b",
-        createdAt: "2026-08-19T23:00:05Z",
-      },
-    ];
-    // Unclamped, parseTrainPin picks the LATEST pin — the future one — which clampTicketsToNow
-    // would then drop wholesale, losing a ticket that WAS schedulable at the instant.
-    expect(parseTrainPin(comments)?.pinnedHeadSha).toBe(newSha);
-    expect(parseTrainPin(clampCommentsToNow(comments, "2026-08-19T22:20:00Z"))?.pinnedHeadSha).toBe(oldSha);
-  });
-
   it("clampCommentsToNow makes a future-created comment invisible to ledger parsing", () => {
     const comments: RestartTrainComment[] = [
       { id: 1, body: "`END 2026-08-19T22:12:14Z · past`", login: "a", createdAt: "2026-08-19T22:12:20Z" },
@@ -810,9 +741,9 @@ describe("clampCommentsToNow / clampCandidatesToNow / clampTicketsToNow", () => 
     expect(ends[0].isoStamp).toBe("2026-08-19T22:12:14Z");
   });
 
-  it("clampTicketsToNow drops a ticket whose pin was applied after the replay instant", () => {
-    const past = ticket({ number: 1, appliedAt: "2026-08-19T20:00:00Z" });
-    const future = ticket({ number: 2, appliedAt: "2026-08-19T23:00:00Z" });
+  it("clampTicketsToNow drops a ticket labeled after the replay instant", () => {
+    const past = ticket({ number: 1, labeledAt: "2026-08-19T20:00:00Z" });
+    const future = ticket({ number: 2, labeledAt: "2026-08-19T23:00:00Z" });
     expect(clampTicketsToNow([past, future], "2026-08-19T22:20:00Z")).toEqual([past]);
   });
 });
@@ -994,5 +925,224 @@ describe("latestEndAnchorCandidate — clamp BEFORE the latest-reduce", () => {
 
   it("keepAtOrBefore throws on garbage now (never a silent no-clamp)", () => {
     expect(() => keepAtOrBefore("nonsense")).toThrow(/Unparsable now in replay clamp/);
+  });
+});
+
+// ───────────────────────────── CLICK DUE rendering + dedup (rung 1 Leg B, ops-pipeline#172) ─────────────────────────────
+
+describe("parseClickDueComments (sixth ledger kind)", () => {
+  it("extracts a backticked CLICK DUE line and NOTHING else from a mixed comment", () => {
+    const comments: RestartTrainComment[] = [
+      {
+        id: 1,
+        login: "restart-train[bot]",
+        createdAt: "2026-08-26T14:00:05Z",
+        body: "`CLICK DUE 2026-08-26T14:00:00Z · studio-b-ai/studiob#558 · head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa · window CLEAR (anchor 2026-08-26T13:30:00Z · manual-end-comment) — a human merges this PR; the train observes END before the next ticket.`",
+      },
+    ];
+    const clickDues = parseClickDueComments(comments);
+    expect(clickDues).toHaveLength(1);
+    expect(clickDues[0].isoStamp).toBe("2026-08-26T14:00:00Z");
+    expect(clickDues[0].detail).toMatch(/studio-b-ai\/studiob#558/);
+    expect(clickDues[0].detail).toMatch(/head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
+    // The wider ledger view sees it too, correctly typed — parseTrainLedger is the general case.
+    expect(parseTrainLedger(comments)).toHaveLength(1);
+    expect(parseTrainLedger(comments)[0].kind).toBe("CLICK DUE");
+  });
+
+  it("extracts a BARE (un-backticked) CLICK DUE line, same as every other bare grammar kind", () => {
+    const comments: RestartTrainComment[] = [
+      {
+        id: 2,
+        login: "restart-train[bot]",
+        createdAt: "2026-08-26T14:00:05Z",
+        body: "CLICK DUE 2026-08-26T14:00:00Z · studio-b-ai/client-asthetik#281 · head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb · window CLEAR",
+      },
+    ];
+    const clickDues = parseClickDueComments(comments);
+    expect(clickDues).toHaveLength(1);
+    expect(clickDues[0].isoStamp).toBe("2026-08-26T14:00:00Z");
+  });
+
+  it("does NOT match on 'CLICK' or 'DUE' alone, or the two words out of order (exact two-word keyword only)", () => {
+    const comments: RestartTrainComment[] = [
+      { id: 3, login: "a", createdAt: "2026-08-26T14:00:00Z", body: "`CLICK 2026-08-26T14:00:00Z · missing DUE`" },
+      { id: 4, login: "a", createdAt: "2026-08-26T14:00:00Z", body: "`DUE CLICK 2026-08-26T14:00:00Z · reversed`" },
+      { id: 5, login: "a", createdAt: "2026-08-26T14:00:00Z", body: "the click is due 2026-08-26T14:00:00Z, lowercase prose" },
+    ];
+    expect(parseClickDueComments(comments)).toHaveLength(0);
+    expect(parseTrainLedger(comments)).toHaveLength(0);
+  });
+
+  it("coexists with the other five kinds in one comment, sorted in body-scan order (mirrors the mixed-syntax contract above)", () => {
+    const comments: RestartTrainComment[] = [
+      {
+        id: 6,
+        login: "a",
+        createdAt: "2026-08-26T14:05:00Z",
+        body: "`CLICK DUE 2026-08-26T14:00:00Z · studiob#558 paged`\n`END 2026-08-26T14:03:00Z · studiob#558 merged and restarted`",
+      },
+    ];
+    const entries = parseTrainLedger(comments);
+    expect(entries.map((e) => e.kind)).toEqual(["CLICK DUE", "END"]);
+    expect(parseClickDueComments(comments)).toHaveLength(1);
+    expect(parseEndComments(comments)).toHaveLength(1);
+  });
+
+  it("chronological ordering across multiple comments follows commentCreatedAt, same as parseEndComments", () => {
+    const comments: RestartTrainComment[] = [
+      { id: 8, login: "a", createdAt: "2026-08-26T15:00:00Z", body: "`CLICK DUE 2026-08-26T15:00:00Z · second, later comment`" },
+      { id: 7, login: "a", createdAt: "2026-08-26T14:00:00Z", body: "`CLICK DUE 2026-08-26T14:00:00Z · first, earlier comment`" },
+    ];
+    const clickDues = parseClickDueComments(comments);
+    expect(clickDues).toHaveLength(2);
+    expect(clickDues[0].detail).toContain("first, earlier comment");
+    expect(clickDues[1].detail).toContain("second, later comment");
+  });
+});
+
+describe("clickDueStateKey", () => {
+  it("is a deterministic function of (repo, number, pinnedHeadSha) only", () => {
+    const k1 = clickDueStateKey("studio-b-ai/studiob", 558, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const k2 = clickDueStateKey("studio-b-ai/studiob", 558, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(k1).toBe(k2);
+    expect(k1).toBe("click-due :: studio-b-ai/studiob#558 @ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  });
+
+  it("changes on ANY of the three inputs changing (repo, number, sha independently)", () => {
+    const base = clickDueStateKey("studio-b-ai/studiob", 558, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const diffRepo = clickDueStateKey("studio-b-ai/client-asthetik", 558, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const diffNumber = clickDueStateKey("studio-b-ai/studiob", 559, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const diffSha = clickDueStateKey("studio-b-ai/studiob", 558, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    const keys = [base, diffRepo, diffNumber, diffSha];
+    expect(new Set(keys).size).toBe(4);
+  });
+
+  it("a force-push after paging (new head, same PR) gets a DIFFERENT fingerprint — a fresh CLICK DUE is correct, not a dupe", () => {
+    const before = clickDueStateKey("studio-b-ai/studiob", 558, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const afterForcePush = clickDueStateKey("studio-b-ai/studiob", 558, "cccccccccccccccccccccccccccccccccccccccc");
+    expect(before).not.toBe(afterForcePush);
+  });
+});
+
+describe("formatClickDueLine", () => {
+  const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+  it("renders the full grammar line, backtick-wrapped, with the untruncated head sha", () => {
+    const line = formatClickDueLine(
+      "studio-b-ai/studiob",
+      558,
+      HEAD,
+      "2026-08-26T14:00:00Z",
+      "2026-08-26T13:30:00Z",
+      "manual-end-comment",
+    );
+    expect(line.startsWith("`CLICK DUE ")).toBe(true);
+    expect(line.endsWith("`")).toBe(true);
+    expect(line).toContain("studio-b-ai/studiob#558");
+    expect(line).toContain(`head=${HEAD}`);
+    expect(line).toContain("anchor 2026-08-26T13:30:00Z");
+    expect(line).toContain("manual-end-comment");
+    expect(line).toContain("window CLEAR");
+  });
+
+  it("Rule #412: claims exactly what is true — never says 'merging' or 'deployed', always names a human as the actor", () => {
+    const line = formatClickDueLine("studio-b-ai/studiob", 558, HEAD, "2026-08-26T14:00:00Z", "2026-08-26T13:30:00Z", "manual-end-comment");
+    expect(line.toLowerCase()).not.toContain("merging");
+    expect(line.toLowerCase()).not.toContain("deployed");
+    expect(line).toContain("a human merges this PR");
+  });
+
+  it("truncates a millisecond-suffixed nowIso to second precision (the raw Date#toISOString() shape every real scheduled run passes, since --now is only ever set on workflow_dispatch)", () => {
+    const line = formatClickDueLine(
+      "studio-b-ai/studiob",
+      558,
+      HEAD,
+      "2026-08-26T14:00:00.482Z",
+      "2026-08-26T13:30:00Z",
+      "manual-end-comment",
+    );
+    expect(line).toContain("CLICK DUE 2026-08-26T14:00:00Z");
+    expect(line).not.toContain(".482");
+  });
+
+  it("round-trips through parseClickDueComments even when built from a millisecond-suffixed nowIso — the exact defect this normalization exists to prevent", () => {
+    // Without toIsoSeconds truncation, ISO_PREFIX_RE cannot match a `.SSS`-suffixed instant and
+    // isoStamp comes back "" — silently defeating the in-flight check on every real cron cycle
+    // (schedule triggers never pass --now, so flags.now is always raw Date#toISOString()).
+    const line = formatClickDueLine(
+      "studio-b-ai/studiob",
+      558,
+      HEAD,
+      "2026-08-26T14:00:00.999Z",
+      "2026-08-26T13:30:00Z",
+      "manual-end-comment",
+    );
+    const posted: RestartTrainComment[] = [{ id: 1, login: "restart-train[bot]", createdAt: "2026-08-26T14:00:01Z", body: line }];
+    const parsed = parseClickDueComments(posted);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].isoStamp).toBe("2026-08-26T14:00:00Z");
+    expect(Number.isNaN(Date.parse(parsed[0].isoStamp))).toBe(false);
+  });
+
+  it("echoes anchorIso/anchorSource VERBATIM (external facts, same convention as planLines' anchor=)", () => {
+    // Deliberately pass a millisecond-suffixed anchorIso — only the LEADING nowIso stamp goes
+    // through toIsoSeconds; embedded facts are never reformatted (doc comment on toIsoSeconds).
+    const line = formatClickDueLine(
+      "studio-b-ai/studiob",
+      558,
+      HEAD,
+      "2026-08-26T14:00:00Z",
+      "2026-08-26T13:30:00.123Z",
+      "client-asthetik-actions",
+    );
+    expect(line).toContain("anchor 2026-08-26T13:30:00.123Z");
+    expect(line).toContain("client-asthetik-actions");
+  });
+});
+
+describe("isClickDueStillInFlight (rung 1 Leg B paging gate — restart-train.ts's isTicketInFlight reduces to this)", () => {
+  const ANCHOR = "2026-08-26T14:00:00Z";
+
+  // ───── Negative controls first (Rule #322) — the two ways "not in flight" is reached ─────
+
+  it("null (no prior CLICK DUE has ever been posted) => not in flight", () => {
+    expect(isClickDueStillInFlight(null, ANCHOR)).toBe(false);
+  });
+
+  it("last CLICK DUE strictly BEFORE the current anchor => not in flight (the restart completed and the anchor moved past it)", () => {
+    expect(isClickDueStillInFlight("2026-08-26T13:00:00Z", ANCHOR)).toBe(false);
+  });
+
+  it("last CLICK DUE exactly EQUAL to the anchor => not in flight (boundary: strictly-greater-than, not >=)", () => {
+    expect(isClickDueStillInFlight(ANCHOR, ANCHOR)).toBe(false);
+  });
+
+  // ───── Positive path ─────
+
+  it("last CLICK DUE strictly AFTER the current anchor => still in flight (no restart-completion fact has landed since paging)", () => {
+    expect(isClickDueStillInFlight("2026-08-26T14:05:00Z", ANCHOR)).toBe(true);
+  });
+
+  // ───── Fail-closed on ambiguity (Rule #4) — the exact bug this test suite exists to pin ─────
+  // down: restart-train.ts's isTicketInFlight must pass a malformed (empty-string) isoStamp
+  // THROUGH to this function rather than coalescing it to null — null and "" mean two entirely
+  // different things (nothing posted vs. something posted with a broken stamp), and only the
+  // former may resolve to "not in flight".
+
+  it("an empty-string stamp (TrainLedgerEntry's own malformed-line convention) fails CLOSED => in flight, never coalesced to the null/not-in-flight reading", () => {
+    expect(isClickDueStillInFlight("", ANCHOR)).toBe(true);
+  });
+
+  it("a non-empty but unparseable stamp fails CLOSED => in flight", () => {
+    expect(isClickDueStillInFlight("not-a-date", ANCHOR)).toBe(true);
+  });
+
+  it("a malformed anchorIso fails CLOSED => in flight, even with an otherwise-valid CLICK DUE stamp", () => {
+    expect(isClickDueStillInFlight("2026-08-26T13:00:00Z", "also-not-a-date")).toBe(true);
+  });
+
+  it("both stamps malformed fails CLOSED => in flight", () => {
+    expect(isClickDueStillInFlight("nope", "also-nope")).toBe(true);
   });
 });

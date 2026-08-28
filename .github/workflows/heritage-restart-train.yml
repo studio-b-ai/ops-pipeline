@@ -1,6 +1,6 @@
 name: Heritage Restart Train
 
-# ops-pipeline#172, rung 0 (CTO seat, Kevin LOCKED option A -- merge authority --
+# ops-pipeline#172, rung 0 + rung 1 (CTO seat, Kevin LOCKED option A -- merge authority --
 # 2026-08-19T20:45Z). Full design lives in scripts/restart-train.ts's and
 # scripts/lib/restart-train-lib.ts's header comments; this workflow only mints the fleet
 # App token (repo-hygiene.yml / backlog-staleness.yml's pattern, copied verbatim) and runs
@@ -10,12 +10,24 @@ name: Heritage Restart Train
 # (design v0) + library/decisions/2026-08-19-heritage-restart-train-merge-authority-label-gated.md
 # (Kevin LOCKED option A) + this tracker (ops-pipeline#172).
 #
-# RUNG 0 = DRY-RUN ONLY. This workflow computes a clearance anchor + window-law state + an
-# ordered train:ready ticket queue purely from live reads across studio-b-ai/studiob,
-# studio-b-ai/client-asthetik, and studiob-api's Railway deployments, and posts
-# `PLAN (dry-run)` lines on --target (default studio-b-ai/ops-pipeline#172). It fires
-# NOTHING, merges NOTHING, and labels NOTHING -- `--fire` (rung 3's live-merge mode) is not
-# built yet and the worker throws unconditionally if asked for it.
+# RUNG 0 (dry-run scheduling) computes a clearance anchor + window-law state + an ordered
+# train:ready ticket queue purely from live reads across studio-b-ai/studiob,
+# studio-b-ai/client-asthetik, and studiob-api's Railway deployments, and posts a `PLAN
+# (dry-run)` line on --target (default studio-b-ai/ops-pipeline#172) every cycle.
+#
+# RUNG 1 (ops-pipeline#172, this build) adds two things on top of rung 0's scheduling, both
+# strictly narrower than a merge and both gated behind --post like everything else this
+# worker writes: (1) Leg A -- train:ready authority now comes from GitHub-attributed GraphQL
+# timeline events (scripts/lib/label-authority.ts), never a parseable comment body, and a
+# STALE label (a push landing after the authorizing label) is stripped + receipted with a
+# comment on the TICKET'S OWN PR; (2) Leg B, run via the --page flag below (unconditional on
+# every trigger, same as --post) -- when the queue head's window is CLEAR, nothing is in
+# flight, and its CI rollup is green, the worker posts ONE `CLICK DUE` comment on the
+# queue-head PR itself (+ a mirror on --target) telling a human to click merge; a
+# red/pending rollup posts a HELD-style deduped line instead (Rule #89: never page a human
+# to a red-CI PR). This workflow still fires NOTHING and merges NOTHING -- `--fire` (rung
+# 3's live-merge mode) is not built yet and the worker throws unconditionally if asked for
+# it; CLICK DUE only ever asks a human to click, it never clicks for them.
 #
 # HERITAGE_TRAIN_ENABLED (repo variable) does NOT exist yet as of this workflow's merge --
 # the job-level `if:` below means BOTH the scheduled AND the workflow_dispatch-triggered
@@ -30,8 +42,9 @@ name: Heritage Restart Train
 # cannot do. studiob-fleet-bot's pull_requests:write + contents:write + checks:read +
 # actions:write + workflows:write (granted 2026-08-19 ~21:52Z) plus its pre-existing
 # issues:write + metadata:read covers every read and write (issue/PR/comment/label reads,
-# Actions run+job reads, and posting PLAN/HELD comments -- always on --target, never on a
-# ticket's own PR, never on client-asthetik#280) this worker performs.
+# Actions run+job reads, and posting PLAN/HELD lines on --target AND, for Leg A's
+# stale-label receipts and Leg B's CLICK DUE, a comment on a ticket's own PR too -- never on
+# client-asthetik#280, which stays a READ-ONLY source for this worker) this worker performs.
 
 on:
   schedule:
@@ -63,7 +76,7 @@ concurrency:
 
 jobs:
   plan:
-    name: "Heritage restart train -- rung 0 dry-run scheduler (fleet App token)"
+    name: "Heritage restart train -- rung 0 dry-run scheduler + rung 1 label-authority/paging (fleet App token)"
     runs-on: ubuntu-latest
     # Job-level gate (brief requirement, verbatim) -- applies to BOTH triggers uniformly, not
     # just the schedule: the repo variable does not exist yet, so this job is a no-op on
@@ -118,7 +131,11 @@ jobs:
           NOW_INPUT: ${{ inputs.now }}
           TARGET_INPUT: ${{ inputs.target }}
         run: |
-          args=(--post)
+          # --page unconditional on every trigger (schedule AND workflow_dispatch), same as
+          # --post already is -- rung 1 Leg B (ops-pipeline#172). Every gate inside maybePage()
+          # (window CLEAR, nothing in flight, CI rollup green) still has to hold before any
+          # CLICK DUE is posted; --page only turns the CHECK on, it never bypasses a gate.
+          args=(--post --page)
           if [ -n "$FIRE_FLAG" ]; then args+=("--fire"); fi
           if [ -n "$NOW_INPUT" ]; then args+=(--now "$NOW_INPUT"); fi
           if [ -n "$TARGET_INPUT" ]; then args+=(--target "$TARGET_INPUT"); fi

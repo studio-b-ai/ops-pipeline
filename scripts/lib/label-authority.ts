@@ -4,16 +4,23 @@
  * program (docs/plans/2026-08-28-automerge-b-plus-a-v2.md §3.1-3.3).
  *
  * WHY THIS EXISTS (v1's fatal flaw, doc §1 D1/D2): v1 derived merge authority from
- * PARSING COMMENT BODIES (`restart-train-lib.ts`'s `parseTrainPin` — a
+ * PARSING COMMENT BODIES (restart-train-lib.ts's original pin parser — a
  * "TRAIN-PIN <iso> · head=<sha> · applied-by=<login>" grammar the author of THIS file
  * invented, never a GitHub-attributed fact) and from TIMESTAMPS (staleness by clock
  * comparison, forgeable by anyone who can edit/backdate a comment or whose clock
  * skews). Both are attacker- and bug-controllable: any commenter can type that exact
  * string. v2 replaces both with GraphQL `timelineItems` — SERVER-ATTRIBUTED events
  * (who labeled it, in what ORDER relative to commits/force-pushes) that no comment
- * body can forge. `parseTrainPin` itself is explicitly NOT touched or reused here
- * (brief: "do NOT modify parseTrainPin; it is receipt-legacy") — it stays exactly what
- * it always was, a superseded, never-relied-upon-for-authority parser.
+ * body can forge. That legacy comment-grammar parser was explicitly NOT touched or
+ * reused here at the time this module was first built (brief: "leave the legacy
+ * comment parser alone, it's a superseded, never-relied-upon-for-authority path") —
+ * that separation is what let this predicate ship and get verified independently.
+ * ops-pipeline#172 rung 1 (the restart-train worker's ticket-assembly cutover onto
+ * this predicate, replacing the old parser's call site outright rather than leaving
+ * it dead-but-present) has since deleted that legacy parser and its supporting
+ * type/regex from restart-train-lib.ts entirely — see that file's
+ * `train:after`/`train:consolidate` section header for the current state; nothing in
+ * that deletion touches this file.
  *
  * Fail-closed doctrine (Rules #4, #322, #412, #464, #471 — the dominant law across
  * this whole repo): every ambiguous, truncated, empty, or unrecognized input resolves
@@ -93,6 +100,13 @@ export interface AuthorityTimelineItem {
    *  "github-actions[bot]"). */
   actorLogin?: string;
   position: number;
+  /** Only populated for LABELED (the GraphQL query only selects `createdAt` on the
+   *  `LabeledEvent` fragment, ops-pipeline#172 rung 1) — the server-attributed instant
+   *  the label was applied. This is FIFO-ordering data ONLY, consumed by the
+   *  restart-train worker to sort tickets; `evaluateLabelAuthority` itself never reads
+   *  this field and makes every staleness decision from `position` (timeline order),
+   *  never a timestamp comparison (doc §3.1 item 3 — unchanged by this addition). */
+  createdAt?: string;
 }
 
 export interface AuthorityInput {
@@ -356,7 +370,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
         totalCount
         nodes {
           __typename
-          ... on LabeledEvent { label { name } actor { login } }
+          ... on LabeledEvent { label { name } actor { login } createdAt }
           ... on UnlabeledEvent { label { name } actor { login } }
         }
       }
@@ -375,6 +389,9 @@ interface GraphQLTimelineNode {
   __typename: string;
   label?: { name?: string | null } | null;
   actor?: { login?: string | null } | null;
+  /** Only requested on the `LabeledEvent` fragment above — always absent/undefined on
+   *  every other node type. */
+  createdAt?: string | null;
 }
 
 interface GraphQLTimelineResponse {
@@ -505,12 +522,27 @@ export function fetchAuthorityTimeline(repo: string, prNumber: number): { timeli
           `"actor.login" for ${repo}#${prNumber}: ${out.slice(0, 500)}`,
       );
     }
+    // createdAt (ops-pipeline#172 rung 1): only requested on the LabeledEvent
+    // fragment, and only consumed by the restart-train worker as a FIFO sort key —
+    // never by this predicate's authority/staleness reasoning (that stays
+    // position-based, per the header comment on AuthorityTimelineItem.createdAt
+    // above). Validated with the same missing-or-non-string-fails-closed convention
+    // as label.name/actor.login immediately above, rather than silently mapping an
+    // absent value to `undefined` and letting a malformed FIFO key surface later as
+    // an inscrutable `Date.parse(undefined)` NaN in the caller.
+    if (type === "LABELED" && (typeof node.createdAt !== "string" || node.createdAt.length === 0)) {
+      throw new Error(
+        `fetchAuthorityTimeline: LabeledEvent node at position ${index} has a missing or non-string ` +
+          `"createdAt" for ${repo}#${prNumber}: ${out.slice(0, 500)}`,
+      );
+    }
 
     return {
       type,
       label: node.label?.name ?? undefined,
       actorLogin: node.actor?.login ?? undefined,
       position: index,
+      createdAt: node.createdAt ?? undefined,
     };
   });
 
