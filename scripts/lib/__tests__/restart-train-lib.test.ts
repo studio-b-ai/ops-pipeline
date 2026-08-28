@@ -16,7 +16,6 @@ import {
   parseEndComments,
   parseTrainAfterTokens,
   parseTrainLedger,
-  parseTrainPin,
   planLines,
   repoClassFor,
   planStateKey,
@@ -45,7 +44,7 @@ function ticket(overrides: Partial<Ticket> = {}): Ticket {
     repo: "studio-b-ai/studiob",
     number: 1,
     repoClass: "studiob",
-    appliedAt: "2026-08-19T20:00:00Z",
+    labeledAt: "2026-08-19T20:00:00Z",
     pinnedHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     currentHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     afterTokens: [],
@@ -310,22 +309,26 @@ describe("computeAnchor", () => {
 
 // ───────────────────────────── orderQueue ─────────────────────────────
 
+// pg-enum-drift-exempt: this whole describe block's `status: "queued"`/`status: "invalidated"`
+// literals are QueueEntry.status, a local TS union declared in restart-train-lib.ts — this repo
+// has no Postgres/sync_ledger involvement anywhere; the enum-drift guard's heuristic just matches
+// the word "status" adjacent to a quoted literal regardless of domain.
 describe("orderQueue", () => {
-  it("orders by appliedAt FIFO when nothing else applies", () => {
-    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, appliedAt: "2026-08-19T20:00:00Z" });
-    const b = ticket({ repo: "studio-b-ai/studiob", number: 2, appliedAt: "2026-08-19T19:00:00Z" });
+  it("orders by labeledAt FIFO when nothing else applies", () => {
+    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, labeledAt: "2026-08-19T20:00:00Z" });
+    const b = ticket({ repo: "studio-b-ai/studiob", number: 2, labeledAt: "2026-08-19T19:00:00Z" });
     const entries = orderQueue([a, b]);
     expect(entries.map((e) => e.ticket.number)).toEqual([2, 1]);
     expect(entries.every((e) => e.status === "queued")).toBe(true);
   });
 
-  it("honors train:after even against an earlier appliedAt", () => {
-    // B applied first (would be FIFO-first) but names A via train:after — A must come first.
-    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, appliedAt: "2026-08-19T20:00:00Z" });
+  it("honors train:after even against an earlier labeledAt", () => {
+    // B labeled first (would be FIFO-first) but names A via train:after — A must come first.
+    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, labeledAt: "2026-08-19T20:00:00Z" });
     const b = ticket({
       repo: "studio-b-ai/studiob",
       number: 2,
-      appliedAt: "2026-08-19T19:00:00Z",
+      labeledAt: "2026-08-19T19:00:00Z",
       afterTokens: ["studio-b-ai/studiob#1"],
     });
     const entries = orderQueue([a, b]);
@@ -337,23 +340,25 @@ describe("orderQueue", () => {
     const a = ticket({
       repo: "studio-b-ai/studiob",
       number: 1,
-      appliedAt: "2026-08-19T19:00:00Z",
+      labeledAt: "2026-08-19T19:00:00Z",
       afterTokens: ["studio-b-ai/studiob#999"], // not in this queue
     });
     const entries = orderQueue([a]);
+    // pg-enum-drift-exempt: QueueEntry.status (local TS union), not a Postgres enum column.
     expect(entries).toEqual([{ status: "queued", ticket: a, slotGroup: 0 }]);
   });
 
   it("groups a train:consolidate ticket into the slot of the ticket immediately ahead of it", () => {
-    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, appliedAt: "2026-08-19T19:00:00Z" });
+    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, labeledAt: "2026-08-19T19:00:00Z" });
     const b = ticket({
       repo: "studio-b-ai/client-asthetik",
       number: 2,
       repoClass: "client-asthetik",
-      appliedAt: "2026-08-19T19:05:00Z",
+      labeledAt: "2026-08-19T19:05:00Z",
       consolidate: true,
     });
     const entries = orderQueue([a, b]);
+    // pg-enum-drift-exempt: QueueEntry.status (local TS union), not a Postgres enum column.
     const queued = entries.filter((e): e is Extract<QueueEntry, { status: "queued" }> => e.status === "queued");
     expect(queued[0].slotGroup).toBe(queued[1].slotGroup);
   });
@@ -363,19 +368,20 @@ describe("orderQueue", () => {
       repo: "studio-b-ai/client-asthetik",
       number: 2,
       repoClass: "client-asthetik",
-      appliedAt: "2026-08-19T19:00:00Z",
+      labeledAt: "2026-08-19T19:00:00Z",
       consolidate: true,
     });
     const entries = orderQueue([a]);
+    // pg-enum-drift-exempt: QueueEntry.status (local TS union), not a Postgres enum column.
     expect(entries).toEqual([{ status: "queued", ticket: a, slotGroup: 0 }]);
   });
 
   it("invalidates a ticket whose current head drifted from its pinned head, and never schedules it", () => {
-    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, appliedAt: "2026-08-19T19:00:00Z" });
+    const a = ticket({ repo: "studio-b-ai/studiob", number: 1, labeledAt: "2026-08-19T19:00:00Z" });
     const drifted = ticket({
       repo: "studio-b-ai/studiob",
       number: 2,
-      appliedAt: "2026-08-19T18:00:00Z", // would be FIFO-first if valid
+      labeledAt: "2026-08-19T18:00:00Z", // would be FIFO-first if valid
       pinnedHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       currentHeadSha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     });
@@ -533,62 +539,6 @@ describe("findDanglingPlan (real client-asthetik#280 fixture)", () => {
   });
 });
 
-describe("parseTrainPin (synthetic — no real train:ready ticket has ever existed, see fn doc)", () => {
-  it("returns null for comments with no pin line", () => {
-    const c: RestartTrainComment[] = [
-      { id: 1, login: "kbibelhausen", createdAt: "2026-08-19T22:00:00Z", body: "looks good, merging soon" },
-    ];
-    expect(parseTrainPin(c)).toBeNull();
-  });
-
-  it("returns null for an empty comment list", () => {
-    expect(parseTrainPin([])).toBeNull();
-  });
-
-  it("parses a well-formed pin line", () => {
-    const c: RestartTrainComment[] = [
-      {
-        id: 1,
-        login: "train-bot",
-        createdAt: "2026-08-19T22:10:00Z",
-        body: "`TRAIN-PIN 2026-08-19T22:10:00Z · head=abc1234def5678abc1234def5678abc1234def56 · applied-by=kbibelhausen`",
-      },
-    ];
-    expect(parseTrainPin(c)).toEqual({
-      appliedAtIso: "2026-08-19T22:10:00Z",
-      pinnedHeadSha: "abc1234def5678abc1234def5678abc1234def56",
-      appliedBy: "kbibelhausen",
-    });
-  });
-
-  it("a short (abbreviated) sha is REJECTED — orderQueue compares the full 40-char headRefOid, so a short pin could only ever masquerade as head drift (codex P3)", () => {
-    const c: RestartTrainComment[] = [
-      { id: 1, login: "train-bot", createdAt: "2026-08-19T22:10:00Z", body: "`TRAIN-PIN 2026-08-19T22:10:00Z · head=abc1234 · applied-by=kbibelhausen`" },
-    ];
-    expect(parseTrainPin(c)).toBeNull();
-  });
-
-  it("the LATEST pin wins when a PR was re-pinned after a re-label", () => {
-    const c: RestartTrainComment[] = [
-      { id: 1, login: "train-bot", createdAt: "2026-08-19T20:00:00Z", body: "`TRAIN-PIN 2026-08-19T20:00:00Z · head=1111111111111111111111111111111111111111 · applied-by=kbibelhausen`" },
-      { id: 2, login: "system", createdAt: "2026-08-19T20:30:00Z", body: "head drift detected, label removed" },
-      { id: 3, login: "train-bot", createdAt: "2026-08-19T21:00:00Z", body: "`TRAIN-PIN 2026-08-19T21:00:00Z · head=2222222222222222222222222222222222222222 · applied-by=kbibelhausen`" },
-    ];
-    expect(parseTrainPin(c)).toEqual({
-      appliedAtIso: "2026-08-19T21:00:00Z",
-      pinnedHeadSha: "2222222222222222222222222222222222222222",
-      appliedBy: "kbibelhausen",
-    });
-  });
-
-  it("a malformed pin (bad ISO, non-hex sha) does not match and falls through to null", () => {
-    const c: RestartTrainComment[] = [
-      { id: 1, login: "train-bot", createdAt: "2026-08-19T22:10:00Z", body: "`TRAIN-PIN not-a-date · head=zzzzzzz · applied-by=kbibelhausen`" },
-    ];
-    expect(parseTrainPin(c)).toBeNull();
-  });
-});
-
 describe("parseTrainAfterTokens (synthetic)", () => {
   it("returns an empty array with no train:after tokens present", () => {
     const c: RestartTrainComment[] = [{ id: 1, login: "k", createdAt: "2026-08-19T22:00:00Z", body: "no dependency here" }];
@@ -644,8 +594,8 @@ describe("hasTrainConsolidate (synthetic)", () => {
 
 describe("orderQueue — train:after cycles fail closed", () => {
   it("invalidates BOTH members of a mutual train:after cycle and schedules neither", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
     const entries = orderQueue([a, b]);
     expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
     const invalid = entries.filter((e) => e.status === "invalidated");
@@ -656,9 +606,9 @@ describe("orderQueue — train:after cycles fail closed", () => {
   });
 
   it("still schedules an independent ticket alongside an invalidated cycle pair", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
-    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z" });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, labeledAt: "2026-08-19T21:00:00Z" });
     const entries = orderQueue([a, b, c]);
     const queued = entries.filter((e) => e.status === "queued");
     expect(queued.map((e) => e.ticket.number)).toEqual([3]);
@@ -666,18 +616,18 @@ describe("orderQueue — train:after cycles fail closed", () => {
   });
 
   it("invalidates a ticket transitively blocked behind a cycle (its dep can never merge first)", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
-    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, labeledAt: "2026-08-19T21:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
     const entries = orderQueue([a, b, c]);
     expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
     expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(3);
   });
 
   it("negative control (Rule #322): an acyclic train:after chain still schedules fully, in order", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T21:00:00Z" });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
-    const c = ticket({ number: 3, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T21:00:00Z" });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T19:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
     const entries = orderQueue([a, b, c]);
     const queued = entries.filter((e) => e.status === "queued");
     expect(queued.map((e) => e.ticket.number)).toEqual([1, 2, 3]);
@@ -689,8 +639,8 @@ describe("orderQueue — train:after deps on drift-invalidated tickets fail clos
   const DRIFTED = { pinnedHeadSha: "a".repeat(40), currentHeadSha: "b".repeat(40) };
 
   it("a ticket depending on a drift-invalidated ticket is invalidated, never scheduled ahead of its declared order", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", ...DRIFTED });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", ...DRIFTED });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
     const entries = orderQueue([a, b]);
     expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
     const invalidated = entries.filter((e) => e.status === "invalidated");
@@ -701,9 +651,9 @@ describe("orderQueue — train:after deps on drift-invalidated tickets fail clos
   });
 
   it("the block is transitive: C after B after drifted A invalidates all three, with the chained reason", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", ...DRIFTED });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
-    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", ...DRIFTED });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, labeledAt: "2026-08-19T21:00:00Z", afterTokens: ["studio-b-ai/studiob#2"] });
     const entries = orderQueue([a, b, c]);
     expect(entries.filter((e) => e.status === "queued")).toHaveLength(0);
     expect(entries.filter((e) => e.status === "invalidated")).toHaveLength(3);
@@ -712,7 +662,7 @@ describe("orderQueue — train:after deps on drift-invalidated tickets fail clos
   });
 
   it("negative control (Rule #322): a dep entirely ABSENT from the train stays a no-op — the ticket schedules", () => {
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#999"] });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#999"] });
     const entries = orderQueue([b]);
     const queued = entries.filter((e) => e.status === "queued");
     expect(queued).toHaveLength(1);
@@ -721,9 +671,9 @@ describe("orderQueue — train:after deps on drift-invalidated tickets fail clos
   });
 
   it("an unrelated schedulable ticket still schedules while the drift-blocked pair is invalidated", () => {
-    const a = ticket({ number: 1, appliedAt: "2026-08-19T19:00:00Z", ...DRIFTED });
-    const b = ticket({ number: 2, appliedAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
-    const c = ticket({ number: 3, appliedAt: "2026-08-19T21:00:00Z" });
+    const a = ticket({ number: 1, labeledAt: "2026-08-19T19:00:00Z", ...DRIFTED });
+    const b = ticket({ number: 2, labeledAt: "2026-08-19T20:00:00Z", afterTokens: ["studio-b-ai/studiob#1"] });
+    const c = ticket({ number: 3, labeledAt: "2026-08-19T21:00:00Z" });
     const entries = orderQueue([a, b, c]);
     const queued = entries.filter((e) => e.status === "queued");
     expect(queued.map((e) => e.ticket.number)).toEqual([3]);
@@ -775,29 +725,6 @@ describe("clampCommentsToNow / clampCandidatesToNow / clampTicketsToNow", () => 
     expect(() => clampCandidatesToNow([], "not-a-now")).toThrow(/Unparsable now in replay clamp/);
   });
 
-  it("comment clamp before pin parsing: a future re-pin is invisible, the live pin schedules (codex P2b)", () => {
-    const oldSha = "a".repeat(40);
-    const newSha = "b".repeat(40);
-    const comments: RestartTrainComment[] = [
-      {
-        id: 1,
-        body: "`TRAIN-PIN 2026-08-19T20:00:00Z · head=" + oldSha + " · applied-by=coo`",
-        login: "b",
-        createdAt: "2026-08-19T20:00:05Z",
-      },
-      {
-        id: 2,
-        body: "`TRAIN-PIN 2026-08-19T23:00:00Z · head=" + newSha + " · applied-by=coo`",
-        login: "b",
-        createdAt: "2026-08-19T23:00:05Z",
-      },
-    ];
-    // Unclamped, parseTrainPin picks the LATEST pin — the future one — which clampTicketsToNow
-    // would then drop wholesale, losing a ticket that WAS schedulable at the instant.
-    expect(parseTrainPin(comments)?.pinnedHeadSha).toBe(newSha);
-    expect(parseTrainPin(clampCommentsToNow(comments, "2026-08-19T22:20:00Z"))?.pinnedHeadSha).toBe(oldSha);
-  });
-
   it("clampCommentsToNow makes a future-created comment invisible to ledger parsing", () => {
     const comments: RestartTrainComment[] = [
       { id: 1, body: "`END 2026-08-19T22:12:14Z · past`", login: "a", createdAt: "2026-08-19T22:12:20Z" },
@@ -810,9 +737,9 @@ describe("clampCommentsToNow / clampCandidatesToNow / clampTicketsToNow", () => 
     expect(ends[0].isoStamp).toBe("2026-08-19T22:12:14Z");
   });
 
-  it("clampTicketsToNow drops a ticket whose pin was applied after the replay instant", () => {
-    const past = ticket({ number: 1, appliedAt: "2026-08-19T20:00:00Z" });
-    const future = ticket({ number: 2, appliedAt: "2026-08-19T23:00:00Z" });
+  it("clampTicketsToNow drops a ticket labeled after the replay instant", () => {
+    const past = ticket({ number: 1, labeledAt: "2026-08-19T20:00:00Z" });
+    const future = ticket({ number: 2, labeledAt: "2026-08-19T23:00:00Z" });
     expect(clampTicketsToNow([past, future], "2026-08-19T22:20:00Z")).toEqual([past]);
   });
 });
