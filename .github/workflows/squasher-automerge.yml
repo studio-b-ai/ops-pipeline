@@ -61,6 +61,11 @@ on:
         required: false
         type: string
         default: ""
+      train_ready:
+        description: "ops#190 rung A2: when true, evaluate the A-side `train:ready` label-authority gate (evaluateTrainReady — human-labeled PRs, GraphQL-attributed authority) instead of the B-side squasher diff-classification gate. The squasher inputs above (enabled_classes / sensitive_path_patterns) are IGNORED in this mode — the run step passes only --train-ready. Default false: every existing caller keeps exactly its current squasher behavior."
+        required: false
+        type: boolean
+        default: false
     secrets:
       ANTHROPIC_API_KEY:
         required: true
@@ -97,25 +102,36 @@ jobs:
           GATE_PR_NUMBER: ${{ inputs.pr_number }}
           GATE_ENABLED_CLASSES: ${{ inputs.enabled_classes }}
           GATE_SENSITIVE_PATH_PATTERNS: ${{ inputs.sensitive_path_patterns }}
+          GATE_TRAIN_READY: ${{ inputs.train_ready }}
         run: |
           set -euo pipefail
           args=(--repo "$GATE_REPO" --pr "$GATE_PR_NUMBER")
-          if [ -n "$GATE_ENABLED_CLASSES" ]; then
-            args+=(--enabled-classes "$GATE_ENABLED_CLASSES")
-          fi
-          if [ -n "$GATE_SENSITIVE_PATH_PATTERNS" ]; then
-            IFS=',' read -ra patterns <<< "$GATE_SENSITIVE_PATH_PATTERNS"
-            for p in "${patterns[@]}"; do
-              # Trim whitespace (codex P2 finding, 2026-08-02 pass 2): a
-              # caller-friendly "a, b" input splits on comma into "a" and " b"
-              # (leading space) — an untrimmed regex source with a leading space
-              # would never match a real path, silently making that exclusion
-              # entry inert. pr-automerge-gate.ts's own parseArgs ALSO trims
-              # (defense-in-depth, single source of truth for correctness), but
-              # trimming here too keeps this workflow's own behavior correct
-              # independent of the script.
-              trimmed="$(echo -n "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-              [ -n "$trimmed" ] && args+=(--sensitive-path "$trimmed")
-            done
+          if [ "$GATE_TRAIN_READY" = "true" ]; then
+            # A-side label-authority mode (ops#190 A2): the squasher-only flags are
+            # deliberately NOT forwarded — parseArgs treats --train-ready combined
+            # with --enabled-classes/--sensitive-path as a caller misconfiguration
+            # and throws (mutual exclusion, fail-loud), and enabled_classes has a
+            # non-empty DEFAULT, so forwarding it unconditionally would break every
+            # train_ready invocation.
+            args+=(--train-ready)
+          else
+            if [ -n "$GATE_ENABLED_CLASSES" ]; then
+              args+=(--enabled-classes "$GATE_ENABLED_CLASSES")
+            fi
+            if [ -n "$GATE_SENSITIVE_PATH_PATTERNS" ]; then
+              IFS=',' read -ra patterns <<< "$GATE_SENSITIVE_PATH_PATTERNS"
+              for p in "${patterns[@]}"; do
+                # Trim whitespace (codex P2 finding, 2026-08-02 pass 2): a
+                # caller-friendly "a, b" input splits on comma into "a" and " b"
+                # (leading space) — an untrimmed regex source with a leading space
+                # would never match a real path, silently making that exclusion
+                # entry inert. pr-automerge-gate.ts's own parseArgs ALSO trims
+                # (defense-in-depth, single source of truth for correctness), but
+                # trimming here too keeps this workflow's own behavior correct
+                # independent of the script.
+                trimmed="$(echo -n "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                [ -n "$trimmed" ] && args+=(--sensitive-path "$trimmed")
+              done
+            fi
           fi
           npx tsx pr-automerge-gate.ts "${args[@]}"

@@ -23,17 +23,27 @@ export interface Args {
    *  whose branch-protection gates aren't independently verifiable from
    *  statusCheckRollup (see the bolt-wms canary caller). */
   sensitivePathPatterns: string[];
+  /** ops#190 rung A2: when true the runner evaluates the A-side `train:ready`
+   *  label-authority gate (`evaluateTrainReady`) instead of the B-side squasher
+   *  diff-classification gate. The two gates are structurally separate (doc §3.1 vs
+   *  §4) and take disjoint configuration, so `--train-ready` is mutually exclusive
+   *  with the squasher-only flags (`--enabled-classes`, `--sensitive-path`) —
+   *  combining them is a caller misconfiguration and throws rather than silently
+   *  ignoring half the invocation. */
+  trainReady: boolean;
 }
 
 export function parseArgs(argv: string[]): Args {
   let repo: string | undefined;
   let pr: number | undefined;
   let enabledClassesRaw: string | undefined;
+  let trainReady = false;
   const sensitivePathPatterns: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo") repo = argv[++i];
     else if (argv[i] === "--pr") pr = Number(argv[++i]);
     else if (argv[i] === "--enabled-classes") enabledClassesRaw = argv[++i];
+    else if (argv[i] === "--train-ready") trainReady = true;
     else if (argv[i] === "--sensitive-path") {
       // Trim before storing (codex P2 finding, 2026-08-02 pass 2): the reusable
       // workflow's caller-facing input is a single comma-separated string
@@ -55,6 +65,18 @@ export function parseArgs(argv: string[]): Args {
   }
   if (!repo) throw new Error("--repo <org/repo> is required");
   if (!pr || !Number.isFinite(pr) || pr <= 0) throw new Error("--pr <n> is required");
+
+  // Mutual exclusion (see the `trainReady` field doc): an invocation naming BOTH
+  // gates is ambiguous — fail loud (#161) instead of picking one and silently
+  // ignoring the other's flags. Presence is what matters, not validity: even
+  // `--enabled-classes docs-comment` (the default value, explicitly passed)
+  // combined with --train-ready signals a confused caller.
+  if (trainReady && (enabledClassesRaw !== undefined || sensitivePathPatterns.length > 0)) {
+    throw new Error(
+      "--train-ready is mutually exclusive with --enabled-classes/--sensitive-path " +
+        "(A-side label-authority gate vs B-side squasher gate — one invocation evaluates exactly one)",
+    );
+  }
 
   let enabledClasses: PrDiffClass[];
   if (enabledClassesRaw === undefined || enabledClassesRaw.trim() === "") {
@@ -81,5 +103,5 @@ export function parseArgs(argv: string[]): Args {
     enabledClasses = requested as PrDiffClass[];
   }
 
-  return { repo, pr, enabledClasses, sensitivePathPatterns };
+  return { repo, pr, enabledClasses, sensitivePathPatterns, trainReady };
 }

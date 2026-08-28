@@ -94,4 +94,39 @@ describe("parseArgs", () => {
     expect(args.repo).toBe("studio-b-ai/bolt-wms");
     expect(args.pr).toBe(123);
   });
+
+  // ───── --train-ready (ops#190 rung A2) ─────
+
+  it("defaults trainReady to false when --train-ready is omitted (every existing caller's shape — squasher behavior unchanged)", () => {
+    const args = parseArgs(["--repo", "studio-b-ai/studiob", "--pr", "42"]);
+    expect(args.trainReady).toBe(false);
+  });
+
+  it("parses --train-ready as a bare boolean flag", () => {
+    const args = parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready"]);
+    expect(args.trainReady).toBe(true);
+    expect(args.repo).toBe("studio-b-ai/ops-pipeline");
+    expect(args.pr).toBe(9);
+    // The squasher defaults still populate (main() ignores them in train mode) —
+    // asserting them here pins that --train-ready alone changes NOTHING else.
+    expect(args.enabledClasses).toEqual(["docs-comment"]);
+    expect(args.sensitivePathPatterns).toEqual([]);
+  });
+
+  it("throws when --train-ready is combined with an explicit --enabled-classes (mutual exclusion, fail-loud) — even when the value equals the default", () => {
+    expect(() =>
+      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--enabled-classes", "docs-comment"]),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("throws when --train-ready is combined with --sensitive-path (mutual exclusion, fail-loud)", () => {
+    expect(() =>
+      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--sensitive-path", "\\.sql$", "--train-ready"]),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("still requires --repo/--pr in train mode (the mutual-exclusion check does not preempt required-arg validation)", () => {
+    expect(() => parseArgs(["--train-ready", "--pr", "9"])).toThrow(/--repo/);
+    expect(() => parseArgs(["--train-ready", "--repo", "studio-b-ai/ops-pipeline"])).toThrow(/--pr/);
+  });
 });
