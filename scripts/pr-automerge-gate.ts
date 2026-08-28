@@ -600,30 +600,20 @@ export async function evaluateTrainReady(repo: string, pr: number, opts: TrainRe
 async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainReadyOptions): Promise<TrainReadyResult> {
   const prJson = fetchPr(repo, pr);
 
-  // ── Merge-readiness + CI leg (doc §3.1 step 4, rollup-green half; ops#190 A2) ──
-  // `evaluateMergeReadiness` (the same pure predicate the squasher path uses) folds
-  // state==OPEN, !isDraft, mergeStateStatus==CLEAN and the CI rollup into one check,
-  // placed FIRST because every input already rides prJson — a draft, closed, behind,
-  // or red-CI PR refuses here for free, before the timeline fetch and (critically)
-  // before the review leg's model spend. This is the "drafts caught cheaply before
-  // diff-fetch/review spend" wiring the A1 breadcrumb on ops#190 called for.
-  // Side-effect note: a PR refused here never reaches the stale-label branch below,
-  // so a stale `train:ready` on (say) a draft is NOT stripped this cycle — it stays
-  // until the PR is ready, at which point the full authority predicate runs and
-  // strips it then. Fail-closed at both points; no merge can happen in between.
-  //
-  // TODO(later rung, with B1's per-repo config surface): named-check enforcement —
-  // "where the repo config names `required_check_names`, each named check present
-  // with conclusion SUCCESS on the head sha". isRollupClean (rollup-green half) IS
-  // enforced now via evaluateMergeReadiness's ciClean input.
-  const readiness = evaluateMergeReadiness({
-    state: prJson.state,
-    isDraft: prJson.isDraft,
-    ciClean: isRollupClean(prJson.statusCheckRollup),
-    mergeStateStatus: prJson.mergeStateStatus,
-  });
-  if (!readiness.ready) {
-    const detail = `not merge-ready (${readiness.detail})`;
+  // ── Cheap structural fast-path (ops#190 A2; scope narrowed in codex pass 2) ──
+  // A closed/merged or draft PR refuses immediately — before the timeline fetch and
+  // (critically) before the review leg's model spend: the "drafts caught cheaply
+  // before diff-fetch/review spend" wiring the A1 breadcrumb on ops#190 called for.
+  // ONLY these two facts short-circuit here. CI/mergeStateStatus deliberately do
+  // NOT (codex P2, A2 pass 2): a label-then-push staleness typically leaves CI
+  // pending/red on the NEW sha, and refusing on CI before the authority leg would
+  // leave the stale `train:ready` in place indefinitely — doc §3.1 step 3's
+  // stale-label removal must run regardless of CI state, so the full readiness
+  // check lives AFTER the authority leg below. A draft with a stale label defers
+  // its strip until the PR leaves draft (a draft cannot merge; next cycle's full
+  // authority predicate strips then) — fail-closed at both points.
+  if (prJson.state !== "OPEN" || prJson.isDraft) {
+    const detail = `not evaluable (state=${prJson.state} isDraft=${prJson.isDraft})`;
     logTrainGateLine(repo, pr, "refused", detail);
     return { outcome: "refused", detail };
   }
@@ -711,9 +701,33 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     return { outcome: "refused", detail: verdict.detail };
   }
 
-  // CI leg (doc §3.1 step 4): folded into the merge-readiness check at the top of
-  // this function (ops#190 A2) — evaluateMergeReadiness's ciClean input carries
-  // isRollupClean, evaluated before the timeline fetch so refusals are cheap.
+  // ── Merge-readiness + CI leg (doc §3.1 step 4; ops#190 A2) ──
+  // `evaluateMergeReadiness` (the same pure predicate the squasher path uses) folds
+  // state==OPEN, !isDraft, mergeStateStatus==CLEAN and the CI rollup into one
+  // check. Placed AFTER the authority leg deliberately (codex P2, A2 pass 2): the
+  // stale-label branch above must run regardless of CI state — a label-then-push
+  // typically leaves CI pending/red on the new sha, and refusing on CI first would
+  // leave the stale `train:ready` in place indefinitely. Placed BEFORE the review
+  // leg so red/pending CI still refuses before the model spend. state/isDraft are
+  // re-checked here (already true via the fast-path above) — harmless, and keeps
+  // this call the single authoritative readiness predicate rather than a
+  // hand-rolled half.
+  //
+  // TODO(later rung, with B1's per-repo config surface): named-check enforcement —
+  // "where the repo config names `required_check_names`, each named check present
+  // with conclusion SUCCESS on the head sha". isRollupClean (rollup-green half) IS
+  // enforced now via evaluateMergeReadiness's ciClean input.
+  const readiness = evaluateMergeReadiness({
+    state: prJson.state,
+    isDraft: prJson.isDraft,
+    ciClean: isRollupClean(prJson.statusCheckRollup),
+    mergeStateStatus: prJson.mergeStateStatus,
+  });
+  if (!readiness.ready) {
+    const detail = `not merge-ready (${readiness.detail})`;
+    logTrainGateLine(repo, pr, "refused", detail);
+    return { outcome: "refused", detail };
+  }
 
   // TODO(A2 or later rung): window law (doc §3.1 step 6) — restart-train repos
   // (repoClassFor(repo) === "train") merge only inside restart-train-lib.ts's window
