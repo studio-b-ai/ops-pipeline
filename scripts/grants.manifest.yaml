@@ -19,6 +19,14 @@ members:
     role: member
 outside_collaborators: []
 teams:
+  # asthetik-internal: created 2026-08-23 by the Bulletin lane per its Kevin-ruled build ladder
+  # (coldstarts/2026-08-22-bulletin-lane.md step 3: "team asthetik-internal (closed, push on that
+  # one repo; verify admin:false)"). Sole member today; Sarah joins later per the Nael-shape design —
+  # that change gets its own acknowledgment PR when it happens.
+  - slug: asthetik-internal
+    members: [kbibelhausen]
+    repos:
+      bulletin: write
   - slug: asthetik-marketing
     members: [kbibelhausen, naelmkt]
     repos:
