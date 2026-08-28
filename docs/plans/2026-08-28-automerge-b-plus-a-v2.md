@@ -38,15 +38,17 @@ A PR is **merge-authorized** iff ALL of, evaluated in one pass against fresh ser
 4. **CI:** full rollup green (`isRollupClean`, carried from #203's `evaluateMergeReadiness`) AND — where the repo config names `required_check_names` — each named check present with conclusion `SUCCESS` on the head sha.
 5. **Independent review:** the existing sha-pinned Sonnet review (`independentReview` over `fetchDiffBySha(headRefOid)`) returns exactly CLEAN.
 6. **Window law:** restart-train repos merge only inside the window rules already encoded in `restart-train-lib.ts` (`windowState`, `orderQueue`) — unchanged.
-7. **Revalidate-then-merge (move 5):** after 1–6 pass, re-fetch the PR once more (labels, headRefOid, state, mergeStateStatus); any delta ⇒ abort this cycle. Merge via existing `mergePr(repo, pr, headRefOid)` — sha-pinned server-side, so a race past the revalidate still cannot merge moved code.
+7. **Revalidate-then-merge (move 5):** after 1–6 pass, re-fetch the PR once more (labels, headRefOid, state, mergeStateStatus); any delta ⇒ abort this cycle. The revalidate is the LAST call before the merge API call — no intervening work. Merge via existing `mergePr(repo, pr, headRefOid)` — sha-pinned server-side, so a race past the revalidate still cannot merge moved code.
 
 Fail-closed at every step: any fetch error, empty timeline, GraphQL truncation (≥250 items), or unknown state ⇒ NO merge, receipt comment, retry next cycle.
+
+**Accepted residual (stated, not hidden — codex v2 P2-1):** GitHub sha-pins the merge (`--match-head-commit`) but cannot server-enforce *label* state at merge time. A `train:hold` applied, `train:ready` removed, or check re-run that lands inside the revalidate→merge-API gap (sub-second to seconds) may not stop that cycle's merge. Contract wording everywhere `train:hold` is documented: **guaranteed effective when applied before a gate cycle begins; best-effort within a running cycle.** Code changes remain fully protected by the sha pin; the residual covers only non-sha predicate facts inside that gap. No wider server-side guard exists without branch-protection edits (out of scope, Kevin's hands).
 
 ### 3.2 The trust boundary, stated honestly
 
 `MERGE_AUTHORITY_LOGINS` is a **human login allowlist** (initial: `["kbibelhausen"]`), defined once in ops-pipeline config; per-repo callers may narrow it, never widen. GitHub attributes label events to the authenticated login — a workflow's `GITHUB_TOKEN` labels as `github-actions[bot]` (refused), an App token as `<app>[bot]` (refused). This kills D1: no workflow, comment, or output can mint authority.
 
-**Known residual, accepted:** the squasher operates with a PAT under the `kbibelhausen` login (`BUGSQUASHER_AUTHOR`). Within one login, GitHub cannot distinguish which hand applied a label. This does not weaken v2 relative to today: that PAT can already merge any PR directly — the label gate defends against every OTHER actor, and the squasher's own code is prohibited (B-side, §4.1) from ever applying `train:ready`, enforced by its own tests + a plant. Migrating the squasher to a dedicated machine identity is a listed follow-up, not a rung of this build.
+**Known residual, accepted:** the squasher operates with a PAT under the `kbibelhausen` login (`BUGSQUASHER_AUTHOR`). Within one login, GitHub cannot distinguish which hand applied a label. **The residual is accepted because the credential is already merge-powerful** — that PAT can merge any PR directly today, so v2 creates no strictly stronger primitive for it; the label gate defends against every OTHER actor. The squasher's own code is prohibited (B-side, §4.1) from ever applying `train:ready` — its tests + a plant are *hygiene against accidental drift*, not enforcement (tests cannot bind future automation holding the same PAT; codex v2 P3-6). Migrating the squasher to a dedicated machine identity — which would make the login distinguishable and retire this residual — is a listed follow-up, not a rung of this build.
 
 ### 3.3 Receipts (write-only)
 
@@ -59,15 +61,18 @@ On every decision the gate posts/updates one comment: verdict, head sha evaluate
 New `PrDiffClass = "code-fix"` in `automerge-classify.ts`, **opt-in only** via caller `enabled_classes` (default OFF everywhere at ship):
 
 - Author `BUGSQUASHER_AUTHOR` + `bugsquasher` label; ≤150 changed lines.
-- **Denylist (built-in, non-overridable):** migrations, `*.sql`, auth/middleware paths, pricing-write paths, `Customization/**`, `.github/actions/**` — plus per-repo `sensitive_path_patterns`. `Customization/**` and pricing-write are **permanently** outside code-fix (Rule #279's exception set does not extend there).
+- **Allowlist-primary paths (codex v2 P2-5 — denylists miss renamed/moved sensitive files):** a repo enabling `code-fix` MUST also declare per-repo `safe_path_globs` (positive globs — e.g. `src/workers/**`, `src/lib/format-*.ts`); every changed file must match a safe glob. Empty/absent `safe_path_globs` ⇒ the class is **inert** even when enabled — fail-closed by construction, matching the substrate's allowlist direction.
+- **Denylist (built-in, non-overridable, backstop):** migrations, `*.sql`, auth/middleware paths, pricing-write paths, `Customization/**`, `.github/actions/**`, `.github/workflows/**` — plus per-repo `sensitive_path_patterns`. Denylist beats allowlist on overlap. `Customization/**` and pricing-write are **permanently** outside code-fix (Rule #279's exception set does not extend there).
 - Named checks `success` per move (4).
 - **Repo-class partition (move 2):** `repoClassFor(repo) == train` (studiob, client-asthetik — deploys ride the Heritage restart train) ⇒ the squasher NEVER merges; it applies `train:candidate` + a candidate comment, and a human decides `train:ready` (A-side takes over). Non-train repos with the class enabled ⇒ squasher merges via the same gate predicate (§3.1 steps 4–7, label steps replaced by the class guardrails).
 
-### 4.2 Post-merge canary (B2 — Engineer's accepted numbers)
+### 4.2 Post-merge 5xx regression tripwire (B2 — Engineer's accepted numbers)
 
-- **Trigger:** `pull_request` workflow event, `types: [closed]`, `merged == true`, PR carries the `automerge:code-fix` label (applied by the gate at merge time — a server-state marker, not a log). Squash sha = `event.pull_request.merge_commit_sha` (move 3; D3 killed).
-- **Attribution:** poll Railway for the repo's mapped service until a deployment with `meta.commitHash == merge_commit_sha` reaches `SUCCESS`. Timeout 15 min ⇒ escalate "deploy never attributed" (no revert — nothing deployed).
-- **Health window:** 10 minutes / 20 samples from deployment SUCCESS; **5xx-only gate** scoped to the deployed service (#295: trigger-signal scope == remediation scope — no fleet metrics, no sibling services).
+Named honestly (#412; codex v2 P2-3): this is a **5xx regression tripwire**, not a canary proving the merge healthy. Its scope claim is exactly its signal: sustained 5xx on the deployed service inside the window. **Stated residual:** semantic breakage that serves 2xx-wrong-content, 401/403/404 regressions, async-job/webhook breakage, and low-traffic endpoints pass the tripwire — those classes are what the upstream stack (≤150 lines + allowlist paths + named checks + Sonnet CLEAN) exists to keep out.
+
+- **Trigger:** `pull_request` workflow event, `types: [closed]`, `merged == true`, PR carries the `automerge:code-fix` label. **Trigger provenance (codex v2 P2-4):** the label alone is forgeable by anyone with triage permission — the tripwire re-verifies via timeline that the `automerge:code-fix` `LabeledEvent` actor is the GATE's own identity (the login the gate merges with) with no later unlabel, AND `merged_by` is that same identity. Fail either ⇒ no tripwire run, receipt comment "not a gate merge". Squash sha = `event.pull_request.merge_commit_sha` (move 3; D3 killed).
+- **Attribution (codex v2 P2-2 — same-commit redeploys are ambiguous):** poll Railway for the repo's mapped service+environment for a deployment with `meta.commitHash == merge_commit_sha` AND `createdAt` **after** the PR-closed event timestamp. Bind to that deployment's **id** on first match; pre-existing deployments of the same sha are ignored, and once bound, later redeploys neither re-arm nor re-trip this tripwire run. Wait for the bound deployment to reach `SUCCESS`; bound deployment FAILS ⇒ escalate (deploy failure, not a health verdict). Timeout 15 min with no qualifying deployment ⇒ escalate "deploy never attributed" (no revert — nothing deployed).
+- **Health window:** 10 minutes / 20 samples from the bound deployment's SUCCESS; **5xx-only gate** scoped to the deployed service (#295: trigger-signal scope == remediation scope — no fleet metrics, no sibling services).
 - **On fail:** auto-open a revert PR (`git revert` of the squash sha) + escalation page. The revert PR is **never auto-merged** (#97) — a human lands it (it is itself label-gateable).
 - Boot-burst discipline (#208/#234): the window starts at deployment SUCCESS, and the first 60s of samples are recorded but non-gating.
 
@@ -79,8 +84,8 @@ The gate's default verdict is REFUSE (fail-closed) ⇒ **the load-bearing plant 
 |---|---|---|
 | A1 gate lib | Throwaway docs PR, Kevin labels `train:ready` → merges | label applied then push (stale-label removal fires); label by `github-actions[bot]`; `train:hold` present; red check |
 | A2 each caller | Same per repo (ops-pipeline self-caller first) | one refusal plant per repo |
-| B1 class | 3-line code-fix in an enabled non-train repo → merges | 151-line diff; denylist path touch; named check SKIPPED; train-class repo (must get `train:candidate`, never merge) |
-| B2 canary | Merge a plant that deploys clean → canary PASS receipt | plant with a forced 5xx burst on a throwaway service → revert PR OPENS (and is NOT auto-merged) |
+| B1 class | 3-line code-fix in an enabled non-train repo, inside `safe_path_globs` → merges | 151-line diff; denylist path touch; file outside `safe_path_globs`; empty `safe_path_globs` (class inert); named check SKIPPED; train-class repo (must get `train:candidate`, never merge) |
+| B2 tripwire | Merge a plant that deploys clean → tripwire PASS receipt bound to the correct deployment id | forced 5xx burst on a throwaway service → revert PR OPENS (and is NOT auto-merged); hand-applied `automerge:code-fix` on a manual merge → "not a gate merge" refusal receipt |
 | B3 enable | First real code-fix merge per repo observed | per-repo refusal receipt re-verified |
 
 Cross-check probe available to plants (not the runtime predicate): earliest `check_suite.created_at` for the head sha is a server-side push-time proxy — plants use it to independently verify the timeline-order staleness verdicts.
