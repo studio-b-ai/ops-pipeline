@@ -409,6 +409,11 @@ async function main(): Promise<void> {
   }
 
   applyPlanned(planned, dryRun);
+  // Per-row lines on real runs too (ops#194 receipt contract): probed detail —
+  // status, expiry, and the probe `note` (e.g. pw-changed=<date>) — is only
+  // populated on real runs, so the daily log is where it must render. Dry-run
+  // skips probes and can never show it. Name-level metadata only, never values.
+  for (const r of results) console.log(formatLine(r));
   console.log(summary);
 }
 
