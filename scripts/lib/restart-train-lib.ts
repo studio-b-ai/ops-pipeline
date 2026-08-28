@@ -710,7 +710,7 @@ export interface RestartTrainComment {
 }
 
 export interface TrainLedgerEntry {
-  kind: "END" | "START" | "PLAN" | "NOTE" | "HELD";
+  kind: "END" | "START" | "PLAN" | "NOTE" | "HELD" | "CLICK DUE";
   /** The stamp's own leading ISO instant (a PLAN range's end, if any, is folded into `detail` as
    * prose — nothing in rung 0 needs the range end structurally). Empty string if the line had no
    * parseable leading ISO stamp (kept rather than dropped, so a malformed line is still visible). */
@@ -721,10 +721,15 @@ export interface TrainLedgerEntry {
   commentLogin: string;
 }
 
-// First token inside a backtick span must be exactly one of the five grammar keywords, matching
+// First token inside a backtick span must be exactly one of the six grammar keywords, matching
 // every observed line on client-asthetik#280 (a stray unrelated backtick span, e.g. `` `/details` ``
 // inside the SAME comment, correctly never matches since it doesn't start with a keyword).
-const LEDGER_LINE_RE = /`(END|START|PLAN|NOTE|HELD)\s+([^`]*)`/g;
+// "CLICK DUE" (rung 1 Leg B, ops-pipeline#172) is the one two-word keyword — the literal space
+// inside the alternative is matched as-is, then `\s+` still requires at least one MORE whitespace
+// char before the ISO stamp, exactly like every other keyword ("CLICK DUE 2026-…" is required,
+// not "CLICK DUE2026-…"). Rule #235: this comment is the atomic-correction target the day #172
+// widened the union — update the count here whenever the union changes again.
+const LEDGER_LINE_RE = /`(END|START|PLAN|NOTE|HELD|CLICK DUE)\s+([^`]*)`/g;
 // BARE (un-backticked) grammar lines are ALSO real: client-asthetik#280 comment 5348659682
 // (created 2026-08-19T22:15:45Z, recorded verbatim in fixtures/restart-train/
 // issue-280-bare-end-comment.json) is a hand-posted `END 2026-08-19T22:12:14Z · run
@@ -736,7 +741,7 @@ const LEDGER_LINE_RE = /`(END|START|PLAN|NOTE|HELD)\s+([^`]*)`/g;
 // must be immediately followed by an ISO date, so prose like "END of the story" or a mid-line
 // mention can never match. A backticked line never double-matches (its line starts with the
 // backtick, not the keyword).
-const BARE_LEDGER_LINE_RE = /(?:^|\n)\s*(END|START|PLAN|NOTE|HELD)\s+(\d{4}-\d{2}-\d{2}T[^\n`]*)/g;
+const BARE_LEDGER_LINE_RE = /(?:^|\n)\s*(END|START|PLAN|NOTE|HELD|CLICK DUE)\s+(\d{4}-\d{2}-\d{2}T[^\n`]*)/g;
 const ISO_PREFIX_RE =
   /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?Z)(?:[–-](?:\d{4}-\d{2}-\d{2}T)?\d{2}:\d{2}(?::\d{2})?Z)?/;
 
@@ -782,6 +787,13 @@ export function parseEndComments(comments: RestartTrainComment[]): TrainLedgerEn
   return parseTrainLedger(comments).filter((e) => e.kind === "END");
 }
 
+/** The `CLICK DUE <ISO> · ...` lines THIS worker posts (rung 1 Leg B, ops-pipeline#172) — the
+ * in-flight check's source: a CLICK DUE with no later END means a paged-but-not-yet-completed
+ * restart, and paging the NEXT ticket on top of it would be a double-restart collision. */
+export function parseClickDueComments(comments: RestartTrainComment[]): TrainLedgerEntry[] {
+  return parseTrainLedger(comments).filter((e) => e.kind === "CLICK DUE");
+}
+
 /**
  * A dangling PLAN: ANY parsed PLAN line whose own embedded ISO stamp is already at-or-before
  * `nowIso`, with nothing (END/START/NOTE — anything non-PLAN) stamped at or after THAT PLAN's
@@ -818,6 +830,51 @@ export function findDanglingPlan(comments: RestartTrainComment[], nowIso: string
   }
 
   return { dangling: false };
+}
+
+// ───────────────────────────── CLICK DUE rendering + dedup (rung 1 Leg B, ops-pipeline#172) ─────────────────────────────
+
+/**
+ * Deterministic per-(PR, pinned head) fingerprint for the `CLICK DUE` dedup marker — mirrors
+ * `planStateKey`'s pattern above: the caller (restart-train.ts's `postClickDue`) hashes this
+ * string the same way `postLines` hashes `planStateKey`'s output (sha256, sliced to 12 hex
+ * chars) and embeds it as a distinct `<!-- restart-train:click-due=<hash> -->` marker, so a
+ * repeat cron cycle against the SAME PR+head never reposts (#292 — post once per state
+ * transition), while a NEW head (a force-push after paging) correctly gets a fresh CLICK DUE.
+ */
+export function clickDueStateKey(repo: string, number: number, pinnedHeadSha: string): string {
+  return `click-due :: ${repo}#${number} @ ${pinnedHeadSha}`;
+}
+
+/**
+ * Formats the `CLICK DUE` line posted to BOTH the queue-head PR and `--target` — byte-identical
+ * on both surfaces (the mirror line stays unambiguous since the PR is named explicitly in the
+ * same line). Rule #412: claims exactly what is true, never "merging" or "deployed" — the line
+ * only ever says a human still has to click. `headSha` is embedded FULL (not truncated to 12
+ * chars like other diagnostic prose in this file) so it matches `clickDueStateKey`'s own
+ * untruncated key byte-for-byte.
+ *
+ * `anchorIso`/`anchorSource` are echoed verbatim (external facts, same convention as `planLines`'
+ * `anchor=${anchor.anchorIso}`). The leading stamp is different: it goes through `toIsoSeconds`
+ * even though `nowIso` is itself a caller-supplied fact — NOT because this line reformats an
+ * external fact (the doc comment above `toIsoSeconds` reserves verbatim-echo for exactly that),
+ * but because THIS specific line is round-tripped by THIS module's own `parseClickDueComments`
+ * (the in-flight check reads back its own past CLICK DUE lines via `ISO_PREFIX_RE`, which cannot
+ * match a `.SSS`-suffixed instant). `flags.now` defaults to a raw `Date#toISOString()` on every
+ * real scheduled run (the workflow only ever populates `NOW_INPUT` on `workflow_dispatch`) —
+ * leaving this unnormalized would silently defeat the in-flight safety gate on every production
+ * cycle, not just a rare replay edge case.
+ */
+export function formatClickDueLine(
+  repo: string,
+  number: number,
+  headSha: string,
+  nowIso: string,
+  anchorIso: string,
+  anchorSource: string,
+): string {
+  const stamp = toIsoSeconds(Date.parse(nowIso));
+  return `\`CLICK DUE ${stamp} · ${repo}#${number} · head=${headSha} · window CLEAR (anchor ${anchorIso} · ${anchorSource}) — a human merges this PR; the train observes END before the next ticket.\``;
 }
 
 // ───────────────────────────── train:after / train:consolidate token parsing ─────────────────────────────

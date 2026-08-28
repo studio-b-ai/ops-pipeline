@@ -6,13 +6,16 @@ import {
   clampCandidatesToNow,
   clampCommentsToNow,
   clampTicketsToNow,
+  clickDueStateKey,
   computeAnchor,
   computePlanSlots,
   findDanglingPlan,
+  formatClickDueLine,
   hasTrainConsolidate,
   isBatchBlackoutUtc,
   isBusinessHoursBlockedET,
   orderQueue,
+  parseClickDueComments,
   parseEndComments,
   parseTrainAfterTokens,
   parseTrainLedger,
@@ -921,5 +924,178 @@ describe("latestEndAnchorCandidate — clamp BEFORE the latest-reduce", () => {
 
   it("keepAtOrBefore throws on garbage now (never a silent no-clamp)", () => {
     expect(() => keepAtOrBefore("nonsense")).toThrow(/Unparsable now in replay clamp/);
+  });
+});
+
+// ───────────────────────────── CLICK DUE rendering + dedup (rung 1 Leg B, ops-pipeline#172) ─────────────────────────────
+
+describe("parseClickDueComments (sixth ledger kind)", () => {
+  it("extracts a backticked CLICK DUE line and NOTHING else from a mixed comment", () => {
+    const comments: RestartTrainComment[] = [
+      {
+        id: 1,
+        login: "restart-train[bot]",
+        createdAt: "2026-08-26T14:00:05Z",
+        body: "`CLICK DUE 2026-08-26T14:00:00Z · studio-b-ai/studiob#558 · head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa · window CLEAR (anchor 2026-08-26T13:30:00Z · manual-end-comment) — a human merges this PR; the train observes END before the next ticket.`",
+      },
+    ];
+    const clickDues = parseClickDueComments(comments);
+    expect(clickDues).toHaveLength(1);
+    expect(clickDues[0].isoStamp).toBe("2026-08-26T14:00:00Z");
+    expect(clickDues[0].detail).toMatch(/studio-b-ai\/studiob#558/);
+    expect(clickDues[0].detail).toMatch(/head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/);
+    // The wider ledger view sees it too, correctly typed — parseTrainLedger is the general case.
+    expect(parseTrainLedger(comments)).toHaveLength(1);
+    expect(parseTrainLedger(comments)[0].kind).toBe("CLICK DUE");
+  });
+
+  it("extracts a BARE (un-backticked) CLICK DUE line, same as every other bare grammar kind", () => {
+    const comments: RestartTrainComment[] = [
+      {
+        id: 2,
+        login: "restart-train[bot]",
+        createdAt: "2026-08-26T14:00:05Z",
+        body: "CLICK DUE 2026-08-26T14:00:00Z · studio-b-ai/client-asthetik#281 · head=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb · window CLEAR",
+      },
+    ];
+    const clickDues = parseClickDueComments(comments);
+    expect(clickDues).toHaveLength(1);
+    expect(clickDues[0].isoStamp).toBe("2026-08-26T14:00:00Z");
+  });
+
+  it("does NOT match on 'CLICK' or 'DUE' alone, or the two words out of order (exact two-word keyword only)", () => {
+    const comments: RestartTrainComment[] = [
+      { id: 3, login: "a", createdAt: "2026-08-26T14:00:00Z", body: "`CLICK 2026-08-26T14:00:00Z · missing DUE`" },
+      { id: 4, login: "a", createdAt: "2026-08-26T14:00:00Z", body: "`DUE CLICK 2026-08-26T14:00:00Z · reversed`" },
+      { id: 5, login: "a", createdAt: "2026-08-26T14:00:00Z", body: "the click is due 2026-08-26T14:00:00Z, lowercase prose" },
+    ];
+    expect(parseClickDueComments(comments)).toHaveLength(0);
+    expect(parseTrainLedger(comments)).toHaveLength(0);
+  });
+
+  it("coexists with the other five kinds in one comment, sorted in body-scan order (mirrors the mixed-syntax contract above)", () => {
+    const comments: RestartTrainComment[] = [
+      {
+        id: 6,
+        login: "a",
+        createdAt: "2026-08-26T14:05:00Z",
+        body: "`CLICK DUE 2026-08-26T14:00:00Z · studiob#558 paged`\n`END 2026-08-26T14:03:00Z · studiob#558 merged and restarted`",
+      },
+    ];
+    const entries = parseTrainLedger(comments);
+    expect(entries.map((e) => e.kind)).toEqual(["CLICK DUE", "END"]);
+    expect(parseClickDueComments(comments)).toHaveLength(1);
+    expect(parseEndComments(comments)).toHaveLength(1);
+  });
+
+  it("chronological ordering across multiple comments follows commentCreatedAt, same as parseEndComments", () => {
+    const comments: RestartTrainComment[] = [
+      { id: 8, login: "a", createdAt: "2026-08-26T15:00:00Z", body: "`CLICK DUE 2026-08-26T15:00:00Z · second, later comment`" },
+      { id: 7, login: "a", createdAt: "2026-08-26T14:00:00Z", body: "`CLICK DUE 2026-08-26T14:00:00Z · first, earlier comment`" },
+    ];
+    const clickDues = parseClickDueComments(comments);
+    expect(clickDues).toHaveLength(2);
+    expect(clickDues[0].detail).toContain("first, earlier comment");
+    expect(clickDues[1].detail).toContain("second, later comment");
+  });
+});
+
+describe("clickDueStateKey", () => {
+  it("is a deterministic function of (repo, number, pinnedHeadSha) only", () => {
+    const k1 = clickDueStateKey("studio-b-ai/studiob", 558, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const k2 = clickDueStateKey("studio-b-ai/studiob", 558, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(k1).toBe(k2);
+    expect(k1).toBe("click-due :: studio-b-ai/studiob#558 @ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  });
+
+  it("changes on ANY of the three inputs changing (repo, number, sha independently)", () => {
+    const base = clickDueStateKey("studio-b-ai/studiob", 558, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const diffRepo = clickDueStateKey("studio-b-ai/client-asthetik", 558, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const diffNumber = clickDueStateKey("studio-b-ai/studiob", 559, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const diffSha = clickDueStateKey("studio-b-ai/studiob", 558, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    const keys = [base, diffRepo, diffNumber, diffSha];
+    expect(new Set(keys).size).toBe(4);
+  });
+
+  it("a force-push after paging (new head, same PR) gets a DIFFERENT fingerprint — a fresh CLICK DUE is correct, not a dupe", () => {
+    const before = clickDueStateKey("studio-b-ai/studiob", 558, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const afterForcePush = clickDueStateKey("studio-b-ai/studiob", 558, "cccccccccccccccccccccccccccccccccccccccc");
+    expect(before).not.toBe(afterForcePush);
+  });
+});
+
+describe("formatClickDueLine", () => {
+  const HEAD = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+  it("renders the full grammar line, backtick-wrapped, with the untruncated head sha", () => {
+    const line = formatClickDueLine(
+      "studio-b-ai/studiob",
+      558,
+      HEAD,
+      "2026-08-26T14:00:00Z",
+      "2026-08-26T13:30:00Z",
+      "manual-end-comment",
+    );
+    expect(line.startsWith("`CLICK DUE ")).toBe(true);
+    expect(line.endsWith("`")).toBe(true);
+    expect(line).toContain("studio-b-ai/studiob#558");
+    expect(line).toContain(`head=${HEAD}`);
+    expect(line).toContain("anchor 2026-08-26T13:30:00Z");
+    expect(line).toContain("manual-end-comment");
+    expect(line).toContain("window CLEAR");
+  });
+
+  it("Rule #412: claims exactly what is true — never says 'merging' or 'deployed', always names a human as the actor", () => {
+    const line = formatClickDueLine("studio-b-ai/studiob", 558, HEAD, "2026-08-26T14:00:00Z", "2026-08-26T13:30:00Z", "manual-end-comment");
+    expect(line.toLowerCase()).not.toContain("merging");
+    expect(line.toLowerCase()).not.toContain("deployed");
+    expect(line).toContain("a human merges this PR");
+  });
+
+  it("truncates a millisecond-suffixed nowIso to second precision (the raw Date#toISOString() shape every real scheduled run passes, since --now is only ever set on workflow_dispatch)", () => {
+    const line = formatClickDueLine(
+      "studio-b-ai/studiob",
+      558,
+      HEAD,
+      "2026-08-26T14:00:00.482Z",
+      "2026-08-26T13:30:00Z",
+      "manual-end-comment",
+    );
+    expect(line).toContain("CLICK DUE 2026-08-26T14:00:00Z");
+    expect(line).not.toContain(".482");
+  });
+
+  it("round-trips through parseClickDueComments even when built from a millisecond-suffixed nowIso — the exact defect this normalization exists to prevent", () => {
+    // Without toIsoSeconds truncation, ISO_PREFIX_RE cannot match a `.SSS`-suffixed instant and
+    // isoStamp comes back "" — silently defeating the in-flight check on every real cron cycle
+    // (schedule triggers never pass --now, so flags.now is always raw Date#toISOString()).
+    const line = formatClickDueLine(
+      "studio-b-ai/studiob",
+      558,
+      HEAD,
+      "2026-08-26T14:00:00.999Z",
+      "2026-08-26T13:30:00Z",
+      "manual-end-comment",
+    );
+    const posted: RestartTrainComment[] = [{ id: 1, login: "restart-train[bot]", createdAt: "2026-08-26T14:00:01Z", body: line }];
+    const parsed = parseClickDueComments(posted);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].isoStamp).toBe("2026-08-26T14:00:00Z");
+    expect(Number.isNaN(Date.parse(parsed[0].isoStamp))).toBe(false);
+  });
+
+  it("echoes anchorIso/anchorSource VERBATIM (external facts, same convention as planLines' anchor=)", () => {
+    // Deliberately pass a millisecond-suffixed anchorIso — only the LEADING nowIso stamp goes
+    // through toIsoSeconds; embedded facts are never reformatted (doc comment on toIsoSeconds).
+    const line = formatClickDueLine(
+      "studio-b-ai/studiob",
+      558,
+      HEAD,
+      "2026-08-26T14:00:00Z",
+      "2026-08-26T13:30:00.123Z",
+      "client-asthetik-actions",
+    );
+    expect(line).toContain("anchor 2026-08-26T13:30:00.123Z");
+    expect(line).toContain("client-asthetik-actions");
   });
 });
