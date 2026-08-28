@@ -626,8 +626,21 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
       // compare-and-swap, so it cannot fully eliminate — the window between this
       // re-check and the removal call landing; that residual is the same CLASS doc
       // §3.1 already accepts for the revalidate-to-merge gap.
-      const recheckTimelineFetch = fetchAuthorityTimeline(repo, pr);
+      // Fetch order (codex, ops#190 A1 review pass 3): PR labels FIRST, timeline
+      // SECOND — matching the merge-side revalidate re-check's order, not the
+      // reverse. The two fetches are never perfectly atomic with each other, so
+      // fetching timeline-then-labels can pair an OLDER timeline with a NEWER label
+      // snapshot: a remove-then-reapply landing in the gap would then show
+      // `train:ready` present (from the newer labels read) while the older timeline
+      // still ends at the ORIGINAL stale LabeledEvent, misattributing that presence
+      // to the stale event and incorrectly removing a label a human just freshly
+      // reauthorized. Labels-then-timeline avoids that specific misattribution: a
+      // change landing in ITS gap instead risks the timeline being newer than the
+      // labels snapshot, which `evaluateLabelAuthority`'s existing no-ready-label /
+      // roster / bot checks fail closed on (a mismatch there refuses, it does not
+      // authorize or remove).
       const recheckPr = fetchPr(repo, pr);
+      const recheckTimelineFetch = fetchAuthorityTimeline(repo, pr);
       const recheckVerdict = evaluateLabelAuthority({
         currentLabels: recheckPr.labels.map((l) => l.name),
         timeline: recheckTimelineFetch.timeline,
