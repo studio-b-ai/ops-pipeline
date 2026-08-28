@@ -4,10 +4,12 @@ import {
   minFutureEndDateTime,
   parseCertNotAfter,
   entraResultFromPasswordCredentials,
+  entraUserResultFromGraph,
   cloudflareResultFromVerify,
   cloudflareResultFromZones,
   type CloudflareVerifyResponse,
   type CloudflareZonesResponse,
+  type EntraUserGraphResponse,
 } from "../credential-probes.js";
 
 describe("parseGithubExpiryHeader", () => {
@@ -121,6 +123,63 @@ describe("entraResultFromPasswordCredentials", () => {
     it("pinned keyId absent from the app (secret deleted) → DEAD", () => {
       expect(entraResultFromPasswordCredentials(creds, NOW, "GONE")).toEqual({ alive: false, expiry: null, source: "probe" });
     });
+  });
+});
+
+describe("entraUserResultFromGraph", () => {
+  // FABRICATED — not a real Entra object id.
+  it("enabled + lastPasswordChangeDateTime → alive, note = pw-changed=<date>", () => {
+    const json: EntraUserGraphResponse = { accountEnabled: true, lastPasswordChangeDateTime: "2026-08-24T13:02:11Z" };
+    expect(entraUserResultFromGraph(json)).toEqual({ alive: true, expiry: null, source: "probe", note: "pw-changed=2026-08-24" });
+  });
+
+  it("enabled + no lastPasswordChangeDateTime → note = pw-changed=unknown", () => {
+    const json: EntraUserGraphResponse = { accountEnabled: true, lastPasswordChangeDateTime: null };
+    expect(entraUserResultFromGraph(json)).toEqual({ alive: true, expiry: null, source: "probe", note: "pw-changed=unknown" });
+  });
+
+  it("enabled + passwordPolicies DisablePasswordExpiration → no policy suffix", () => {
+    const json: EntraUserGraphResponse = {
+      accountEnabled: true,
+      lastPasswordChangeDateTime: "2026-08-24T13:02:11Z",
+      passwordPolicies: "DisablePasswordExpiration",
+    };
+    expect(entraUserResultFromGraph(json)).toEqual({ alive: true, expiry: null, source: "probe", note: "pw-changed=2026-08-24" });
+  });
+
+  it("enabled + non-empty passwordPolicies lacking the marker → policy!=DisablePasswordExpiration suffix", () => {
+    const json: EntraUserGraphResponse = {
+      accountEnabled: true,
+      lastPasswordChangeDateTime: "2026-08-24T13:02:11Z",
+      passwordPolicies: "DisableStrongPassword",
+    };
+    expect(entraUserResultFromGraph(json)).toEqual({
+      alive: true,
+      expiry: null,
+      source: "probe",
+      note: "pw-changed=2026-08-24 policy!=DisablePasswordExpiration",
+    });
+  });
+
+  it("enabled + passwordPolicies null → no policy suffix (tenant default may already be never-expire)", () => {
+    const json: EntraUserGraphResponse = {
+      accountEnabled: true,
+      lastPasswordChangeDateTime: "2026-08-24T13:02:11Z",
+      passwordPolicies: null,
+    };
+    expect(entraUserResultFromGraph(json)).toEqual({ alive: true, expiry: null, source: "probe", note: "pw-changed=2026-08-24" });
+  });
+
+  it("accountEnabled false → DEAD (alive:false, no note)", () => {
+    const json: EntraUserGraphResponse = { accountEnabled: false };
+    expect(entraUserResultFromGraph(json)).toEqual({ alive: false, expiry: null, source: "probe" });
+  });
+
+  it("accountEnabled absent → PROBE_FAILED shape naming the missing field", () => {
+    const json: EntraUserGraphResponse = {};
+    const r = entraUserResultFromGraph(json);
+    expect(r.alive).toBe(true);
+    expect(r.error).toContain("missing accountEnabled");
   });
 });
 

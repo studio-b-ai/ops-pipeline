@@ -23,6 +23,8 @@ export interface ProbeResult {
   error?: string;
   /** true = the credential type does not expire (e.g. a classic GitHub PAT with no expiry header). */
   nonExpiring?: boolean;
+  /** Short NAME-level detail for the run log (e.g. a password-change DATE) — NEVER a secret value. */
+  note?: string;
 }
 
 export interface ClassifyInput {
