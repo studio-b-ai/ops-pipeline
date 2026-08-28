@@ -102,6 +102,7 @@ import {
   clickDueStateKey,
   formatClickDueLine,
   parseClickDueComments,
+  isClickDueStillInFlight,
   type AnchorCandidate,
   type AnchorResult,
   type Ticket,
@@ -536,9 +537,11 @@ async function isTicketInFlight(
   const clickDues = parseClickDueComments(comments);
   const last = clickDues.length > 0 ? clickDues[clickDues.length - 1] : null;
   if (!last) return { inFlight: false, detail: "no prior CLICK DUE on target" };
-  const lastMs = Date.parse(last.isoStamp);
-  const anchorMs = Date.parse(anchor.anchorIso);
-  const inFlight = Number.isNaN(lastMs) || Number.isNaN(anchorMs) || lastMs > anchorMs;
+  // last.isoStamp is passed THROUGH as-is (never coalesced to null) — an empty string means a
+  // CLICK DUE WAS posted but its stamp is malformed, which must fail closed via
+  // isClickDueStillInFlight's own Number.isNaN branch, NOT read as "no prior CLICK DUE" (that
+  // reading is reserved for `last === null` above, a genuinely different case: nothing posted).
+  const inFlight = isClickDueStillInFlight(last.isoStamp, anchor.anchorIso);
   return { inFlight, detail: `last CLICK DUE ${last.isoStamp || "(unparseable)"} vs anchor ${anchor.anchorIso}` };
 }
 

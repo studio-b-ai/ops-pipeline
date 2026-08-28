@@ -877,6 +877,31 @@ export function formatClickDueLine(
   return `\`CLICK DUE ${stamp} · ${repo}#${number} · head=${headSha} · window CLEAR (anchor ${anchorIso} · ${anchorSource}) — a human merges this PR; the train observes END before the next ticket.\``;
 }
 
+/**
+ * The in-flight check's pure core (rung 1 Leg B, ops-pipeline#172): is the most recently posted
+ * `CLICK DUE`'s own leading stamp NEWER than the current anchor? `lastClickDueIso === null`
+ * (no prior CLICK DUE has ever been posted) resolves to `false` — nothing has been paged, so
+ * nothing can be in flight. Otherwise fails CLOSED (returns `true` = still in flight) whenever
+ * either stamp fails to parse — the double-restart-collision hazard this guards against is
+ * strictly worse than one missed paging cycle (Rule #4).
+ *
+ * Why comparing against the LIVE anchor is sufficient, with no separate END-tracking: a CLICK
+ * DUE's stamp is the instant it was POSTED, always at-or-before the anchor value in force at
+ * that same moment (the anchor is by construction an already-completed past fact). On every
+ * later cycle where the paged restart has NOT yet completed, the anchor is unchanged, so the
+ * comparison stays "in flight". `computeAnchor` only advances `anchorIso` PAST a CLICK DUE's own
+ * stamp once a genuinely NEW restart-completion fact (client-asthetik Actions success, Railway
+ * deploy, or a manual END on #280) lands — which by construction happens AFTER the human clicks
+ * merge and the restart finishes — flipping the comparison to "clear" at exactly the right
+ * moment, with no separate bookkeeping needed.
+ */
+export function isClickDueStillInFlight(lastClickDueIso: string | null, anchorIso: string): boolean {
+  if (lastClickDueIso === null) return false;
+  const lastMs = Date.parse(lastClickDueIso);
+  const anchorMs = Date.parse(anchorIso);
+  return Number.isNaN(lastMs) || Number.isNaN(anchorMs) || lastMs > anchorMs;
+}
+
 // ───────────────────────────── train:after / train:consolidate token parsing ─────────────────────────────
 //
 // train:ready ticket ASSEMBLY itself (label authority, staleness, `labeledAt`) moved to

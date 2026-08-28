@@ -14,6 +14,7 @@ import {
   hasTrainConsolidate,
   isBatchBlackoutUtc,
   isBusinessHoursBlockedET,
+  isClickDueStillInFlight,
   orderQueue,
   parseClickDueComments,
   parseEndComments,
@@ -1097,5 +1098,51 @@ describe("formatClickDueLine", () => {
     );
     expect(line).toContain("anchor 2026-08-26T13:30:00.123Z");
     expect(line).toContain("client-asthetik-actions");
+  });
+});
+
+describe("isClickDueStillInFlight (rung 1 Leg B paging gate — restart-train.ts's isTicketInFlight reduces to this)", () => {
+  const ANCHOR = "2026-08-26T14:00:00Z";
+
+  // ───── Negative controls first (Rule #322) — the two ways "not in flight" is reached ─────
+
+  it("null (no prior CLICK DUE has ever been posted) => not in flight", () => {
+    expect(isClickDueStillInFlight(null, ANCHOR)).toBe(false);
+  });
+
+  it("last CLICK DUE strictly BEFORE the current anchor => not in flight (the restart completed and the anchor moved past it)", () => {
+    expect(isClickDueStillInFlight("2026-08-26T13:00:00Z", ANCHOR)).toBe(false);
+  });
+
+  it("last CLICK DUE exactly EQUAL to the anchor => not in flight (boundary: strictly-greater-than, not >=)", () => {
+    expect(isClickDueStillInFlight(ANCHOR, ANCHOR)).toBe(false);
+  });
+
+  // ───── Positive path ─────
+
+  it("last CLICK DUE strictly AFTER the current anchor => still in flight (no restart-completion fact has landed since paging)", () => {
+    expect(isClickDueStillInFlight("2026-08-26T14:05:00Z", ANCHOR)).toBe(true);
+  });
+
+  // ───── Fail-closed on ambiguity (Rule #4) — the exact bug this test suite exists to pin ─────
+  // down: restart-train.ts's isTicketInFlight must pass a malformed (empty-string) isoStamp
+  // THROUGH to this function rather than coalescing it to null — null and "" mean two entirely
+  // different things (nothing posted vs. something posted with a broken stamp), and only the
+  // former may resolve to "not in flight".
+
+  it("an empty-string stamp (TrainLedgerEntry's own malformed-line convention) fails CLOSED => in flight, never coalesced to the null/not-in-flight reading", () => {
+    expect(isClickDueStillInFlight("", ANCHOR)).toBe(true);
+  });
+
+  it("a non-empty but unparseable stamp fails CLOSED => in flight", () => {
+    expect(isClickDueStillInFlight("not-a-date", ANCHOR)).toBe(true);
+  });
+
+  it("a malformed anchorIso fails CLOSED => in flight, even with an otherwise-valid CLICK DUE stamp", () => {
+    expect(isClickDueStillInFlight("2026-08-26T13:00:00Z", "also-not-a-date")).toBe(true);
+  });
+
+  it("both stamps malformed fails CLOSED => in flight", () => {
+    expect(isClickDueStillInFlight("nope", "also-nope")).toBe(true);
   });
 });
