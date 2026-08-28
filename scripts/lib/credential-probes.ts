@@ -88,6 +88,42 @@ export function entraResultFromPasswordCredentials(
   return { alive: false, expiry: null, source: "probe" };
 }
 
+export interface EntraUserGraphResponse {
+  accountEnabled?: boolean | null;
+  lastPasswordChangeDateTime?: string | null;
+  passwordPolicies?: string | null;
+}
+
+/**
+ * Pure: turn a Graph /users/{id} response into a ProbeResult (exported for tests).
+ *
+ * Aliveness-shaped BY DESIGN (never returns an expiry): entra-user-password rows are rung 2
+ * (`non_expiring: true`), and classify() treats a declared-non-expiring item that carries an
+ * expiry as a manifest contradiction → PROBE_FAILED. The password-change DATE goes out via
+ * `note` (run-log receipt; never a value — Rule #259/#282).
+ *   - accountEnabled true  → alive, note "pw-changed=<YYYY-MM-DD|unknown>"; when passwordPolicies
+ *     is a non-empty string NOT containing DisablePasswordExpiration, append
+ *     " policy!=DisablePasswordExpiration" (informational — the tenant may force-expire the
+ *     password). A null/absent passwordPolicies gets NO policy note (Graph returns null when
+ *     unset and the tenant default may already be never-expire — flagging null would false-alarm).
+ *   - accountEnabled false → alive:false (DEAD — everything riding on the account is broken)
+ *   - accountEnabled absent/null → PROBE_FAILED shape (unexpected Graph shape, never a silent OK)
+ */
+export function entraUserResultFromGraph(json: EntraUserGraphResponse): ProbeResult {
+  if (json.accountEnabled === false) {
+    return { alive: false, expiry: null, source: "probe" };
+  }
+  if (json.accountEnabled !== true) {
+    return { alive: true, expiry: null, source: "probe", error: "graph user response missing accountEnabled (unexpected shape)" };
+  }
+  const changed = json.lastPasswordChangeDateTime ? json.lastPasswordChangeDateTime.slice(0, 10) : "unknown";
+  let note = `pw-changed=${changed}`;
+  if (typeof json.passwordPolicies === "string" && json.passwordPolicies.length > 0 && !json.passwordPolicies.includes("DisablePasswordExpiration")) {
+    note += " policy!=DisablePasswordExpiration";
+  }
+  return { alive: true, expiry: null, source: "probe", note };
+}
+
 /** Parse a TLS cert `valid_to` / openssl `notAfter` value ("Aug 20 12:00:00 2026 GMT") → ISO. */
 export function parseCertNotAfter(value: string): string {
   const ms = Date.parse(value.trim());
@@ -303,6 +339,58 @@ export async function probeEntraSecret(
     return entraResultFromPasswordCredentials(appJson.passwordCredentials ?? [], new Date(), keyId);
   } catch (err) {
     return { alive: true, expiry: null, source: "probe", error: `entra probe failed: ${errMsg(err)}` };
+  }
+}
+
+/**
+ * Entra USER password aliveness (ops-pipeline#194, Rule #302 rung 2): app-only Graph token with
+ * the probing identity (ENTRA_* creds), then GET /users/{id}?$select=accountEnabled,
+ * lastPasswordChangeDateTime,passwordPolicies. The monitor never READS the password — aliveness
+ * is a Graph read, not a sign-in. Needs User.Read.All on the probing identity (Application.Read.All
+ * alone → 403, surfaced as PROBE_FAILED naming the missing grant).
+ *   - 404 → DEAD (user missing) · 403 → PROBE_FAILED naming User.Read.All · 200 → pure parser
+ */
+export async function probeEntraUserPassword(userId: string, creds: EntraProbeCreds): Promise<ProbeResult> {
+  try {
+    const tokenResp = await fetch(`https://login.microsoftonline.com/${creds.tenantId}/oauth2/v2.0/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: creds.clientId,
+        client_secret: creds.clientSecret,
+        scope: "https://graph.microsoft.com/.default",
+        grant_type: "client_credentials",
+      }),
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    if (!tokenResp.ok) {
+      return { alive: true, expiry: null, source: "probe", error: `entra token HTTP ${tokenResp.status}` };
+    }
+    const tokenJson = (await tokenResp.json()) as { access_token?: string };
+    if (!tokenJson.access_token) {
+      return { alive: true, expiry: null, source: "probe", error: "entra token response missing access_token" };
+    }
+    const userResp = await fetch(
+      `https://graph.microsoft.com/v1.0/users/${userId}?$select=accountEnabled,lastPasswordChangeDateTime,passwordPolicies`,
+      { headers: { Authorization: `Bearer ${tokenJson.access_token}` }, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) },
+    );
+    if (userResp.status === 404) {
+      return { alive: false, expiry: null, source: "probe" };
+    }
+    if (userResp.status === 403) {
+      return {
+        alive: true,
+        expiry: null,
+        source: "probe",
+        error: "graph users 403 — probe identity lacks User.Read.All (grant + admin-consent it on the monitor's Graph app)",
+      };
+    }
+    if (!userResp.ok) {
+      return { alive: true, expiry: null, source: "probe", error: `graph users HTTP ${userResp.status}` };
+    }
+    return entraUserResultFromGraph((await userResp.json()) as EntraUserGraphResponse);
+  } catch (err) {
+    return { alive: true, expiry: null, source: "probe", error: `entra user probe failed: ${errMsg(err)}` };
   }
 }
 

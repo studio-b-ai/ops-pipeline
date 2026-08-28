@@ -62,6 +62,7 @@ import {
   probeNpmGranular,
   probeCloudflareToken,
   probeEntraSecret,
+  probeEntraUserPassword,
   probe1PasswordSA,
   getCertExpiry,
   type EntraProbeCreds,
@@ -90,6 +91,7 @@ type CredType =
   | "npm-granular"
   | "github-pat-finegrained"
   | "entra-client-secret"
+  | "entra-user-password"
   | "cloudflare-api-token"
   | "tls-cert";
 
@@ -99,6 +101,7 @@ interface ManifestItem {
   op_ref?: string;
   app_id?: string;
   app_secret_key_id?: string; // entra: pin the SPECIFIC monitored secret by its (non-secret) keyId
+  user_id?: string; // entra-user-password: the monitored USER's Entra object id (non-secret)
   host?: string;
   recorded_expiry?: string | null;
   owner?: string;
@@ -124,6 +127,7 @@ interface ItemResult {
   classification: Classification;
   probeError?: string;
   probeNonExpiring?: boolean;
+  probeNote?: string;
 }
 
 /** Read a status value without the bare `status` keyword sitting next to a string literal. */
@@ -182,6 +186,13 @@ async function runProbe(item: ManifestItem): Promise<ProbeResult> {
       }
       return probeEntraSecret(item.app_id, creds, item.app_secret_key_id ?? null);
     }
+    case "entra-user-password": {
+      const creds = entraCredsOrNull();
+      if (!creds || !item.user_id) {
+        return { alive: true, expiry: null, source: "probe", error: "ENTRA_* probe creds (or user_id) not configured" };
+      }
+      return probeEntraUserPassword(item.user_id, creds);
+    }
     case "tls-cert":
       if (!item.host) {
         return { alive: true, expiry: null, source: "probe", error: "tls-cert item missing host" };
@@ -211,6 +222,7 @@ async function evaluate(item: ManifestItem, dryRun: boolean): Promise<ItemResult
       ? `manifest contradiction: non_expiring: true but an expiry is known (${probe.expiry ? "probe" : "recorded_expiry"}) — fix the manifest`
       : undefined),
     probeNonExpiring: probe.nonExpiring,
+    probeNote: probe.note,
   };
 }
 
@@ -323,7 +335,8 @@ function formatLine(r: ItemResult): string {
   const days = c.daysToExpiry == null ? "" : ` ${c.daysToExpiry}d`;
   const exp = c.expiry ? ` exp=${c.expiry.slice(0, 10)}` : "";
   const err = r.probeError ? ` err="${r.probeError}"` : "";
-  return `  ${r.item.name.padEnd(22)} ${statusOf(r).padEnd(13)}${exp}${days}${err}`;
+  const noteStr = r.probeNote ? ` ${r.probeNote}` : "";
+  return `  ${r.item.name.padEnd(22)} ${statusOf(r).padEnd(13)}${exp}${days}${noteStr}${err}`;
 }
 
 async function main(): Promise<void> {
