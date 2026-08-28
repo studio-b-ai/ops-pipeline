@@ -58,7 +58,8 @@
  * real watermark has already been swept.
  */
 
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -111,8 +112,24 @@ const CLASSIFY_MAX_RETRIES = 2;
  */
 const PR_LIST_LIMIT = 500;
 
-/** ~500KB of base64 (~375KB raw text) — comfortably under any realistic ARG_MAX; SHIPPED.md is tens of KB today. If this is ever hit for real, switch putFileContents to `-f content=@<tmpfile>` (gh api reads a field from a file) rather than raising this further. */
-const MAX_INLINE_CONTENT_B64_BYTES = 500_000;
+/**
+ * Contents-API sanity bound on the base64 payload — fail-loud far past any plausible ledger
+ * (~30MB raw text) but before shipping something structurally absurd to the API. This is NOT
+ * an argv bound anymore: the first real apply run (33216855975, 2026-08-28) died `spawnSync gh
+ * E2BIG` because Linux caps a SINGLE argv entry at 128KiB (MAX_ARG_STRLEN) — a per-argument
+ * limit the old 500KB "under any realistic ARG_MAX" bound was blind to (ARG_MAX ~2MB is the
+ * TOTAL; each argument is capped separately). All large payloads now travel via temp file
+ * (`-F content=@<file>` / `--body-file`), so argv stays small at any ledger size.
+ */
+const MAX_CONTENT_B64_BYTES = 40_000_000;
+
+/**
+ * GitHub hard-caps issue/PR/comment bodies at 65,536 characters — a heavy week's proposed-
+ * additions table (2026-W35: 203 rows ≈ 45KB) gets uncomfortably close. Bodies over this
+ * budget get the table truncated HONESTLY (Rule #412: the dropped count is named, never a
+ * silent cap) rather than letting the create/comment call 422 and fail the whole apply.
+ */
+const MAX_PR_BODY_CHARS = 60_000;
 
 function gh(args: string[]): string {
   return execFileSync("gh", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 32 * 1024 * 1024 });
@@ -363,21 +380,59 @@ function createBranch(repo: string, branch: string, fromCommitSha: string): void
   gh(["api", `repos/${repo}/git/refs`, "-f", `ref=refs/heads/${branch}`, "-f", `sha=${fromCommitSha}`]);
 }
 
-/** `currentBlobSha` is THAT FILE's blob sha at `branch` (see file header's commit-vs-blob note) — the Contents API's optimistic-concurrency check; a stale value 409s loudly rather than silently overwriting someone else's concurrent commit. */
+/**
+ * Writes `text` to a fresh private temp file and hands its path to `use`, removing the temp
+ * dir afterward regardless of outcome. Every large payload handed to `gh` goes through here
+ * so argv stays small at any ledger size — Linux caps a SINGLE argv entry at 128KiB
+ * (MAX_ARG_STRLEN), which the 2026-W35 apply run's inline base64 exceeded (`spawnSync gh
+ * E2BIG`, run 33216855975).
+ */
+function withTempFile<T>(prefix: string, text: string, use: (filePath: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const filePath = join(dir, "payload");
+  writeFileSync(filePath, text, "utf-8");
+  try {
+    return use(filePath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** Preamble + table, truncated to GitHub's body cap when needed — whole rows only, dropped count named in the body (Rule #412; the branch diff always carries the complete set). */
+function bodyWithinGithubCap(preamble: string, table: string): string {
+  const full = `${preamble}\n\n${table}`;
+  if (full.length <= MAX_PR_BODY_CHARS) return full;
+  const footerBudget = 250;
+  const tableBudget = MAX_PR_BODY_CHARS - preamble.length - footerBudget;
+  const lines = table.split("\n");
+  const kept: string[] = [];
+  let used = 0;
+  for (const line of lines) {
+    if (used + line.length + 1 > tableBudget) break;
+    kept.push(line);
+    used += line.length + 1;
+  }
+  const dropped = lines.length - kept.length;
+  return `${preamble}\n\n${kept.join("\n")}\n\n_…table truncated at GitHub's 65,536-char body cap — ${dropped} more line(s) not shown; the branch's SHIPPED.md diff carries the complete set._`;
+}
+
+/** `currentBlobSha` is THAT FILE's blob sha at `branch` (see file header's commit-vs-blob note) — the Contents API's optimistic-concurrency check; a stale value 409s loudly rather than silently overwriting someone else's concurrent commit. The base64 payload travels via `-F content=@<tmpfile>` (gh reads the field's value from the file), NEVER inline argv — see `withTempFile`. */
 function putFileContents(repo: string, path: string, branch: string, text: string, currentBlobSha: string, message: string): void {
   const contentB64 = Buffer.from(text, "utf-8").toString("base64");
-  if (contentB64.length > MAX_INLINE_CONTENT_B64_BYTES) {
+  if (contentB64.length > MAX_CONTENT_B64_BYTES) {
     throw new Error(
-      `${path} base64-encodes to ${contentB64.length} bytes, over the ${MAX_INLINE_CONTENT_B64_BYTES}-byte inline-argv safety bound — switch putFileContents to \`-f content=@<tmpfile>\` before raising this further.`,
+      `${path} base64-encodes to ${contentB64.length} bytes, over the ${MAX_CONTENT_B64_BYTES}-byte Contents-API sanity bound — a ledger this size means something upstream broke (or it is time for the Git Data API blob+tree path).`,
     );
   }
-  gh([
-    "api", "--method", "PUT", `repos/${repo}/contents/${path}`,
-    "-f", `message=${message}`,
-    "-f", `content=${contentB64}`,
-    "-f", `sha=${currentBlobSha}`,
-    "-f", `branch=${branch}`,
-  ]);
+  withTempFile("shipped-ledger-put-", contentB64, (b64File) => {
+    gh([
+      "api", "--method", "PUT", `repos/${repo}/contents/${path}`,
+      "-f", `message=${message}`,
+      "-F", `content=@${b64File}`,
+      "-f", `sha=${currentBlobSha}`,
+      "-f", `branch=${branch}`,
+    ]);
+  });
 }
 
 interface OpenPrRow {
@@ -444,15 +499,24 @@ async function applyToLedgerRepo(config: LedgerConfig, parsedLedger: ParsedLedge
 
   const existingPr = findOpenPrForBranch(repo, branch);
   if (existingPr) {
-    gh(["pr", "comment", String(existingPr.number), "--repo", repo, "--body", `Updated by this run.\n\n${table}`]);
+    const body = bodyWithinGithubCap("Updated by this run.", table);
+    withTempFile("shipped-ledger-body-", body, (bodyFile) => {
+      gh(["pr", "comment", String(existingPr.number), "--repo", repo, "--body-file", bodyFile]);
+    });
     console.log(`[shipped-ledger] commented on existing PR ${repo}#${existingPr.number} (never opened a duplicate).`);
   } else {
-    gh([
-      "pr", "create", "--repo", repo, "--base", "main", "--head", branch,
-      "--label", label,
-      "--title", `SHIPPED.md — weekly PR-derived backfill ${week}`,
-      "--body", `Automated weekly backfill (ops-pipeline#162). Never auto-merged (#97) — a human (CoS/Kevin) reviews and merges.\n\n${table}`,
-    ]);
+    const body = bodyWithinGithubCap(
+      "Automated weekly backfill (ops-pipeline#162). Never auto-merged (#97) — a human (CoS/Kevin) reviews and merges.",
+      table,
+    );
+    withTempFile("shipped-ledger-body-", body, (bodyFile) => {
+      gh([
+        "pr", "create", "--repo", repo, "--base", "main", "--head", branch,
+        "--label", label,
+        "--title", `SHIPPED.md — weekly PR-derived backfill ${week}`,
+        "--body-file", bodyFile,
+      ]);
+    });
     console.log(`[shipped-ledger] opened a new PR for ${branch} on ${repo}.`);
   }
 }
