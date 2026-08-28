@@ -77,6 +77,7 @@ import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 import {
+  TRAIN_READY_LABEL,
   resolveAuthorityLogins,
   evaluateLabelAuthority,
   fetchAuthorityTimeline,
@@ -620,6 +621,24 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
       // left). Runtime-verified by the `if` immediately above; this cast is
       // post-verified, not blind.
       const staleVerdict = verdict as StaleLabelAuthorityVerdict;
+      // P2 hardening (codex, ops#190 A1 review): re-confirm `train:ready` is still
+      // present with a fresh fetch immediately before removing, rather than trusting
+      // the fetch from the top of this function. This narrows — GitHub's label API
+      // offers no compare-and-swap, so it cannot fully eliminate — the window in
+      // which a human could have already re-applied `train:ready` (a fresh,
+      // currently-authorized labeling) between this function's initial read and the
+      // removal call. Same residual CLASS doc §3.1 already accepts for the
+      // revalidate-to-merge gap, applied here to the removal path. If the label is
+      // already gone (another cycle beat us to it, or a human removed it directly),
+      // there is nothing left to remove — refuse without a side effect rather than
+      // call `removeStaleReadyLabel` against a label that isn't there.
+      const recheckPr = fetchPr(repo, pr);
+      const stillPresent = recheckPr.labels.some((l) => l.name === TRAIN_READY_LABEL);
+      if (!stillPresent) {
+        const detail = "stale-label: train:ready already absent on re-check immediately before removal — nothing to do";
+        logTrainGateLine(repo, pr, "refused", detail);
+        return { outcome: "refused", detail };
+      }
       removeStaleReadyLabel(repo, pr);
       postAuthorityReceipt(repo, pr, formatStaleLabelRemovalReceipt(staleVerdict, prJson.headRefOid));
       logTrainGateLine(repo, pr, "stale-label-removed", verdict.detail);
@@ -662,7 +681,28 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
 
   // ── Revalidate-then-merge (doc §3.1 step 7, move 5) — re-fetch ONCE more,
   // immediately before merging; any delta aborts THIS cycle (never retried same run,
-  // Rules #109/#161 — the next scheduled/triggered run re-evaluates from scratch). ──
+  // Rules #109/#161 — the next scheduled/triggered run re-evaluates from scratch).
+  //
+  // Two independent re-checks, because they catch different drift classes (codex P1,
+  // ops#190 A1 review — the original single snapshot-only check missed the second):
+  //   (a) snapshot drift (labels/headRefOid/state/mergeStateStatus) — catches a new
+  //       push, the PR going draft/closed, or mergeability changing.
+  //   (b) a FRESH authority re-evaluation (full timeline re-fetch + re-run of
+  //       `evaluateLabelAuthority`) — catches a non-authority actor removing and
+  //       re-adding `train:ready` during this running cycle: the label SET is
+  //       unchanged by a remove-then-reapply (so (a) alone sees no drift, since
+  //       `hasAuthoritySnapshotDrifted` only ever compared a label-NAME set, never
+  //       event identity), but the event actually authorizing the CURRENT state has
+  //       changed and may now fail the roster/bot check. Re-running the full
+  //       predicate — rather than diffing the new authorizing event's identity
+  //       against the original verdict's — is the deliberate choice: it composes
+  //       cleanly with the existing `authorized` boolean (no new comparison
+  //       dimension to get wrong) and correctly ALLOWS a same-cycle re-authorization
+  //       by a DIFFERENT roster member to still merge (a legitimate authority
+  //       holder's most recent word), while refusing anything a fresh evaluation
+  //       would refuse — including a same-sha "stale-label" verdict from a
+  //       force-push-then-revert-to-the-same-sha, which (a)'s headRefOid compare
+  //       alone cannot see either. ──
   const before: AuthoritySnapshot = {
     labels: currentLabels,
     headRefOid: prJson.headRefOid,
@@ -680,6 +720,23 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     const detail =
       `revalidate: PR state changed between evaluation and merge (before: ${JSON.stringify(before)}, ` +
       `after: ${JSON.stringify(after)}) — aborting this cycle, not retrying (Rules #109/#161)`;
+    logTrainGateLine(repo, pr, "refused", detail);
+    return { outcome: "refused", detail };
+  }
+
+  const revalidateTimelineFetch = fetchAuthorityTimeline(repo, pr);
+  const revalidateVerdict = evaluateLabelAuthority({
+    currentLabels: [...after.labels],
+    timeline: revalidateTimelineFetch.timeline,
+    authorityLogins,
+    truncated: revalidateTimelineFetch.truncated,
+  });
+  if (!revalidateVerdict.authorized) {
+    const detail =
+      `revalidate: fresh authority re-evaluation no longer authorizes (reason: ` +
+      `${revalidateVerdict.reason}: ${revalidateVerdict.detail}) — aborting this cycle, ` +
+      `not retrying (Rules #109/#161); a same-cycle stale-label removal is deliberately NOT ` +
+      `attempted here — that side effect is left to the next gate cycle's normal early-branch handling`;
     logTrainGateLine(repo, pr, "refused", detail);
     return { outcome: "refused", detail };
   }
@@ -702,10 +759,11 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     "",
     "| Leg | Result |",
     "|---|---|",
-    `| authority (label-authority v2) | ✅ authorized by \`${verdict.authorizingEvent.actorLogin}\` (timeline position ${verdict.authorizingEvent.position}) |`,
+    `| authority (label-authority v2, revalidated pre-merge) | ✅ authorized by \`${revalidateVerdict.authorizingEvent.actorLogin}\` (timeline position ${revalidateVerdict.authorizingEvent.position}) |`,
     "| CI rollup clean | ✅ |",
     "| independent review (Claude Sonnet 5) | ✅ CLEAN |",
-    "| revalidate (immediately pre-merge) | ✅ no drift |",
+    "| revalidate: PR snapshot (labels/sha/state/mergeStateStatus) | ✅ no drift |",
+    "| revalidate: authority timeline re-check | ✅ still authorized |",
     "",
     `Evaluated sha: \`${prJson.headRefOid}\` (merge was SHA-pinned via \`--match-head-commit\`).`,
     "",

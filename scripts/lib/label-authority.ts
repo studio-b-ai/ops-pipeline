@@ -433,6 +433,34 @@ export function fetchAuthorityTimeline(repo: string, prNumber: number): { timeli
     throw new Error(`fetchAuthorityTimeline: unexpected GraphQL response shape for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
   }
 
+  // Fail closed on a malformed/untrustworthy connection shape rather than trust the
+  // compile-time `as GraphQLTimelineResponse` assertion above at runtime (codex P1,
+  // ops#190 A1 review): `JSON.parse` + `as` performs ZERO runtime validation, so a
+  // missing, null, or non-numeric `totalCount` would silently coerce
+  // `conn.totalCount > timeline.length` below to `false` (e.g. `undefined > 5` is
+  // `false`, and `null > 5` is also `false` since `null` coerces to `0`) — reporting
+  // NOT-truncated on a response this function has no trustworthy signal about, which
+  // `evaluateLabelAuthority` could then walk as if it were a complete, reliable
+  // window. Same reasoning for `nodes` not actually being an array at runtime, and
+  // for a `totalCount` smaller than the node count actually received (internally
+  // inconsistent — GitHub's `totalCount` can never be less than the nodes in the same
+  // response). Any of these throws, matching this function's existing
+  // throw-on-untrustworthy-shape convention immediately above and in the
+  // unrecognized-`__typename` branch below (Rule #4: doubt resolves toward refusal —
+  // the caller's fail-closed error handling, not this function, decides the outcome).
+  if (!Array.isArray(conn.nodes)) {
+    throw new Error(`fetchAuthorityTimeline: GraphQL response "nodes" is not an array for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+  }
+  if (typeof conn.totalCount !== "number" || !Number.isFinite(conn.totalCount) || conn.totalCount < 0) {
+    throw new Error(`fetchAuthorityTimeline: GraphQL response "totalCount" is not a valid non-negative number for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+  }
+  if (conn.totalCount < conn.nodes.length) {
+    throw new Error(
+      `fetchAuthorityTimeline: GraphQL response is internally inconsistent (totalCount ${conn.totalCount} < ` +
+        `nodes.length ${conn.nodes.length}) for ${repo}#${prNumber}`,
+    );
+  }
+
   const timeline: AuthorityTimelineItem[] = conn.nodes.map((node, index) => {
     const type = TIMELINE_TYPENAME_MAP[node.__typename];
     if (!type) {
