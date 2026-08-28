@@ -125,6 +125,12 @@ describe("parseArgs", () => {
     ).toThrow(/mutually exclusive/);
   });
 
+  it("throws even when the combined --sensitive-path value is whitespace-only (codex P2, A2 pass 1) — exclusion keys on flag PRESENCE, not on whether the value survived trimming", () => {
+    expect(() =>
+      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--sensitive-path", "   "]),
+    ).toThrow(/mutually exclusive/);
+  });
+
   it("still requires --repo/--pr in train mode (the mutual-exclusion check does not preempt required-arg validation)", () => {
     expect(() => parseArgs(["--train-ready", "--pr", "9"])).toThrow(/--repo/);
     expect(() => parseArgs(["--train-ready", "--repo", "studio-b-ai/ops-pipeline"])).toThrow(/--pr/);

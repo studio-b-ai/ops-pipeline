@@ -38,6 +38,12 @@ export function parseArgs(argv: string[]): Args {
   let pr: number | undefined;
   let enabledClassesRaw: string | undefined;
   let trainReady = false;
+  // Tracked separately from sensitivePathPatterns.length (codex P2, A2 review pass
+  // 1): a whitespace-only --sensitive-path value is deliberately DROPPED from the
+  // patterns array below, so array length alone would miss that the flag was
+  // PRESENT — and the mutual-exclusion contract with --train-ready is about flag
+  // presence (a confused invocation), not about whether the value survived trimming.
+  let sensitivePathFlagSeen = false;
   const sensitivePathPatterns: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo") repo = argv[++i];
@@ -45,6 +51,7 @@ export function parseArgs(argv: string[]): Args {
     else if (argv[i] === "--enabled-classes") enabledClassesRaw = argv[++i];
     else if (argv[i] === "--train-ready") trainReady = true;
     else if (argv[i] === "--sensitive-path") {
+      sensitivePathFlagSeen = true;
       // Trim before storing (codex P2 finding, 2026-08-02 pass 2): the reusable
       // workflow's caller-facing input is a single comma-separated string
       // (`sensitive_path_patterns: "a,b,c"`) that the workflow's bash step splits
@@ -71,7 +78,7 @@ export function parseArgs(argv: string[]): Args {
   // ignoring the other's flags. Presence is what matters, not validity: even
   // `--enabled-classes docs-comment` (the default value, explicitly passed)
   // combined with --train-ready signals a confused caller.
-  if (trainReady && (enabledClassesRaw !== undefined || sensitivePathPatterns.length > 0)) {
+  if (trainReady && (enabledClassesRaw !== undefined || sensitivePathFlagSeen)) {
     throw new Error(
       "--train-ready is mutually exclusive with --enabled-classes/--sensitive-path " +
         "(A-side label-authority gate vs B-side squasher gate — one invocation evaluates exactly one)",
