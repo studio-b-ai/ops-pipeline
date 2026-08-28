@@ -4,16 +4,23 @@
  * program (docs/plans/2026-08-28-automerge-b-plus-a-v2.md §3.1-3.3).
  *
  * WHY THIS EXISTS (v1's fatal flaw, doc §1 D1/D2): v1 derived merge authority from
- * PARSING COMMENT BODIES (`restart-train-lib.ts`'s `parseTrainPin` — a
+ * PARSING COMMENT BODIES (restart-train-lib.ts's original pin parser — a
  * "TRAIN-PIN <iso> · head=<sha> · applied-by=<login>" grammar the author of THIS file
  * invented, never a GitHub-attributed fact) and from TIMESTAMPS (staleness by clock
  * comparison, forgeable by anyone who can edit/backdate a comment or whose clock
  * skews). Both are attacker- and bug-controllable: any commenter can type that exact
  * string. v2 replaces both with GraphQL `timelineItems` — SERVER-ATTRIBUTED events
  * (who labeled it, in what ORDER relative to commits/force-pushes) that no comment
- * body can forge. `parseTrainPin` itself is explicitly NOT touched or reused here
- * (brief: "do NOT modify parseTrainPin; it is receipt-legacy") — it stays exactly what
- * it always was, a superseded, never-relied-upon-for-authority parser.
+ * body can forge. That legacy comment-grammar parser was explicitly NOT touched or
+ * reused here at the time this module was first built (brief: "leave the legacy
+ * comment parser alone, it's a superseded, never-relied-upon-for-authority path") —
+ * that separation is what let this predicate ship and get verified independently.
+ * ops-pipeline#172 rung 1 (the restart-train worker's ticket-assembly cutover onto
+ * this predicate, replacing the old parser's call site outright rather than leaving
+ * it dead-but-present) has since deleted that legacy parser and its supporting
+ * type/regex from restart-train-lib.ts entirely — see that file's
+ * `train:after`/`train:consolidate` section header for the current state; nothing in
+ * that deletion touches this file.
  *
  * Fail-closed doctrine (Rules #4, #322, #412, #464, #471 — the dominant law across
  * this whole repo): every ambiguous, truncated, empty, or unrecognized input resolves

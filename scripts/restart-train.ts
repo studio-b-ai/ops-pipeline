@@ -1,20 +1,25 @@
 #!/usr/bin/env tsx
 /**
- * restart-train.ts — Heritage restart train, RUNG 0 worker (ops-pipeline#172).
+ * restart-train.ts — Heritage restart train worker (ops-pipeline#172).
  *
  * I/O glue around scripts/lib/restart-train-lib.ts (pure) + scripts/lib/railway-deployment-probes.ts
- * (Railway GraphQL) + scripts/lib/github-issues.ts (gh CLI wrapper). Read those files' headers
+ * (Railway GraphQL) + scripts/lib/label-authority.ts (GraphQL timeline fetch + the label-authority
+ * predicate, gh CLI) + scripts/lib/github-issues.ts (gh CLI wrapper). Read those files' headers
  * first — no classification/scheduling decision lives here.
  *
  * Canon: brain vault `library/architecture/2026-08-19-heritage-restart-train-design.md` (design
  * v0) + `library/decisions/2026-08-19-heritage-restart-train-merge-authority-label-gated.md`
  * (Kevin LOCKED option A, merge authority, 2026-08-19T20:45Z) + tracker `ops-pipeline#172`.
  *
- * RUNG 0 = DRY-RUN ONLY. `--fire` is not a real mode yet — it throws immediately, unconditionally
- * (rung 3 not built). The only thing this worker ever does to a live GitHub repo is READ
- * (issues/comments/PRs/Actions runs) plus, when `--post` is explicitly passed, comment a
- * PLAN/HELD line on `--target`. It never labels, never merges, never touches a PR beyond reading
- * its head sha.
+ * RUNG 0 (dry-run scheduling) is what this worker has always done: `--fire` is not a real mode
+ * yet — it throws immediately, unconditionally (rung 3, the actual merge, is not built). RUNG 1
+ * (ops-pipeline#172, this build) kills v1's D1 defect in ticket assembly: `train:ready` authority
+ * now comes from GitHub-attributed GraphQL timeline events (label-authority.ts), never a
+ * parseable comment body, and a STALE label (a push landing after the authorizing label) is
+ * stripped + receipted rather than silently excluded. This worker still never merges and never
+ * touches branch protection; it now DOES edit a PR's labels (strip a stale `train:ready`) and
+ * comment on PRs beyond `--target`, both strictly narrower than a merge and both gated behind
+ * `--post`.
  *
  * Facts built per run:
  *   1. client-asthetik Actions: the most recent `deploy / Deploy to production` job with
@@ -32,27 +37,33 @@
  *      build's sandbox; the query shape is grounded in Railway's documented pattern and degrades
  *      to "no candidate this run" on any failure, never a crash or a bad PLAN line.
  *   3. client-asthetik#280 comments → parseEndComments (the human "calendar"'s END lines).
- *   4. `train:ready` PRs on studiob + client-asthetik → parseTrainPin / parseTrainAfterTokens /
- *      hasTrainConsolidate per PR's own comment thread, built into Ticket objects. A PR carrying
- *      the label but no TRAIN-PIN comment yet is excluded from this tick (normal race — the
- *      label-apply step, which posts the pin, is separate CTO-owned work per design §4 and is
- *      NOT built by rung 0), never fabricated.
+ *   4. `train:ready` PRs on studiob + client-asthetik → each evaluated via
+ *      `fetchAuthorityTimeline` + `evaluateLabelAuthority` (label-authority.ts, GraphQL
+ *      `timelineItems` — server-attributed, never a comment body). AUTHORIZED builds a `Ticket`
+ *      (`labeledAt` = the authorizing LabeledEvent's server `createdAt`; `pinnedHeadSha` = the
+ *      head observed at this same fetch, since AUTHORIZED already certifies no push landed after
+ *      labeling). STALE strips the label + posts a write-only receipt (when `--post`) and
+ *      excludes the PR this tick. Any other refusal (bot actor, unauthorized actor, hold-present,
+ *      no-ready-label, truncated/empty timeline, a timeline fetch error) excludes the PR this
+ *      tick with one log line — never fabricated, matching this worker's original fail-closed
+ *      posture.
  *
  * Flags:
- *   --dry-run     Default true. The ONLY mode rung 0 has — passing or omitting it changes
- *                 nothing; kept as a real flag so rung 3's `--fire` slots in as its opposite
- *                 without a call-site rewrite.
+ *   --dry-run     Default true. Passing or omitting it changes nothing yet; kept as a real flag
+ *                 so rung 3's `--fire` slots in as its opposite without a call-site rewrite.
  *   --fire        Throws "rung 3 not built" unconditionally — a caller trying to skip ahead gets
  *                 an explicit, loud refusal instead of a silent dry-run.
  *   --now <ISO>   Replay clock threaded into every pure-lib call. Omit for the real time.
  *   --target <org/repo#n>   Where PLAN/HELD lines post. Default studio-b-ai/ops-pipeline#172.
- *                 NEVER client-asthetik#280 — that is a READ source (the human calendar); rung 0
- *                 must not write to it.
- *   --post        Default false. Gates ALL issue-commenting. Tests and local/manual runs during
- *                 this build never pass it — the CTO's first live dispatch (with the fleet App's
- *                 now-granted pull_requests/checks/actions scopes, landed 2026-08-19 ~21:52Z) is
- *                 this worker's first real post, per Rule #464 (a guard's first live firing is
- *                 part of its ship).
+ *                 NEVER client-asthetik#280 — that is a READ source (the human calendar); this
+ *                 worker must not write to it.
+ *   --post        Default false. Gates ALL issue-commenting AND the rung 1 stale-`train:ready`
+ *                 label removal — with `--post` unset, a STALE ticket is logged and excluded but
+ *                 its label is left alone (this worker's original read-only posture, preserved
+ *                 for tests and local/manual runs). The CTO's first live dispatch (with the fleet
+ *                 App's now-granted pull_requests/checks/actions scopes, landed 2026-08-19
+ *                 ~21:52Z) was this worker's first real post, per Rule #464 (a guard's first live
+ *                 firing is part of its ship).
  *
  * Hold check runs FIRST, before any fact-building: `train:hold` label on --target OR env
  * HERITAGE_TRAIN_HOLD=1 → (if --post) post exactly one `HELD` line, deduped against the target's
@@ -84,7 +95,6 @@ import {
   planStateKey,
   parseEndComments,
   findDanglingPlan,
-  parseTrainPin,
   parseTrainAfterTokens,
   hasTrainConsolidate,
   repoClassFor,
@@ -92,6 +102,16 @@ import {
   type Ticket,
   type RestartTrainComment,
 } from "./lib/restart-train-lib.js";
+import {
+  evaluateLabelAuthority,
+  fetchAuthorityTimeline,
+  resolveAuthorityLogins,
+  removeStaleReadyLabel,
+  postAuthorityReceipt,
+  formatStaleLabelRemovalReceipt,
+  type AuthorityTimelineItem,
+  type StaleLabelAuthorityVerdict,
+} from "./lib/label-authority.js";
 import { parseArgs, parseTarget, CALENDAR_REPO, CALENDAR_ISSUE } from "./lib/restart-train-args.js";
 
 const TICKET_REPOS = ["studio-b-ai/studiob", "studio-b-ai/client-asthetik"] as const;
@@ -241,8 +261,25 @@ async function fetchCalendarComments(): Promise<RestartTrainComment[]> {
   }
 }
 
-async function fetchTickets(nowIso: string): Promise<Ticket[]> {
+/**
+ * Builds `Ticket`s from every open `train:ready` PR on the two ticket repos, per-PR authority
+ * decided by `evaluateLabelAuthority` (label-authority.ts) over a GraphQL timeline fetch — never
+ * a comment body (v1's D1 defect; see this file's header). `post` gates the STALE leg's mutation
+ * (label removal + receipt) exactly like every other write in this worker; the read/log/exclude
+ * behavior is identical either way, only the mutation itself is skipped when `post` is false.
+ *
+ * Every refusal (AUTHORIZED=false for any reason, or a timeline fetch error) excludes the PR from
+ * this tick with exactly one log line — never fabricated, per this worker's fail-closed posture.
+ * A per-PR authority-timeline fetch error is caught and logged HERE, not thrown: unlike the
+ * repo-wide `pr list` call above it (a failure there means "can't proceed for this whole repo",
+ * so it still throws) or the comments fetch below it (already-AUTHORIZED, so a failure there
+ * would force guessing at afterTokens/consolidate — still thrown, unchanged from before), a
+ * single PR's timeline being unreadable this tick is exactly the kind of ambiguous-input case
+ * this worker resolves toward exclusion, not toward killing every other repo's tickets too.
+ */
+async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
   const tickets: Ticket[] = [];
+  const authorityLogins = resolveAuthorityLogins();
   for (const repo of TICKET_REPOS) {
     let prsJson: string;
     try {
@@ -256,43 +293,101 @@ async function fetchTickets(nowIso: string): Promise<Ticket[]> {
         "--state",
         "open",
         "--json",
-        "number,headRefOid,createdAt",
+        "number,headRefOid,labels",
         "--limit",
         "50",
       ]);
     } catch (err) {
       throw classifyReadError(err, `pull_requests:read (${repo} train:ready list)`);
     }
-    const prs = JSON.parse(prsJson) as Array<{ number: number; headRefOid: string; createdAt: string }>;
+    const prs = JSON.parse(prsJson) as Array<{
+      number: number;
+      headRefOid: string;
+      labels: Array<{ name: string }>;
+    }>;
     for (const pr of prs) {
+      const currentLabels = pr.labels.map((l) => l.name);
+
+      let timelineResult: { timeline: AuthorityTimelineItem[]; truncated: boolean };
+      try {
+        timelineResult = fetchAuthorityTimeline(repo, pr.number);
+      } catch (err) {
+        const classified = classifyReadError(err, `pull_requests:read (${repo}#${pr.number} authority timeline)`);
+        console.log(
+          `[restart-train] ${repo}#${pr.number}: authority-timeline fetch error — excluded this tick (fail-closed): ${classified.message}`,
+        );
+        continue;
+      }
+
+      const verdict = evaluateLabelAuthority({
+        currentLabels,
+        timeline: timelineResult.timeline,
+        authorityLogins,
+        truncated: timelineResult.truncated,
+      });
+
+      if (!verdict.authorized) {
+        if (verdict.reason === "stale-label") {
+          // Narrowing `verdict.reason === "stale-label"` does not retroactively make `verdict`
+          // assignable to the plain `StaleLabelAuthorityVerdict` interface at the type-checker
+          // level (see that interface's doc comment in label-authority.ts) — an explicit cast is
+          // required even though the runtime shape is already exactly right.
+          const staleVerdict = verdict as StaleLabelAuthorityVerdict;
+          if (post) {
+            removeStaleReadyLabel(repo, pr.number);
+            postAuthorityReceipt(repo, pr.number, formatStaleLabelRemovalReceipt(staleVerdict, pr.headRefOid));
+            console.log(
+              `[restart-train] ${repo}#${pr.number}: stale train:ready removed + receipt posted — ${verdict.detail}`,
+            );
+          } else {
+            console.log(
+              `[restart-train] ${repo}#${pr.number}: stale train:ready (--post not set, not removing/posting) — ${verdict.detail}`,
+            );
+          }
+        } else {
+          console.log(
+            `[restart-train] ${repo}#${pr.number}: label-authority refused (${verdict.reason}) — excluded this tick: ${verdict.detail}`,
+          );
+        }
+        continue;
+      }
+
+      // AUTHORIZED. labeledAt comes from the authorizing LabeledEvent's own timeline position —
+      // fetchAuthorityTimeline validates createdAt is present/non-empty for every LABELED node
+      // (label-authority.ts), so a missing value here would mean the position index itself is
+      // wrong; fail closed rather than push a Ticket with an unparseable FIFO key.
+      const labeledAtItem = timelineResult.timeline[verdict.authorizingEvent.position];
+      const labeledAt = labeledAtItem?.createdAt;
+      if (!labeledAt) {
+        console.log(
+          `[restart-train] ${repo}#${pr.number}: authorized but the authorizing event has no createdAt at its recorded position — excluded this tick (fail-closed)`,
+        );
+        continue;
+      }
+
       let comments: RestartTrainComment[];
       try {
         comments = listIssueComments(repo, pr.number);
       } catch (err) {
         throw classifyReadError(err, `issues:read (${repo}#${pr.number} comments)`);
       }
-      // Replay clamp BEFORE pin/dependency parsing (codex P2b, PR #174 pass 1): a pin or
-      // train:after/consolidate comment posted after `now` did not exist at the replay
-      // instant — parseTrainPin takes the LATEST pin, so an unclamped future re-pin would
-      // hide the pin that WAS live and get the whole ticket dropped by clampTicketsToNow
-      // instead of scheduled on the old pin. (Label STATE has no history — a replay sees
+      // Replay clamp BEFORE dependency-token parsing (codex P2b, PR #174 pass 1, still
+      // applicable to afterTokens/consolidate): a train:after/consolidate comment posted after
+      // `now` did not exist at the replay instant. (Label STATE has no history — a replay sees
       // today's train:ready set; a documented replay-fidelity limitation, not fixable here.)
       comments = clampCommentsToNow(comments, nowIso);
-      const pin = parseTrainPin(comments);
-      if (!pin) {
-        // No pin comment yet — the label-apply step (separate, CTO-owned, not built by rung 0)
-        // hasn't posted it. Normal race per parseTrainPin's doc: exclude, never fabricate.
-        console.log(
-          `[restart-train] ${repo}#${pr.number}: train:ready but no TRAIN-PIN comment yet — excluded this tick`,
-        );
-        continue;
-      }
+
       tickets.push({
         repo,
         number: pr.number,
         repoClass: repoClassFor(repo),
-        appliedAt: pin.appliedAtIso,
-        pinnedHeadSha: pin.pinnedHeadSha,
+        labeledAt,
+        // AUTHORIZED already certifies no commit/force-push timeline item sits after the
+        // authorizing LabeledEvent (evaluateLabelAuthority's staleness check) — the head
+        // observed at THIS fetch is provably the same head that's been live since labeling, so
+        // pinnedHeadSha and currentHeadSha both come from the same read (see Ticket's doc
+        // comment in restart-train-lib.ts).
+        pinnedHeadSha: pr.headRefOid,
         currentHeadSha: pr.headRefOid,
         afterTokens: parseTrainAfterTokens(comments),
         consolidate: hasTrainConsolidate(comments),
@@ -435,12 +530,12 @@ async function main(): Promise<void> {
   }
   console.log(`[restart-train] anchor: ${anchor.anchorIso} (${anchor.source}: ${anchor.detail})`);
 
-  const rawTickets = await fetchTickets(flags.now);
+  const rawTickets = await fetchTickets(flags.now, flags.post);
   const tickets = clampTicketsToNow(rawTickets, flags.now);
   if (tickets.length !== rawTickets.length) {
-    console.log(`[restart-train] clamp: dropped ${rawTickets.length - tickets.length} ticket(s) pinned after now=${flags.now}`);
+    console.log(`[restart-train] clamp: dropped ${rawTickets.length - tickets.length} ticket(s) labeled after now=${flags.now}`);
   }
-  console.log(`[restart-train] ${tickets.length} train:ready ticket(s) with a valid pin comment`);
+  console.log(`[restart-train] ${tickets.length} train:ready ticket(s) with valid label authority`);
 
   const queue = orderQueue(tickets);
   for (const entry of queue) {
