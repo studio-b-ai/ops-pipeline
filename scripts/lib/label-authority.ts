@@ -93,6 +93,13 @@ export interface AuthorityTimelineItem {
    *  "github-actions[bot]"). */
   actorLogin?: string;
   position: number;
+  /** Only populated for LABELED (the GraphQL query only selects `createdAt` on the
+   *  `LabeledEvent` fragment, ops-pipeline#172 rung 1) — the server-attributed instant
+   *  the label was applied. This is FIFO-ordering data ONLY, consumed by the
+   *  restart-train worker to sort tickets; `evaluateLabelAuthority` itself never reads
+   *  this field and makes every staleness decision from `position` (timeline order),
+   *  never a timestamp comparison (doc §3.1 item 3 — unchanged by this addition). */
+  createdAt?: string;
 }
 
 export interface AuthorityInput {
@@ -356,7 +363,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
         totalCount
         nodes {
           __typename
-          ... on LabeledEvent { label { name } actor { login } }
+          ... on LabeledEvent { label { name } actor { login } createdAt }
           ... on UnlabeledEvent { label { name } actor { login } }
         }
       }
@@ -375,6 +382,9 @@ interface GraphQLTimelineNode {
   __typename: string;
   label?: { name?: string | null } | null;
   actor?: { login?: string | null } | null;
+  /** Only requested on the `LabeledEvent` fragment above — always absent/undefined on
+   *  every other node type. */
+  createdAt?: string | null;
 }
 
 interface GraphQLTimelineResponse {
@@ -505,12 +515,27 @@ export function fetchAuthorityTimeline(repo: string, prNumber: number): { timeli
           `"actor.login" for ${repo}#${prNumber}: ${out.slice(0, 500)}`,
       );
     }
+    // createdAt (ops-pipeline#172 rung 1): only requested on the LabeledEvent
+    // fragment, and only consumed by the restart-train worker as a FIFO sort key —
+    // never by this predicate's authority/staleness reasoning (that stays
+    // position-based, per the header comment on AuthorityTimelineItem.createdAt
+    // above). Validated with the same missing-or-non-string-fails-closed convention
+    // as label.name/actor.login immediately above, rather than silently mapping an
+    // absent value to `undefined` and letting a malformed FIFO key surface later as
+    // an inscrutable `Date.parse(undefined)` NaN in the caller.
+    if (type === "LABELED" && (typeof node.createdAt !== "string" || node.createdAt.length === 0)) {
+      throw new Error(
+        `fetchAuthorityTimeline: LabeledEvent node at position ${index} has a missing or non-string ` +
+          `"createdAt" for ${repo}#${prNumber}: ${out.slice(0, 500)}`,
+      );
+    }
 
     return {
       type,
       label: node.label?.name ?? undefined,
       actorLogin: node.actor?.login ?? undefined,
       position: index,
+      createdAt: node.createdAt ?? undefined,
     };
   });
 
