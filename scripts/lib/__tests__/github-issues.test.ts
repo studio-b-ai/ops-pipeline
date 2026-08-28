@@ -227,4 +227,18 @@ describe("retry surface stays reads-only (source guards)", () => {
     expect(degrades).toHaveLength(3);
     expect(sweepSrc).toContain("transient-unit-skips");
   });
+
+  it("recall enumeration and the authoritative twin list-scan ride withGhRetry (codex pass 2 P2 + pass 3 P1)", () => {
+    const sweepSrc = readFileSync(join(SCRIPTS_DIR, "needs-human-crossrepo.ts"), "utf8");
+    // The two RETRIED sweep-side reads, by label — and exactly two withGhRetry sites, so a
+    // future mutator can't quietly pick up the wrapper here without this scan noticing.
+    expect(sweepSrc).toContain("label: `twin list-scan ${target}`");
+    expect(sweepSrc).toContain("label: `recall search ${repo}`");
+    expect(sweepSrc.match(/withGhRetry\(/g) ?? []).toHaveLength(2);
+    // Pass 3 P1: recall enumeration must FAIL THE RUN after retries — the old degrade-to-[]
+    // catch ("will retry next run") silently skipped a whole repo's recall pass.
+    expect(sweepSrc).not.toContain("recall-pass search failed");
+    // Pass 3 P2: transient exhaustion in the list-scan counts as a degraded decision read.
+    expect(sweepSrc).toContain("if (isTransientGhFailure(err)) unitSkipsTransient++;");
+  });
 });

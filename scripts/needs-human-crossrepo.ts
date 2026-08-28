@@ -271,6 +271,14 @@ function twinCandidatesViaList(target: string): { candidates: TwinCandidate[]; f
     const parsed = JSON.parse(out) as TwinRef[];
     return { candidates: Array.isArray(parsed) ? parsed : [], failed: false };
   } catch (err) {
+    // Post-retry transient exhaustion here becomes check-failed → the caller's unit skip,
+    // so count it toward the degraded-decision-read summary like every other transient
+    // unit skip (codex review pass 3 P2). check-failed RETURNS rather than throws, so the
+    // unit boundaries' own transient catches can never double-count the same failure; and
+    // findTwin's only call sites are the two per-unit ones, so one increment == one
+    // skipped unit. Non-transient failures (403/422/parse) stay uncounted — those are
+    // check-failed for a reason retries can't fix, not degradation.
+    if (isTransientGhFailure(err)) unitSkipsTransient++;
     console.log(
       `    [warn] gh issue list fallback failed for ${target}: ${describeError(err)} — treating the twin-existence check as INCONCLUSIVE, not "no twin"`,
     );
@@ -696,14 +704,19 @@ function processIssue(
  *      plant-test issues #1656/#1657).
  */
 function searchCrossRepoRoutedOrigins(repo: string): IssueRow[] {
-  try {
-    const out = gh(["search", "issues", "--repo", repo, "needs-human-crossrepo", "in:comments", "--json", "number,title", "--limit", "1000"]);
-    const parsed = JSON.parse(out) as IssueRow[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    console.log(`  [warn] recall-pass search failed for ${repo}: ${describeError(err)} — will retry next run`);
-    return [];
-  }
+  // ENUMERATION, so it fails the run (codex review pass 3 P1 of the #158 retry layer): an
+  // earlier version caught every failure here and returned [] "will retry next run" —
+  // which meant a transient OR persistent recall-search outage silently skipped a whole
+  // repo's recall pass while the run exited 0 (the Rule #456 quiet-channel shape). Now:
+  // transient failures get withGhRetry's bounded attempts; anything surviving them
+  // propagates loudly so the #358 consecutive-failure escalation still fires — the same
+  // contract as the label-based enumeration in main()/runOrphanTwinCleanup.
+  const out = withGhRetry(
+    () => gh(["search", "issues", "--repo", repo, "needs-human-crossrepo", "in:comments", "--json", "number,title", "--limit", "1000"]),
+    { label: `recall search ${repo}` },
+  );
+  const parsed = JSON.parse(out) as IssueRow[];
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 /**
