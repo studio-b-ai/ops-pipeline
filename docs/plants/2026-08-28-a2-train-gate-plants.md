@@ -26,3 +26,4 @@ refusal). The PR is then closed by hand; receipts recorded below by follow-up.
 - Plant 2: _pending — filled by the follow-up edit after plant 2 runs_
 
 <!-- plant-2 vehicle: first commit — the authorizing label lands on THIS sha -->
+<!-- plant-2: second commit — pushed AFTER the label event; this is the staleness -->
