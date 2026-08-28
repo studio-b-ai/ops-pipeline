@@ -1,0 +1,119 @@
+name: Train-ready auto-merge sweep
+
+# ops#190 rung A2 — the FIRST caller of the A-side `train:ready` label-authority
+# gate (docs/plans/2026-08-28-automerge-b-plus-a-v2.md §3, rollout §6: "ops-pipeline
+# self-caller first"). A human with merge authority (MERGE_AUTHORITY_LOGINS,
+# initially kbibelhausen) applies `train:ready` to a PR; this sweep evaluates it
+# through evaluateTrainReady (scripts/pr-automerge-gate.ts): GraphQL-attributed
+# LabeledEvent authority (never comment text, never timestamps) → merge-readiness +
+# CI rollup → independent Claude Sonnet 5 review (exactly CLEAN) → snapshot +
+# authority revalidate → SHA-pinned merge. Every doubt anywhere resolves to "wait"
+# (a refusal is ordinary operation, telemetry-line only); `train:hold` blocks
+# unconditionally; a commit/force-push AFTER the authorizing label event strips the
+# label (stale-label removal) with a write-only receipt.
+#
+# This caller is TRAIN-ONLY: ops-pipeline has no squasher (`bugsquasher`) caller and
+# this workflow does not add one — the squasher fleet rollout is a separate,
+# per-repo decision (see the five existing caller repos). One repo, one sweep shape.
+#
+# TRIGGER SHAPE — scheduled sweep (ops-pipeline#23): a `pull_request` run's own
+# check sits inside the very rollup the gate evaluates (self-invalidating), and
+# `check_suite` never fires for Actions-produced suites (recursion prevention).
+# A `schedule` run's checks attach to main's sha and can never enter a PR's rollup.
+# `label`-event triggers were considered and rejected for the same family of
+# reasons: the gate re-derives authority from the timeline every cycle anyway
+# (doc §1 — events are inputs, comments/receipts are outputs), so a sweep loses
+# nothing but latency, and the workflow_dispatch below covers "evaluate NOW".
+#
+# `actions: read` is REQUIRED (ops-pipeline#19): the gate traverses
+# checkSuite.workflowRun — an ACTIONS resource — via `gh pr view --json
+# statusCheckRollup`; without it the gate fails closed on every PR, structurally
+# inert. Do not remove it.
+#
+# This gate is DEPLOYED-UNPROVEN until its planted known-good MERGES via this sweep
+# and a planted known-bad (label-then-push staleness) is refused with the label
+# stripped (Rules #464/#471 — both-direction plants, doc §5 "A2 each caller").
+# SLA supported: merges within ~1-2h of the label landing (#356 cron lateness).
+
+on:
+  schedule:
+    # Staggered fleet minutes (:17 bolt, :23 studiob, :29 price-sync, :35
+    # trade-theme, :47 portal), off :00/:30 peaks (#298). ops-pipeline takes :41.
+    - cron: "41 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Optional: evaluate ONLY this PR number instead of sweeping every open train:ready PR."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: read
+
+concurrency:
+  group: train-ready-sweep-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  determine-prs:
+    name: "Determine which PRs to evaluate"
+    runs-on: ubuntu-latest
+    outputs:
+      prs: ${{ steps.list.outputs.prs }}
+    steps:
+      - name: List target PR number(s)
+        id: list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          ONLY_PR: ${{ inputs.pr_number }}
+          MAX_FANOUT: "20"
+        run: |
+          set -euo pipefail
+          if [ -n "${ONLY_PR:-}" ]; then
+            # Validate before interpolating into the matrix JSON (codex P3, A2
+            # review pass 1): "1,2" would silently fan out to two PRs and any
+            # non-numeric value reds the run before the gate ever executes —
+            # "evaluate ONLY this PR" means exactly one positive integer.
+            if ! printf '%s' "$ONLY_PR" | grep -qE '^[1-9][0-9]*$'; then
+              echo "::error::pr_number must be a single positive integer, got: ${ONLY_PR}"
+              exit 1
+            fi
+            echo "Manual dispatch scoped to a single PR: #${ONLY_PR}"
+            echo "prs=[${ONLY_PR}]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Enumerate by label ONLY — `train:hold`, authority, staleness, CI, and
+          # review are all the GATE's legs (it is the single authority; filtering
+          # them here would just hide refusal receipts). Re-list at evaluation time
+          # (Rule #182); --limit 100 because gh pr list defaults to 30 and
+          # truncates silently (Rule #331).
+          ALL=$(gh pr list --repo "$REPO" --state open --label "train:ready" --limit 100 --json number --jq '[.[].number]')
+          N=$(printf '%s' "$ALL" | jq 'length')
+          echo "Sweep found ${N} open train:ready PR(s)."
+          if [ "$N" -gt "$MAX_FANOUT" ]; then
+            echo "::warning::train:ready sweep capped at ${MAX_FANOUT} of ${N} open labeled PRs; $((N - MAX_FANOUT)) NOT evaluated this cycle (re-listed next sweep)."
+            ALL=$(printf '%s' "$ALL" | jq -c ".[:${MAX_FANOUT}]")
+          fi
+          echo "prs=$(printf '%s' "$ALL" | jq -c .)" >> "$GITHUB_OUTPUT"
+
+  evaluate:
+    name: "Evaluate train:ready gate"
+    needs: determine-prs
+    # Implicit success() is the wanted semantic (#320 considered): a failed
+    # listing must not fall through into evaluation.
+    if: needs.determine-prs.outputs.prs != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        pr_number: ${{ fromJson(needs.determine-prs.outputs.prs) }}
+    uses: ./.github/workflows/squasher-automerge.yml
+    with:
+      repo: ${{ github.repository }}
+      pr_number: ${{ matrix.pr_number }}
+      train_ready: true
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

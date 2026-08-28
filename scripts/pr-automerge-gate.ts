@@ -572,8 +572,9 @@ function logTrainGateLine(repo: string, pr: number, outcome: TrainReadyOutcome, 
  *   - "stale-label-removed": doc §3.1 step 3 — a commit/force-push landed after the
  *     authorizing LabeledEvent. `train:ready` is stripped and a write-only receipt is
  *     posted (`removeStaleReadyLabel` + `postAuthorityReceipt`). Never merges.
- *   - "refused": any other fail-closed leg (no label, hold present, bot/unauthorized
- *     actor, truncated/empty timeline, an unexpected fetch/API error, CI not clean,
+ *   - "refused": any other fail-closed leg (not merge-ready — draft/closed/behind/CI
+ *     rollup not clean — no label, hold present, bot/unauthorized actor,
+ *     truncated/empty timeline, an unexpected fetch/API error,
  *     review FLAG, or revalidate drift). No PR comment — matches `evaluate()`'s own
  *     convention of a receipt ONLY on an actionable state transition (merge, or here,
  *     stale-label removal), not on every ordinary "this PR isn't ready yet" cycle.
@@ -598,6 +599,25 @@ export async function evaluateTrainReady(repo: string, pr: number, opts: TrainRe
 
 async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainReadyOptions): Promise<TrainReadyResult> {
   const prJson = fetchPr(repo, pr);
+
+  // ── Cheap structural fast-path (ops#190 A2; scope narrowed in codex pass 2) ──
+  // A closed/merged or draft PR refuses immediately — before the timeline fetch and
+  // (critically) before the review leg's model spend: the "drafts caught cheaply
+  // before diff-fetch/review spend" wiring the A1 breadcrumb on ops#190 called for.
+  // ONLY these two facts short-circuit here. CI/mergeStateStatus deliberately do
+  // NOT (codex P2, A2 pass 2): a label-then-push staleness typically leaves CI
+  // pending/red on the NEW sha, and refusing on CI before the authority leg would
+  // leave the stale `train:ready` in place indefinitely — doc §3.1 step 3's
+  // stale-label removal must run regardless of CI state, so the full readiness
+  // check lives AFTER the authority leg below. A draft with a stale label defers
+  // its strip until the PR leaves draft (a draft cannot merge; next cycle's full
+  // authority predicate strips then) — fail-closed at both points.
+  if (prJson.state !== "OPEN" || prJson.isDraft) {
+    const detail = `not evaluable (state=${prJson.state} isDraft=${prJson.isDraft})`;
+    logTrainGateLine(repo, pr, "refused", detail);
+    return { outcome: "refused", detail };
+  }
+
   const currentLabels = prJson.labels.map((l) => l.name);
 
   const timelineFetch: { timeline: AuthorityTimelineItem[]; truncated: boolean } = fetchAuthorityTimeline(repo, pr);
@@ -681,15 +701,30 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     return { outcome: "refused", detail: verdict.detail };
   }
 
-  // ── CI leg (doc §3.1 step 4, rollup-green half only) ──
-  // TODO(A2 or later rung): named-check enforcement — "where the repo config names
-  // `required_check_names`, each named check present with conclusion SUCCESS on the
-  // head sha" — needs a per-repo config surface this rung does not introduce (brief:
-  // "Named-check enforcement (§3.1(4))... LATER rungs — TODO markers only for A1").
-  // isRollupClean is existing substrate (automerge-classify.ts) and IS enforced now.
-  const ciClean = isRollupClean(prJson.statusCheckRollup);
-  if (!ciClean) {
-    const detail = "CI rollup not clean (isRollupClean === false)";
+  // ── Merge-readiness + CI leg (doc §3.1 step 4; ops#190 A2) ──
+  // `evaluateMergeReadiness` (the same pure predicate the squasher path uses) folds
+  // state==OPEN, !isDraft, mergeStateStatus==CLEAN and the CI rollup into one
+  // check. Placed AFTER the authority leg deliberately (codex P2, A2 pass 2): the
+  // stale-label branch above must run regardless of CI state — a label-then-push
+  // typically leaves CI pending/red on the new sha, and refusing on CI first would
+  // leave the stale `train:ready` in place indefinitely. Placed BEFORE the review
+  // leg so red/pending CI still refuses before the model spend. state/isDraft are
+  // re-checked here (already true via the fast-path above) — harmless, and keeps
+  // this call the single authoritative readiness predicate rather than a
+  // hand-rolled half.
+  //
+  // TODO(later rung, with B1's per-repo config surface): named-check enforcement —
+  // "where the repo config names `required_check_names`, each named check present
+  // with conclusion SUCCESS on the head sha". isRollupClean (rollup-green half) IS
+  // enforced now via evaluateMergeReadiness's ciClean input.
+  const readiness = evaluateMergeReadiness({
+    state: prJson.state,
+    isDraft: prJson.isDraft,
+    ciClean: isRollupClean(prJson.statusCheckRollup),
+    mergeStateStatus: prJson.mergeStateStatus,
+  });
+  if (!readiness.ready) {
+    const detail = `not merge-ready (${readiness.detail})`;
     logTrainGateLine(repo, pr, "refused", detail);
     return { outcome: "refused", detail };
   }
@@ -793,7 +828,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     "| Leg | Result |",
     "|---|---|",
     `| authority (label-authority v2, revalidated pre-merge) | ✅ authorized by \`${revalidateVerdict.authorizingEvent.actorLogin}\` (timeline position ${revalidateVerdict.authorizingEvent.position}) |`,
-    "| CI rollup clean | ✅ |",
+    "| merge-ready (OPEN, not draft, mergeStateStatus CLEAN) + CI rollup clean | ✅ |",
     "| independent review (Claude Sonnet 5) | ✅ CLEAN |",
     "| revalidate: PR snapshot (labels/sha/state/mergeStateStatus) | ✅ no drift |",
     "| revalidate: authority timeline re-check | ✅ still authorized |",
@@ -818,7 +853,19 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
  * misconfiguration/bug worth a red CI run), not swallowed into a silent "wait".
  */
 async function main(): Promise<void> {
-  const { repo, pr, enabledClasses, sensitivePathPatterns } = parseArgs(process.argv.slice(2));
+  const { repo, pr, enabledClasses, sensitivePathPatterns, trainReady } = parseArgs(process.argv.slice(2));
+  // ops#190 rung A2: `--train-ready` routes to the A-side label-authority gate.
+  // `evaluateTrainReady` NEVER throws (its wrapper is the fail-closed catch-all —
+  // every outcome, including unexpected errors, resolves to a refusal with its own
+  // `[train-gate-receipt]` telemetry line), so all four outcomes exit 0: a refusal
+  // is ordinary ongoing operation (doc §3.1 "retry next cycle"), not a red CI run.
+  // The squasher path's `[gate-receipt] verdict=missed leg=other` crash contract
+  // below is deliberately NOT extended here — that vocabulary is typed to the
+  // B-side gate's leg shape (see logTrainGateLine's own rationale).
+  if (trainReady) {
+    await evaluateTrainReady(repo, pr);
+    return;
+  }
   try {
     await evaluate(repo, pr, enabledClasses, sensitivePathPatterns);
   } catch (err) {
