@@ -17,6 +17,7 @@ Daily (GitHub Actions cron, 14:00 UTC), for each item in [`credentials.manifest.
    | `github-pat-finegrained` | `api.github.com/octocat` → `github-authentication-token-expiration` header (classic PATs emit none → flagged non-expiring) |
    | `npm-granular` | `registry.npmjs.org/-/whoami` → alive/dead (countdown from `recorded_expiry`) |
    | `entra-client-secret` | Graph `applications(appId=…)?$select=passwordCredentials` → the pinned secret's `endDateTime` (by `app_secret_key_id`), else app-level min future |
+   | `entra-user-password` | Graph `GET /users/{user_id}?$select=accountEnabled,lastPasswordChangeDateTime,passwordPolicies` → aliveness (accountEnabled); pw-change date surfaced in the run log; never reads the password value |
    | `1password-sa` | `op vault list` → alive/dead (countdown from `recorded_expiry`) |
    | `cloudflare-api-token` | `api.cloudflare.com/client/v4/user/tokens/verify` → `status` alive/dead (countdown from `recorded_expiry`; verify returns no expiry) |
    | `tls-cert` | `node:tls` peer cert `notAfter` |
@@ -61,7 +62,9 @@ ops-pipeline currently holds **zero** repo secrets, so all of these must be set:
    ```
    (Rule #98 — direct `--body`, never stdin.)
 2. **(Optional) Entra Graph probe identity** (`Application.Read.All`) for the EXO-secret item; absent ⇒
-   that item degrades to `PROBE_FAILED` (flagged, not silent):
+   that item degrades to `PROBE_FAILED` (flagged, not silent). `entra-user-password` additionally
+   needs `User.Read.All` (application) admin-consented on the same identity; absent ⇒ that row
+   degrades to `PROBE_FAILED` naming the missing grant:
    ```bash
    gh secret set ENTRA_TENANT_ID    --repo studio-b-ai/ops-pipeline --body "$ENTRA_TENANT_ID"
    gh secret set ENTRA_CLIENT_ID    --repo studio-b-ai/ops-pipeline --body "$ENTRA_CLIENT_ID"
