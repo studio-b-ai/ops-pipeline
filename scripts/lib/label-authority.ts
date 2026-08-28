@@ -469,6 +469,43 @@ export function fetchAuthorityTimeline(repo: string, prNumber: number): { timeli
       // than silently drop or mis-map it into the wrong bucket (Rule #4).
       throw new Error(`fetchAuthorityTimeline: unrecognized timeline node __typename "${node.__typename}" for ${repo}#${prNumber}`);
     }
+
+    // Per-node shape validation (codex P1, ops#190 A1 review pass 2): the
+    // connection-level `nodes`/`totalCount` check above only proves the ENVELOPE is
+    // trustworthy — it says nothing about each individual node's `label`/`actor`
+    // sub-object, which the `as GraphQLTimelineResponse` cast also never
+    // runtime-checks. A LABELED/UNLABELED node with a missing or non-string
+    // `label.name` would silently map to `label: undefined` below, which
+    // `evaluateLabelAuthority`'s walk cannot distinguish from "an event for some
+    // other, irrelevant label" — it would simply skip a node that might actually
+    // have been an unauthorized relabel of `train:ready` this function failed to
+    // parse, leaving an EARLIER (possibly stale) authorized event looking like the
+    // surviving authorization. A LABELED node additionally needs a trustworthy
+    // `actor.login` — an actor-less LabeledEvent can never correctly pass the
+    // roster/bot check, so it must be refused outright rather than silently treated
+    // as "no actor, so ignore." UNLABELED events don't need a trustworthy actor:
+    // removing a label only ever narrows authorization regardless of who removed
+    // it, so an untrustworthy actor there isn't security-relevant — only requiring
+    // `label.name` there (not `actor.login`) avoids over-refusing on a field the
+    // predicate doesn't rely on for that event type (Rule #4: refuse on doubt about
+    // what's SECURITY-RELEVANT, not on every optional field the query happens to ask
+    // for). `PULL_REQUEST_COMMIT`/`HEAD_REF_FORCE_PUSHED` nodes carry neither field
+    // per the query's fragment selection above, so neither check applies to them.
+    if (type === "LABELED" || type === "UNLABELED") {
+      if (typeof node.label?.name !== "string" || node.label.name.length === 0) {
+        throw new Error(
+          `fetchAuthorityTimeline: timeline node at position ${index} (${node.__typename}) has a ` +
+            `missing or non-string "label.name" for ${repo}#${prNumber}: ${out.slice(0, 500)}`,
+        );
+      }
+    }
+    if (type === "LABELED" && (typeof node.actor?.login !== "string" || node.actor.login.length === 0)) {
+      throw new Error(
+        `fetchAuthorityTimeline: LabeledEvent node at position ${index} has a missing or non-string ` +
+          `"actor.login" for ${repo}#${prNumber}: ${out.slice(0, 500)}`,
+      );
+    }
+
     return {
       type,
       label: node.label?.name ?? undefined,

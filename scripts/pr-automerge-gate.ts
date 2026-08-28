@@ -77,7 +77,6 @@ import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 import {
-  TRAIN_READY_LABEL,
   resolveAuthorityLogins,
   evaluateLabelAuthority,
   fetchAuthorityTimeline,
@@ -612,37 +611,58 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
 
   if (!verdict.authorized) {
     if (verdict.reason === "stale-label") {
-      // TS control-flow-analysis note (same documented instance as
-      // label-authority.test.ts): narrowing `verdict.reason` via this equality check
-      // narrows that EXPRESSION for direct reads, but does not retroactively narrow
-      // the WHOLE `verdict` object's assignability to the plain
-      // StaleLabelAuthorityVerdict interface once the union has already collapsed to
-      // one member (discriminated-union narrowing no longer applies with one member
-      // left). Runtime-verified by the `if` immediately above; this cast is
-      // post-verified, not blind.
-      const staleVerdict = verdict as StaleLabelAuthorityVerdict;
-      // P2 hardening (codex, ops#190 A1 review): re-confirm `train:ready` is still
-      // present with a fresh fetch immediately before removing, rather than trusting
-      // the fetch from the top of this function. This narrows — GitHub's label API
-      // offers no compare-and-swap, so it cannot fully eliminate — the window in
-      // which a human could have already re-applied `train:ready` (a fresh,
-      // currently-authorized labeling) between this function's initial read and the
-      // removal call. Same residual CLASS doc §3.1 already accepts for the
-      // revalidate-to-merge gap, applied here to the removal path. If the label is
-      // already gone (another cycle beat us to it, or a human removed it directly),
-      // there is nothing left to remove — refuse without a side effect rather than
-      // call `removeStaleReadyLabel` against a label that isn't there.
+      // P2 hardening (codex, ops#190 A1 review — TWO passes: pass 1's first attempt
+      // only re-checked label PRESENCE, which pass 2 correctly flagged as
+      // insufficient). Re-run the FULL authority predicate from a fresh fetch
+      // immediately before removing, rather than trusting the verdict computed at the
+      // top of this function OR merely re-checking that the label name is still
+      // present. A presence-only check is not enough: a human removing-then-
+      // reapplying `train:ready` in the gap leaves the label NAME present again, but
+      // the event that now actually authorizes it may be a fresh, currently-valid
+      // labeling — a presence check alone would still remove it, incorrectly
+      // stripping a legitimate re-authorization. Re-running the whole predicate (the
+      // same fix shape already applied to the merge-side revalidate re-check above)
+      // is what actually detects that. This narrows — GitHub's label API offers no
+      // compare-and-swap, so it cannot fully eliminate — the window between this
+      // re-check and the removal call landing; that residual is the same CLASS doc
+      // §3.1 already accepts for the revalidate-to-merge gap.
+      const recheckTimelineFetch = fetchAuthorityTimeline(repo, pr);
       const recheckPr = fetchPr(repo, pr);
-      const stillPresent = recheckPr.labels.some((l) => l.name === TRAIN_READY_LABEL);
-      if (!stillPresent) {
-        const detail = "stale-label: train:ready already absent on re-check immediately before removal — nothing to do";
+      const recheckVerdict = evaluateLabelAuthority({
+        currentLabels: recheckPr.labels.map((l) => l.name),
+        timeline: recheckTimelineFetch.timeline,
+        authorityLogins,
+        truncated: recheckTimelineFetch.truncated,
+      });
+      if (recheckVerdict.authorized) {
+        const detail =
+          "stale-label: no longer stale on fresh re-evaluation immediately before removal " +
+          "(now authorized) — nothing to do";
         logTrainGateLine(repo, pr, "refused", detail);
         return { outcome: "refused", detail };
       }
+      if (recheckVerdict.reason !== "stale-label") {
+        const detail =
+          `stale-label: fresh re-evaluation immediately before removal now refuses for a ` +
+          `different reason (${recheckVerdict.reason}: ${recheckVerdict.detail}) — nothing to remove`;
+        logTrainGateLine(repo, pr, "refused", detail);
+        return { outcome: "refused", detail };
+      }
+      // TS control-flow-analysis note (same documented instance as
+      // label-authority.test.ts and the two checks immediately above): narrowing
+      // `recheckVerdict.reason` via this equality check narrows that EXPRESSION for
+      // direct reads, but does not retroactively narrow the WHOLE `recheckVerdict`
+      // object's assignability to the plain StaleLabelAuthorityVerdict interface once
+      // the union has already collapsed to one member (discriminated-union narrowing
+      // no longer applies with one member left, and the plain interface isn't
+      // `Extract<>`-derived from the union). Runtime-verified by the two checks
+      // immediately above (`authorized` false via the first, `reason` matched via the
+      // second); this cast is post-verified, not blind.
+      const staleVerdict = recheckVerdict as StaleLabelAuthorityVerdict;
       removeStaleReadyLabel(repo, pr);
       postAuthorityReceipt(repo, pr, formatStaleLabelRemovalReceipt(staleVerdict, prJson.headRefOid));
-      logTrainGateLine(repo, pr, "stale-label-removed", verdict.detail);
-      return { outcome: "stale-label-removed", detail: verdict.detail };
+      logTrainGateLine(repo, pr, "stale-label-removed", recheckVerdict.detail);
+      return { outcome: "stale-label-removed", detail: recheckVerdict.detail };
     }
     logTrainGateLine(repo, pr, "refused", `${verdict.reason}: ${verdict.detail}`);
     return { outcome: "refused", detail: verdict.detail };
