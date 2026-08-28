@@ -61,7 +61,7 @@ function sleepSync(ms: number): void {
 }
 
 export interface GhRetryOptions {
-  /** Total attempts including the first (default 3). */
+  /** Total attempts including the first (default 3; clamped to [1, 3] — see withGhRetry). */
   attempts?: number;
   /** Injectable for tests — defaults to a real blocking sleep. */
   sleep?: (ms: number) => void;
@@ -82,7 +82,10 @@ export interface GhRetryOptions {
  * on the next scheduled run instead.
  */
 export function withGhRetry<T>(fn: () => T, opts: GhRetryOptions = {}): T {
-  const attempts = opts.attempts ?? 3;
+  // "≤3 attempts" is the public contract, not a default (codex review pass 1 P2): clamp so
+  // a future caller passing a big number can't quietly turn this into an unbounded hammer
+  // against an already-degraded GitHub (and 0/negative can't skip the call entirely).
+  const attempts = Math.max(1, Math.min(3, opts.attempts ?? 3));
   const sleep = opts.sleep ?? sleepSync;
   let lastErr: unknown;
   for (let attempt = 1; attempt <= attempts; attempt++) {

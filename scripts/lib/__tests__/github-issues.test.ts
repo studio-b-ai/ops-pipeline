@@ -163,6 +163,28 @@ describe("withGhRetry", () => {
     expect(result).toBe(42);
     expect(sleeps).toHaveLength(0);
   });
+
+  it("attempts above the contract ceiling are clamped to 3 (codex review pass 1 P2)", () => {
+    let calls = 0;
+    expect(() =>
+      withGhRetry(() => {
+        calls++;
+        throw ghError("gh: Bad Gateway (HTTP 502)");
+      }, { ...noSleep, attempts: 99 }),
+    ).toThrow();
+    expect(calls).toBe(3);
+  });
+
+  it("attempts of 0 clamps up to 1 — the call always runs at least once", () => {
+    let calls = 0;
+    expect(() =>
+      withGhRetry(() => {
+        calls++;
+        throw ghError("gh: Bad Gateway (HTTP 502)");
+      }, { ...noSleep, attempts: 0 }),
+    ).toThrow();
+    expect(calls).toBe(1);
+  });
 });
 
 /**
