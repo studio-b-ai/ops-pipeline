@@ -13,13 +13,23 @@
  *
  * RUNG 0 (dry-run scheduling) is what this worker has always done: `--fire` is not a real mode
  * yet — it throws immediately, unconditionally (rung 3, the actual merge, is not built). RUNG 1
- * (ops-pipeline#172, this build) kills v1's D1 defect in ticket assembly: `train:ready` authority
- * now comes from GitHub-attributed GraphQL timeline events (label-authority.ts), never a
- * parseable comment body, and a STALE label (a push landing after the authorizing label) is
- * stripped + receipted rather than silently excluded. This worker still never merges and never
- * touches branch protection; it now DOES edit a PR's labels (strip a stale `train:ready`) and
- * comment on PRs beyond `--target`, both strictly narrower than a merge and both gated behind
- * `--post`.
+ * (ops-pipeline#172, this build) adds two things on top of rung 0's scheduling, both strictly
+ * narrower than a merge and both gated behind `--post` like everything else this worker writes:
+ *
+ *   (1) Leg A kills v1's D1 defect in ticket assembly: `train:ready` authority now comes from
+ *       GitHub-attributed GraphQL timeline events (label-authority.ts), never a parseable comment
+ *       body, and a STALE label (a push landing after the authorizing label) is stripped +
+ *       receipted — with the receipt posted on the TICKET'S OWN PR, not `--target` — rather than
+ *       silently excluded.
+ *   (2) Leg B, run via `--page` (see Flags below): once the queue head's window is CLEAR, nothing
+ *       is in flight (no un-cleared prior CLICK DUE), and its CI rollup is green, the worker posts
+ *       ONE `CLICK DUE` comment on the queue-head PR itself (+ a mirror on `--target`) telling a
+ *       human to click merge; a red/pending rollup posts a HELD-style deduped line instead
+ *       (Rule #89: never page a human to a red-CI PR). See `maybePage` below.
+ *
+ * This worker still never merges and never touches branch protection; it now DOES edit a PR's
+ * labels (strip a stale `train:ready`) and comment on PRs beyond `--target` (Leg A's stale-label
+ * receipts, Leg B's CLICK DUE) — never on client-asthetik#280, which stays a READ-ONLY source.
  *
  * Facts built per run:
  *   1. client-asthetik Actions: the most recent `deploy / Deploy to production` job with
@@ -64,6 +74,13 @@
  *                 App's now-granted pull_requests/checks/actions scopes, landed 2026-08-19
  *                 ~21:52Z) was this worker's first real post, per Rule #464 (a guard's first live
  *                 firing is part of its ship).
+ *   --page        Default false, independent of `--post` (Leg B, ops-pipeline#172). Turns on the
+ *                 CLICK DUE paging check (`maybePage`, below) — omitting it leaves this worker at
+ *                 exactly its Leg-A-only behavior (scheduling + label authority, no paging). Like
+ *                 every other write this worker makes, an actual CLICK DUE/HELD post additionally
+ *                 requires `--post`; `--page` alone only logs what WOULD have been posted. Wired
+ *                 unconditionally into the cron invocation (heritage-restart-train.yml) — `--page`
+ *                 turns the CHECK on, it never bypasses any gate inside `maybePage`.
  *
  * Hold check runs FIRST, before any fact-building: `train:hold` label on --target OR env
  * HERITAGE_TRAIN_HOLD=1 → (if --post) post exactly one `HELD` line, deduped against the target's
