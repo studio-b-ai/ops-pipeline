@@ -381,6 +381,24 @@ function createBranch(repo: string, branch: string, fromCommitSha: string): void
 }
 
 /**
+ * The ledger label must exist on the TARGET repo before `gh pr create --label` runs —
+ * a missing label fails the ENTIRE create ("could not add label: 'x' not found"), which
+ * killed run 33219060614 at the last step, after the branch write had already landed
+ * (Rule #159: the missing-label failure class becomes a code guard). Idempotent: an
+ * "already exists" response is success; any other failure still propagates.
+ */
+function ensureLabel(repo: string, label: string): void {
+  try {
+    gh(["label", "create", label, "--repo", repo, "--color", "0e8a16", "--description", "Automated weekly SHIPPED.md ledger PRs (ops-pipeline shipped-ledger-worker)"]);
+    console.log(`[shipped-ledger] created label "${label}" on ${repo}.`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/already exists/i.test(msg)) return;
+    throw err;
+  }
+}
+
+/**
  * Writes `text` to a fresh private temp file and hands its path to `use`, removing the temp
  * dir afterward regardless of outcome. Every large payload handed to `gh` goes through here
  * so argv stays small at any ledger size — Linux caps a SINGLE argv entry at 128KiB
@@ -509,6 +527,7 @@ async function applyToLedgerRepo(config: LedgerConfig, parsedLedger: ParsedLedge
       "Automated weekly backfill (ops-pipeline#162). Never auto-merged (#97) — a human (CoS/Kevin) reviews and merges.",
       table,
     );
+    ensureLabel(repo, label);
     withTempFile("shipped-ledger-body-", body, (bodyFile) => {
       gh([
         "pr", "create", "--repo", repo, "--base", "main", "--head", branch,
