@@ -129,6 +129,7 @@ import {
   getCommentReactions,
   isTransientGhFailure,
   listIssueComments,
+  withGhRetry,
   listIssuesByLabel,
   removeLabel,
   type IssueComment,
@@ -145,6 +146,7 @@ import {
   twinTitlePrefix,
   type CrossRepoDisposition,
   type TwinCandidate,
+  type TwinPointer,
 } from "./lib/needs-human-crossrepo-lib.js";
 import { createAuthorizedReactorChecker } from "./lib/needs-human-authorization.js";
 import { parseProbeRouting, PROBE_MARKER } from "./lib/needs-human-probe-lib.js";
@@ -258,7 +260,14 @@ function twinCandidatesViaSearch(target: string, prefix: string): TwinCandidate[
  * creation (codex review pass 1 P2 — "Fail closed when the list-scan twin check fails"). */
 function twinCandidatesViaList(target: string): { candidates: TwinCandidate[]; failed: boolean } {
   try {
-    const out = gh(["issue", "list", "--repo", target, "--state", "all", "--limit", "1000", "--json", "number,title,url"]);
+    // Retried (codex review pass 2 P2): this is the AUTHORITATIVE half of the twin check,
+    // so a single transient 5xx must not immediately become "check-failed"/skip when three
+    // bounded attempts would have answered. The catch below still applies AFTER retries
+    // exhaust — the check-failed contract is unchanged, it just triggers less often.
+    const out = withGhRetry(
+      () => gh(["issue", "list", "--repo", target, "--state", "all", "--limit", "1000", "--json", "number,title,url"]),
+      { label: `twin list-scan ${target}` },
+    );
     const parsed = JSON.parse(out) as TwinRef[];
     return { candidates: Array.isArray(parsed) ? parsed : [], failed: false };
   } catch (err) {
@@ -787,15 +796,18 @@ function runRecallPass(repo: string, dryRun: boolean, isAuthorizedReactor: (logi
   console.log(`[crossrepo] ${repo}: ${candidates.length} issue(s) ever cross-repo-routed by this sweep — recall pass.`);
 
   for (const issue of candidates) {
-    // ops-pipeline#158 per-unit transient boundary — the WHOLE iteration rides one degrade
-    // (unlike processIssue, no read/write split is needed here: the only mutations are
-    // closeIfOpen calls, which pre-check state and are idempotent across runs, so a
-    // transient escape mid-sequence safely re-resolves from scratch next run).
+    // ops-pipeline#158 per-unit transient boundary — READS ONLY, same split as
+    // processIssue (codex review pass 2 P1: an earlier draft wrapped the whole iteration,
+    // which would have swallowed a transient failure from the closeIfOpen MUTATIONS below
+    // as a mere unit skip — a systemic GitHub-write outage would then exit 0 as a
+    // "degraded" run instead of failing loud and tripping the #358 escalation).
+    let pointer: TwinPointer | null = null;
+    let disapproval = false;
     try {
       const comments = listIssueComments(repo, issue.number);
       const trusted = trustedComments(comments);
       const routeComment = findLast(trusted, ROUTE_RECEIPT_MARKER);
-      const pointer = routeComment ? extractTwinPointer(routeComment.body) : null;
+      pointer = routeComment ? extractTwinPointer(routeComment.body) : null;
       if (!pointer) continue; // search false-positive (marker text quoted/discussed elsewhere) or a same-repo-router receipt — not this sweep's to act on
 
       // Defense-in-depth (codex review pass 4 P2 — "Enforce the allowlist before recall
@@ -818,42 +830,45 @@ function runRecallPass(repo: string, dryRun: boolean, isAuthorizedReactor: (logi
         continue;
       }
 
-      const disapproval = resolveDisapproval(repo, comments, isAuthorizedReactor);
-      const recallResult = crossRepoRecallDisposition({ hasCrossRepoRouteReceipt: true, hasAuthorizedDisapproval: disapproval });
-      if (recallResult.kind === "none") {
-        dispositions.push({ kind: "skip" });
-        continue;
-      }
-
-      const head = `  [recall:${shortRepoName(repo)}] #${issue.number} "${truncate(issue.title, 70)}"`;
-      if (dryRun) {
-        console.log(`${head}  SWEEP-REJECT (recall) -> would close origin + twin ${shortRepoName(pointer.target)}#${pointer.number} (either may already be closed) [PREVIEW — would apply]`);
-        dispositions.push({ kind: "close-rejected", target: pointer.target, twinExists: true });
-        continue;
-      }
-      // Both results checked for "check-failed" (codex review pass 4 P1) — see closeIfOpen's
-      // doc comment: an inconclusive state check must abort the rest of the sequence, never
-      // be read as permission to proceed.
-      const twinResult = closeIfOpen(pointer.target, pointer.number, twinRecallCloseComment(repo, issue.number));
-      if (twinResult === "check-failed") {
-        console.log(`${head}  SWEEP-REJECT (recall) -> ABORTED: couldn't confirm the twin's current state — retried next run`);
-        dispositions.push({ kind: "skip" });
-        continue;
-      }
-      const originResult = closeIfOpen(repo, issue.number, crossRepoRejectReceipt(pointer.target, { number: pointer.number, url: issueUrl(pointer.target, pointer.number) }));
-      if (originResult === "check-failed") {
-        console.log(`${head}  SWEEP-REJECT (recall) -> twin handled, but couldn't confirm the ORIGIN's current state — retried next run`);
-        dispositions.push({ kind: "skip" });
-        continue;
-      }
-      console.log(`${head}  SWEEP-REJECT (recall) -> closed origin + twin ${shortRepoName(pointer.target)}#${pointer.number} (or already closed) [APPLIED]`);
-      dispositions.push({ kind: "close-rejected", target: pointer.target, twinExists: true });
+      disapproval = resolveDisapproval(repo, comments, isAuthorizedReactor);
     } catch (err) {
       if (!isTransientGhFailure(err)) throw err;
       unitSkipsTransient++;
       console.log(`  WARN [crossrepo] ${repo}#${issue.number}: thread/authorization reads failed after retries — recall unit SKIPPED this run`);
       dispositions.push({ kind: "skip" });
+      continue;
     }
+    if (!pointer) continue; // structurally unreachable (checked in the try) — re-establishes non-null narrowing across the try boundary
+
+    const recallResult = crossRepoRecallDisposition({ hasCrossRepoRouteReceipt: true, hasAuthorizedDisapproval: disapproval });
+    if (recallResult.kind === "none") {
+      dispositions.push({ kind: "skip" });
+      continue;
+    }
+
+    const head = `  [recall:${shortRepoName(repo)}] #${issue.number} "${truncate(issue.title, 70)}"`;
+    if (dryRun) {
+      console.log(`${head}  SWEEP-REJECT (recall) -> would close origin + twin ${shortRepoName(pointer.target)}#${pointer.number} (either may already be closed) [PREVIEW — would apply]`);
+      dispositions.push({ kind: "close-rejected", target: pointer.target, twinExists: true });
+      continue;
+    }
+    // Both results checked for "check-failed" (codex review pass 4 P1) — see closeIfOpen's
+    // doc comment: an inconclusive state check must abort the rest of the sequence, never
+    // be read as permission to proceed.
+    const twinResult = closeIfOpen(pointer.target, pointer.number, twinRecallCloseComment(repo, issue.number));
+    if (twinResult === "check-failed") {
+      console.log(`${head}  SWEEP-REJECT (recall) -> ABORTED: couldn't confirm the twin's current state — retried next run`);
+      dispositions.push({ kind: "skip" });
+      continue;
+    }
+    const originResult = closeIfOpen(repo, issue.number, crossRepoRejectReceipt(pointer.target, { number: pointer.number, url: issueUrl(pointer.target, pointer.number) }));
+    if (originResult === "check-failed") {
+      console.log(`${head}  SWEEP-REJECT (recall) -> twin handled, but couldn't confirm the ORIGIN's current state — retried next run`);
+      dispositions.push({ kind: "skip" });
+      continue;
+    }
+    console.log(`${head}  SWEEP-REJECT (recall) -> closed origin + twin ${shortRepoName(pointer.target)}#${pointer.number} (or already closed) [APPLIED]`);
+    dispositions.push({ kind: "close-rejected", target: pointer.target, twinExists: true });
   }
 
   return dispositions;
@@ -897,9 +912,11 @@ function runOrphanTwinCleanup(repo: string, dryRun: boolean, isAuthorizedReactor
 
   let handled = 0;
   for (const issue of closedLabeled) {
-    // ops-pipeline#158 per-unit transient boundary — whole-iteration wrap, same reasoning
-    // as the recall pass: the sole mutation (closeIfOpen) pre-checks state and is
-    // idempotent, so a transient escape anywhere in the unit safely re-runs from scratch.
+    // ops-pipeline#158 per-unit transient boundary — READS ONLY, same split as
+    // processIssue and the recall pass (codex review pass 2 P1): the closeIfOpen
+    // mutation below stays OUTSIDE so a transient write failure still fails the run loud.
+    let twinTarget: string | undefined;
+    let twinNumber: number | undefined;
     try {
       const comments = listIssueComments(repo, issue.number);
       const trusted = trustedComments(comments);
@@ -915,27 +932,31 @@ function runOrphanTwinCleanup(repo: string, dryRun: boolean, isAuthorizedReactor
 
       const lookup = findTwin(parsed.target, ownRepoShort, issue.number);
       if (lookup.kind !== "found") continue; // nothing orphaned to clean up (or the check was inconclusive — retried next run either way)
-
-      const head = `  [orphan:${ownRepoShort}] #${issue.number} "${truncate(issue.title, 70)}"`;
-      if (dryRun) {
-        console.log(`${head}  ORPHAN-CLEANUP -> would close orphaned twin ${shortRepoName(parsed.target)}#${lookup.twin.number} [PREVIEW — would apply]`);
-        handled++;
-        continue;
-      }
-      // Checked for "check-failed" (codex review pass 4 P1) — see closeIfOpen's doc
-      // comment: an inconclusive state check is never permission to count this as handled.
-      const result = closeIfOpen(parsed.target, lookup.twin.number, orphanedTwinCloseComment(repo, issue.number));
-      if (result === "check-failed") {
-        console.log(`${head}  ORPHAN-CLEANUP -> ABORTED: couldn't confirm the twin's current state — retried next run`);
-        continue;
-      }
-      console.log(`${head}  ORPHAN-CLEANUP -> closed orphaned twin ${shortRepoName(parsed.target)}#${lookup.twin.number} [APPLIED]`);
-      handled++;
+      twinTarget = parsed.target;
+      twinNumber = lookup.twin.number;
     } catch (err) {
       if (!isTransientGhFailure(err)) throw err;
       unitSkipsTransient++;
       console.log(`  WARN [crossrepo] ${repo}#${issue.number}: thread/authorization reads failed after retries — orphan-twin check SKIPPED this run`);
+      continue;
     }
+    if (twinTarget === undefined || twinNumber === undefined) continue; // structurally unreachable (set just before try-exit) — re-establishes narrowing across the try boundary
+
+    const head = `  [orphan:${ownRepoShort}] #${issue.number} "${truncate(issue.title, 70)}"`;
+    if (dryRun) {
+      console.log(`${head}  ORPHAN-CLEANUP -> would close orphaned twin ${shortRepoName(twinTarget)}#${twinNumber} [PREVIEW — would apply]`);
+      handled++;
+      continue;
+    }
+    // Checked for "check-failed" (codex review pass 4 P1) — see closeIfOpen's doc
+    // comment: an inconclusive state check is never permission to count this as handled.
+    const result = closeIfOpen(twinTarget, twinNumber, orphanedTwinCloseComment(repo, issue.number));
+    if (result === "check-failed") {
+      console.log(`${head}  ORPHAN-CLEANUP -> ABORTED: couldn't confirm the twin's current state — retried next run`);
+      continue;
+    }
+    console.log(`${head}  ORPHAN-CLEANUP -> closed orphaned twin ${shortRepoName(twinTarget)}#${twinNumber} [APPLIED]`);
+    handled++;
   }
   return handled;
 }
