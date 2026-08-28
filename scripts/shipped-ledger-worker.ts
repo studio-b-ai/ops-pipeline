@@ -58,7 +58,8 @@
  * real watermark has already been swept.
  */
 
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
@@ -80,6 +81,7 @@ import {
   isoWeekLabel,
   buildClassifierSystemPrompt,
   buildClassifierPrompt,
+  buildContentsPutApiArgs,
   type ParsedLedger,
   type AppendPlan,
   type CandidatePr,
@@ -110,9 +112,6 @@ const CLASSIFY_MAX_RETRIES = 2;
  * realistically too low for the busiest repo in the fleet (codex review, 2026-08-18 pass 1, P2).
  */
 const PR_LIST_LIMIT = 500;
-
-/** ~500KB of base64 (~375KB raw text) — comfortably under any realistic ARG_MAX; SHIPPED.md is tens of KB today. If this is ever hit for real, switch putFileContents to `-f content=@<tmpfile>` (gh api reads a field from a file) rather than raising this further. */
-const MAX_INLINE_CONTENT_B64_BYTES = 500_000;
 
 function gh(args: string[]): string {
   return execFileSync("gh", args, { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 32 * 1024 * 1024 });
@@ -363,21 +362,21 @@ function createBranch(repo: string, branch: string, fromCommitSha: string): void
   gh(["api", `repos/${repo}/git/refs`, "-f", `ref=refs/heads/${branch}`, "-f", `sha=${fromCommitSha}`]);
 }
 
-/** `currentBlobSha` is THAT FILE's blob sha at `branch` (see file header's commit-vs-blob note) — the Contents API's optimistic-concurrency check; a stale value 409s loudly rather than silently overwriting someone else's concurrent commit. */
+/**
+ * `currentBlobSha` is THAT FILE's blob sha at `branch` (see file header's commit-vs-blob note) — the Contents API's optimistic-concurrency check; a stale value 409s loudly rather than silently overwriting someone else's concurrent commit.
+ *
+ * The base64 payload is staged to a tmpfile and passed to `gh api` as `-f content=@<file>` so `gh` reads it from disk. Inline argv was previously used with a 500KB safety bound, but the real GitHub Actions runner ARG_MAX (env-vars-in-block-counted) is well below that; workflow run 33216855975 hit `spawnSync gh E2BIG` on a growing SHIPPED.md. Rule #4/#331: fix the argv-limit failure mode at its class, not raise the number. Arg-building is factored into `buildContentsPutApiArgs` in the lib so the shape is unit-tested (this glue owns only the tmpfile lifecycle).
+ */
 function putFileContents(repo: string, path: string, branch: string, text: string, currentBlobSha: string, message: string): void {
   const contentB64 = Buffer.from(text, "utf-8").toString("base64");
-  if (contentB64.length > MAX_INLINE_CONTENT_B64_BYTES) {
-    throw new Error(
-      `${path} base64-encodes to ${contentB64.length} bytes, over the ${MAX_INLINE_CONTENT_B64_BYTES}-byte inline-argv safety bound — switch putFileContents to \`-f content=@<tmpfile>\` before raising this further.`,
-    );
+  const tmpDir = mkdtempSync(join(tmpdir(), "shipped-ledger-"));
+  const contentFilePath = join(tmpDir, "content.b64");
+  try {
+    writeFileSync(contentFilePath, contentB64);
+    gh(buildContentsPutApiArgs({ repo, path, branch, message, contentFilePath, currentBlobSha }));
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
   }
-  gh([
-    "api", "--method", "PUT", `repos/${repo}/contents/${path}`,
-    "-f", `message=${message}`,
-    "-f", `content=${contentB64}`,
-    "-f", `sha=${currentBlobSha}`,
-    "-f", `branch=${branch}`,
-  ]);
 }
 
 interface OpenPrRow {

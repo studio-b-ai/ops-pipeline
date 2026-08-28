@@ -723,3 +723,32 @@ export function isoWeekLabel(iso: string): string {
   const weekNumber = 1 + Math.round((target.getTime() - firstThursday.getTime()) / (7 * 24 * 60 * 60 * 1000));
   return `${target.getUTCFullYear()}-W${String(weekNumber).padStart(2, "0")}`;
 }
+
+// ───────────────────────────── Contents-API PUT arg builder ─────────────────────────────
+
+export interface ContentsPutApiArgsInput {
+  repo: string;
+  path: string;
+  branch: string;
+  message: string;
+  /** Absolute path to a file holding the base64-encoded file contents; passed to `gh api` as `@<path>` so the payload is read from disk instead of inherited through argv (regression pin for shipped-ledger workflow run 33216855975 — spawnSync gh E2BIG). */
+  contentFilePath: string;
+  currentBlobSha: string;
+}
+
+/**
+ * Builds the argv for `gh api --method PUT repos/<repo>/contents/<path>` such that the
+ * base64 payload is read from `contentFilePath` (`content=@<file>`), never inlined into
+ * argv. Pure — the caller owns the tmpfile's lifecycle. See shipped-ledger-worker.ts's
+ * `putFileContents` for the sole real caller.
+ */
+export function buildContentsPutApiArgs(input: ContentsPutApiArgsInput): string[] {
+  const { repo, path, branch, message, contentFilePath, currentBlobSha } = input;
+  return [
+    "api", "--method", "PUT", `repos/${repo}/contents/${path}`,
+    "-f", `message=${message}`,
+    "-f", `content=@${contentFilePath}`,
+    "-f", `sha=${currentBlobSha}`,
+    "-f", `branch=${branch}`,
+  ];
+}

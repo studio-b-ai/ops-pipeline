@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AUDIENCES,
+  buildContentsPutApiArgs,
   classifyPr,
   classifyWithLabels,
   computeWatermark,
@@ -578,5 +579,59 @@ describe("renderStatsTable / summarizeTotals", () => {
 describe("AUDIENCES", () => {
   it("is exactly TRADE/DTC/STAFF, in that order", () => {
     expect(AUDIENCES).toEqual(["TRADE", "DTC", "STAFF"]);
+  });
+});
+
+// ───────────────────────────── buildContentsPutApiArgs ─────────────────────────────
+
+// Regression pin for ops-pipeline shipped-ledger workflow run 33216855975
+// (spawnSync gh E2BIG on the SHIPPED.md put). Author's line-114 note said to
+// switch putFileContents to `-f content=@<tmpfile>` when the inline argv is ever
+// hit for real. This helper is the arg-building half of that switch: it forces
+// the caller to pass the base64 payload as a file reference so `gh api` reads it
+// from disk instead of inheriting it through argv.
+describe("buildContentsPutApiArgs", () => {
+  const commonArgs = () =>
+    buildContentsPutApiArgs({
+      repo: "studio-b-ai/brain",
+      path: "SHIPPED.md",
+      branch: "shipped-ledger/2026-W35",
+      message: "shipped-ledger: weekly PR-derived backfill 2026-W35",
+      contentFilePath: "/tmp/shipped-ledger-xyz/content.b64",
+      currentBlobSha: "abc123",
+    });
+
+  it("targets `gh api --method PUT repos/<repo>/contents/<path>`", () => {
+    const args = commonArgs();
+    expect(args[0]).toBe("api");
+    expect(args).toContain("--method");
+    expect(args).toContain("PUT");
+    expect(args).toContain("repos/studio-b-ai/brain/contents/SHIPPED.md");
+  });
+
+  it("passes content as a `@<file>` reference so gh reads it from disk (never inlined into argv)", () => {
+    const args = commonArgs();
+    const contentIdx = args.findIndex(a => a.startsWith("content="));
+    expect(contentIdx).toBeGreaterThan(-1);
+    expect(args[contentIdx]).toBe("content=@/tmp/shipped-ledger-xyz/content.b64");
+    // Prior arg is `-f` (raw string field — @-substitution reads the file's raw bytes)
+    expect(args[contentIdx - 1]).toBe("-f");
+  });
+
+  it("carries message, sha, and branch as -f fields", () => {
+    const args = commonArgs();
+    expect(args).toContain("message=shipped-ledger: weekly PR-derived backfill 2026-W35");
+    expect(args).toContain("sha=abc123");
+    expect(args).toContain("branch=shipped-ledger/2026-W35");
+  });
+
+  it("never inlines base64 payload bytes into the argv (E2BIG regression pin)", () => {
+    const args = commonArgs();
+    // No arg should look like an inline base64 blob (i.e. `content=<letters/digits/+/=>` without an `@`)
+    for (const a of args) {
+      if (a.startsWith("content=")) {
+        expect(a.startsWith("content=@")).toBe(true);
+      }
+    }
   });
 });
