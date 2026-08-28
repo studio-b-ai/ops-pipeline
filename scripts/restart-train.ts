@@ -98,8 +98,14 @@ import {
   parseTrainAfterTokens,
   hasTrainConsolidate,
   repoClassFor,
+  windowState,
+  clickDueStateKey,
+  formatClickDueLine,
+  parseClickDueComments,
   type AnchorCandidate,
+  type AnchorResult,
   type Ticket,
+  type QueueEntry,
   type RestartTrainComment,
 } from "./lib/restart-train-lib.js";
 import {
@@ -112,6 +118,7 @@ import {
   type AuthorityTimelineItem,
   type StaleLabelAuthorityVerdict,
 } from "./lib/label-authority.js";
+import { isRollupClean, evaluateMergeReadiness, type RollupItem } from "./lib/automerge-classify.js";
 import { parseArgs, parseTarget, CALENDAR_REPO, CALENDAR_ISSUE } from "./lib/restart-train-args.js";
 
 const TICKET_REPOS = ["studio-b-ai/studiob", "studio-b-ai/client-asthetik"] as const;
@@ -472,12 +479,189 @@ async function postHeldIfNotDuped(
   commentIssue(target.repo, target.number, line);
 }
 
+// ───────────────────────────── paging (rung 1 Leg B, gated behind --page) ─────────────────────────────
+
+const CLICK_DUE_MARKER_RE = /<!-- restart-train:click-due=([0-9a-f]{12}) -->/;
+
+/**
+ * Fetches ONLY the fields `evaluateMergeReadiness` needs (+ the rollup items `isRollupClean`
+ * reduces) via a narrow, independent `gh pr view` call — never imports `pr-automerge-gate.ts`
+ * (confirmed unsafe: an unconditional module-scope `main().catch(...)` at its bottom would run
+ * that program's own CLI on import) or its `fetchPr`. Field list mirrors that file's OWN
+ * `--json` selection without importing anything executable from it (Rule #283: reuse the
+ * predicate, not the runner).
+ */
+async function fetchQueueHeadRollup(
+  repo: string,
+  number: number,
+): Promise<{ state: string; isDraft: boolean; mergeStateStatus: string; statusCheckRollup: RollupItem[] }> {
+  let out: string;
+  try {
+    out = gh(["pr", "view", String(number), "--repo", repo, "--json", "state,isDraft,mergeStateStatus,statusCheckRollup"]);
+  } catch (err) {
+    throw classifyReadError(err, "pull_requests:read (queue-head rollup check)");
+  }
+  return JSON.parse(out) as {
+    state: string;
+    isDraft: boolean;
+    mergeStateStatus: string;
+    statusCheckRollup: RollupItem[];
+  };
+}
+
+/**
+ * A ticket is "in flight" when the most recent `CLICK DUE` posted on `--target` is NEWER than
+ * the CURRENT anchor — i.e. no restart has completed since that paging happened. This
+ * self-resolves without separately tracking a matching END: `computeAnchor` only advances
+ * `anchor.anchorIso` past a CLICK DUE's own stamp once a genuinely NEW restart-completion fact
+ * (client-asthetik Actions success, Railway deploy, or a manual END on #280) lands — which by
+ * construction happens AFTER the human clicks merge and the restart finishes — so the
+ * comparison flips from "in flight" to "clear" at exactly the right moment, with no separate
+ * bookkeeping. Fail-closed (treated as in-flight) if either stamp is unparseable: the
+ * double-restart-collision hazard this guards against is strictly worse than one missed paging
+ * cycle (Rule #4).
+ */
+async function isTicketInFlight(
+  target: { repo: string; number: number },
+  anchor: Extract<AnchorResult, { ok: true }>,
+  nowIso: string,
+): Promise<{ inFlight: boolean; detail: string }> {
+  let rawComments: RestartTrainComment[];
+  try {
+    rawComments = listIssueComments(target.repo, target.number);
+  } catch (err) {
+    throw classifyReadError(err, "issues:read (target in-flight check)");
+  }
+  const comments = clampCommentsToNow(rawComments, nowIso);
+  const clickDues = parseClickDueComments(comments);
+  const last = clickDues.length > 0 ? clickDues[clickDues.length - 1] : null;
+  if (!last) return { inFlight: false, detail: "no prior CLICK DUE on target" };
+  const lastMs = Date.parse(last.isoStamp);
+  const anchorMs = Date.parse(anchor.anchorIso);
+  const inFlight = Number.isNaN(lastMs) || Number.isNaN(anchorMs) || lastMs > anchorMs;
+  return { inFlight, detail: `last CLICK DUE ${last.isoStamp || "(unparseable)"} vs anchor ${anchor.anchorIso}` };
+}
+
+/**
+ * Posts the `CLICK DUE` line to BOTH the queue-head PR (via `postAuthorityReceipt` —
+ * label-authority.ts's existing write-only PR-comment helper, reused per Rule #283 rather than
+ * forking a new poster) and `--target` (via `commentIssue`, the same seam
+ * `postLines`/`postHeldIfNotDuped` already use). Deduped against the QUEUE-HEAD PR's OWN
+ * comment history via a `restart-train:click-due=<hash>` marker distinct from `postLines`'
+ * `restart-train:state=` marker — `--target` accumulates PLAN/HELD noise from every OTHER
+ * ticket too, so only the queue-head PR's own thread can correctly answer "have I already told
+ * a human to click merge on THIS PR at THIS pinned head" (#292: once per state transition, not
+ * per cron cycle). The `--target` mirror carries no marker of its own — it is posted in the
+ * same call, gated by the same dedup check, so it can never drift out of sync with it.
+ */
+async function postClickDue(
+  target: { repo: string; number: number },
+  ticket: Ticket,
+  nowIso: string,
+  anchor: Extract<AnchorResult, { ok: true }>,
+  post: boolean,
+): Promise<void> {
+  const stateKey = clickDueStateKey(ticket.repo, ticket.number, ticket.pinnedHeadSha);
+  const keyHash = createHash("sha256").update(stateKey).digest("hex").slice(0, 12);
+  const line = formatClickDueLine(ticket.repo, ticket.number, ticket.pinnedHeadSha, nowIso, anchor.anchorIso, anchor.source);
+  console.log(`[restart-train] --page: CLICK DUE candidate ${keyHash} :: ${stateKey}`);
+  console.log(`  ${line}`);
+  if (!post) {
+    console.log("[restart-train] --page: --post not set — not posting (default; tests/manual runs never pass it)");
+    return;
+  }
+  let prComments: IssueComment[];
+  try {
+    prComments = listIssueComments(ticket.repo, ticket.number);
+  } catch (err) {
+    throw classifyReadError(err, "issues:read (queue-head PR click-due dedup check)");
+  }
+  let lastPostedHash: string | null = null;
+  for (const c of prComments) {
+    const m = CLICK_DUE_MARKER_RE.exec(c.body);
+    if (m) lastPostedHash = m[1];
+  }
+  if (lastPostedHash === keyHash) {
+    console.log(`[restart-train] --page: CLICK DUE state unchanged since last post (${keyHash}) — not reposting (#292)`);
+    return;
+  }
+  postAuthorityReceipt(ticket.repo, ticket.number, `${line}\n\n<!-- restart-train:click-due=${keyHash} -->`);
+  commentIssue(target.repo, target.number, line);
+  console.log(
+    `[restart-train] --page: posted CLICK DUE (state ${keyHash}) to ${ticket.repo}#${ticket.number} + mirror on ${target.repo}#${target.number}`,
+  );
+}
+
+/**
+ * Rung 1 Leg B (ops-pipeline#172) — only called when `--page` is set (`main()` gates the call
+ * itself; without the flag this function never runs, and behavior stays byte-identical to rung
+ * 0 / Leg A). Gate order, cheapest/no-I/O first:
+ *   1. queue head exists (no I/O) — nothing to page against an empty/fully-invalidated queue.
+ *   2. window CLEAR for the head's repoClass (no I/O) — reuses `windowState`, the exact
+ *      predicate `computePlanSlots`'s first iteration already evaluates for this same ticket;
+ *      not duplicated logic, just invoked directly for the one ticket that matters here.
+ *   3. no ticket in flight (I/O: --target comments) — Rule #89 sibling: never double-page.
+ *   4. queue head's CI rollup green (I/O: PR view) — a red/pending rollup posts a HELD-style
+ *      deduped line instead (Rule #89: never page a human to a red-CI PR) and returns; a green
+ *      rollup posts CLICK DUE. `evaluateMergeReadiness` also folds in state=OPEN, !isDraft, and
+ *      mergeStateStatus=CLEAN, so this same gate incidentally also refuses an already-merged,
+ *      already-closed, draft, or conflicted/behind-base queue head — never just "CI passed".
+ * Every OTHER branch (window not clear, ticket in flight) is silent by design — the
+ * unconditional PLAN-line post that already runs earlier in `main()` every cycle already
+ * surfaces "not clear yet" state on `--target`; this function does not duplicate that line.
+ */
+async function maybePage(
+  target: { repo: string; number: number },
+  queue: QueueEntry[],
+  anchor: Extract<AnchorResult, { ok: true }>,
+  nowIso: string,
+  post: boolean,
+): Promise<void> {
+  const first = queue[0];
+  const head = first && first.status === "queued" ? first : null;
+  if (!head) {
+    console.log("[restart-train] --page: no queue head (empty or fully-invalidated queue) — nothing to page");
+    return;
+  }
+  const ticket = head.ticket;
+
+  const clearance = windowState(nowIso, ticket.repoClass, anchor.anchorIso);
+  if (!clearance.clear) {
+    console.log(`[restart-train] --page: queue head ${ticket.repo}#${ticket.number} window not clear yet — ${clearance.reason}`);
+    return;
+  }
+
+  const flight = await isTicketInFlight(target, anchor, nowIso);
+  if (flight.inFlight) {
+    console.log(`[restart-train] --page: possible ticket in flight (${flight.detail}) — not paging`);
+    return;
+  }
+
+  const prJson = await fetchQueueHeadRollup(ticket.repo, ticket.number);
+  const readiness = evaluateMergeReadiness({
+    state: prJson.state,
+    isDraft: prJson.isDraft,
+    ciClean: isRollupClean(prJson.statusCheckRollup),
+    mergeStateStatus: prJson.mergeStateStatus,
+  });
+
+  if (!readiness.ready) {
+    console.log(
+      `[restart-train] --page: queue head ${ticket.repo}#${ticket.number} rollup not green (${readiness.detail}) — not paging (Rule #89)`,
+    );
+    await postHeldIfNotDuped(target, `queue head ${ticket.repo}#${ticket.number} rollup not green — not paging`, post);
+    return;
+  }
+
+  await postClickDue(target, ticket, nowIso, anchor, post);
+}
+
 // ───────────────────────────── main ─────────────────────────────
 
 async function main(): Promise<void> {
   const flags = parseArgs(process.argv.slice(2));
   const target = parseTarget(flags.target);
-  console.log(`=== restart-train --dry-run now=${flags.now} target=${flags.target} post=${flags.post} ===`);
+  console.log(`=== restart-train --dry-run now=${flags.now} target=${flags.target} post=${flags.post} page=${flags.page} ===`);
 
   const hold = await checkHold(target);
   if (hold.held) {
@@ -546,6 +730,10 @@ async function main(): Promise<void> {
 
   const lines = planLines(queue, anchor, flags.now);
   await postLines(target, lines, flags.post, planStateKey(queue, anchor));
+
+  if (flags.page) {
+    await maybePage(target, queue, anchor, flags.now, flags.post);
+  }
 }
 
 main().catch((err) => {
