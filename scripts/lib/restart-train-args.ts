@@ -20,6 +20,12 @@ export interface Flags {
   now: string;
   target: string;
   post: boolean;
+  /** Rung 1 Leg B (ops-pipeline#172): default OFF. Without it, behavior is byte-identical to
+   *  rung 0/Leg A — no CI-rollup check, no in-flight check, no `CLICK DUE` posting. Independent
+   *  of `--post` (which still gates whether anything actually gets written, exactly as it does
+   *  for every other posting path in this worker) and independent of `--fire` (still throws
+   *  unconditionally above — this flag never builds a merge path). */
+  page: boolean;
 }
 
 /** The human restart calendar — a READ source for this worker, never a post target. */
@@ -46,7 +52,8 @@ export function parseArgs(argv: string[]): Flags {
     );
   }
   const post = argv.includes("--post");
-  return { dryRun: true, now, target, post };
+  const page = argv.includes("--page");
+  return { dryRun: true, now, target, post, page };
 }
 
 export function parseTarget(target: string): { repo: string; number: number } {

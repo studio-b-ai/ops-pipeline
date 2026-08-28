@@ -25,10 +25,11 @@ describe("parseArgs (restart-train)", () => {
 
   // ───── Positive paths ─────
 
-  it("defaults: dry-run true, post false, target = ops-pipeline#172, now = a parsable timestamp", () => {
+  it("defaults: dry-run true, post false, page false, target = ops-pipeline#172, now = a parsable timestamp", () => {
     const f = parseArgs([]);
     expect(f.dryRun).toBe(true);
     expect(f.post).toBe(false);
+    expect(f.page).toBe(false);
     expect(f.target).toBe(DEFAULT_TARGET);
     expect(Number.isNaN(Date.parse(f.now))).toBe(false);
   });
@@ -38,6 +39,14 @@ describe("parseArgs (restart-train)", () => {
     expect(f.target).toBe("studio-b-ai/ops-pipeline#172");
     expect(f.now).toBe("2026-08-19T22:00:00Z");
     expect(f.post).toBe(true);
+    expect(f.page).toBe(false);
+  });
+
+  it("--page is independent of --post (rung 1 Leg B, ops-pipeline#172) — either can be set without the other", () => {
+    expect(parseArgs(["--page"]).page).toBe(true);
+    expect(parseArgs(["--page"]).post).toBe(false);
+    expect(parseArgs(["--post"]).page).toBe(false);
+    expect(parseArgs(["--page", "--post"])).toMatchObject({ page: true, post: true });
   });
 
   it("a DIFFERENT client-asthetik issue is not blocked — only the calendar is (guard is exact, not repo-wide)", () => {
