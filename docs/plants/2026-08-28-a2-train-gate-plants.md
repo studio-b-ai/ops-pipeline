@@ -22,5 +22,21 @@ refusal). The PR is then closed by hand; receipts recorded below by follow-up.
 
 ## Receipts
 
-- Plant 1: (this PR's merge — see the PR's own timeline)
-- Plant 2: _pending — filled by the follow-up edit after plant 2 runs_
+Both directions proven 2026-08-28 — the gate is live on ops-pipeline per
+Rules #464/#471 (no longer "deployed, unproven").
+
+- **Plant 1 — PASSED** 05:47:48Z: PR #213 merged AUTONOMOUSLY by the gate
+  (sha-pinned squash of `954a815`). Receipt comment on the PR carries the full
+  leg table — authority: `train:ready` LabeledEvent by kbibelhausen at timeline
+  position 1; merge-readiness + CI rollup clean; independent review exactly
+  CLEAN. Telemetry: `[train-gate-receipt] repo=studio-b-ai/ops-pipeline pr=213
+  outcome=merged`.
+- **Plant 2 — PASSED** 05:50:10Z: PR #214 (closed by hand afterward, never
+  merged): `train:ready` STRIPPED with a stale-removal receipt comment naming
+  the mechanism — "a PULL_REQUEST_COMMIT event at position 3 sits AFTER the
+  authorizing train:ready LabeledEvent at position 2 (applied by
+  kbibelhausen)"; evaluated sha `06c642ba`. Telemetry:
+  `outcome=stale-label-removed`. The sweep was dispatched while CI was still
+  PENDING on the new sha — directly proving the codex pass-2 fix (stale-label
+  authority runs ahead of the CI/mergeability refusal, so a label-then-push
+  never leaves a stale authorization sitting on a red/pending PR).
