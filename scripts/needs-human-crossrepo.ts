@@ -258,7 +258,7 @@ function twinCandidatesViaSearch(target: string, prefix: string): TwinCandidate[
  * `TwinLookupResult`'s "check-failed" kind below: since this is the authoritative check,
  * a failure here must never be silently read as "no twin", which risks a duplicate
  * creation (codex review pass 1 P2 — "Fail closed when the list-scan twin check fails"). */
-function twinCandidatesViaList(target: string): { candidates: TwinCandidate[]; failed: boolean } {
+function twinCandidatesViaList(target: string): { candidates: TwinCandidate[]; failed: boolean; transient: boolean } {
   try {
     // Retried (codex review pass 2 P2): this is the AUTHORITATIVE half of the twin check,
     // so a single transient 5xx must not immediately become "check-failed"/skip when three
@@ -269,20 +269,16 @@ function twinCandidatesViaList(target: string): { candidates: TwinCandidate[]; f
       { label: `twin list-scan ${target}` },
     );
     const parsed = JSON.parse(out) as TwinRef[];
-    return { candidates: Array.isArray(parsed) ? parsed : [], failed: false };
+    return { candidates: Array.isArray(parsed) ? parsed : [], failed: false, transient: false };
   } catch (err) {
-    // Post-retry transient exhaustion here becomes check-failed → the caller's unit skip,
-    // so count it toward the degraded-decision-read summary like every other transient
-    // unit skip (codex review pass 3 P2). check-failed RETURNS rather than throws, so the
-    // unit boundaries' own transient catches can never double-count the same failure; and
-    // findTwin's only call sites are the two per-unit ones, so one increment == one
-    // skipped unit. Non-transient failures (403/422/parse) stay uncounted — those are
-    // check-failed for a reason retries can't fix, not degradation.
-    if (isTransientGhFailure(err)) unitSkipsTransient++;
+    // `transient` rides back so findTwin can count exhaustion into unitSkipsTransient ONLY
+    // when check-failed actually becomes the unit's outcome (codex review pass 3 P2 +
+    // pass 4 P2): counting here fired even when the search index had already found the
+    // twin — a unit that proceeds normally must never mark the run degraded.
     console.log(
       `    [warn] gh issue list fallback failed for ${target}: ${describeError(err)} — treating the twin-existence check as INCONCLUSIVE, not "no twin"`,
     );
-    return { candidates: [], failed: true };
+    return { candidates: [], failed: true, transient: isTransientGhFailure(err) };
   }
 }
 
@@ -310,7 +306,16 @@ function findTwin(target: string, ownRepoShort: string, issueNumber: number): Tw
   const allCandidates: TwinCandidate[] = [...searchCandidates, ...listResult.candidates];
   const match = findTwinMatch(allCandidates as TwinRef[], ownRepoShort, issueNumber);
   if (match) return { kind: "found", twin: match };
-  if (listResult.failed) return { kind: "check-failed" };
+  if (listResult.failed) {
+    // Transient retry-exhaustion in the authoritative list-scan counts as a degraded
+    // decision read ONLY here, where check-failed becomes the unit's actual outcome
+    // (codex review pass 4 P2) — a search-index hit above resolves the unit normally
+    // and must not inflate the summary. check-failed RETURNS at the call sites (never
+    // throws), so the unit boundaries' own transient catches can't double-count this;
+    // non-transient failures (403/422/parse) stay uncounted — retries can't fix those.
+    if (listResult.transient) unitSkipsTransient++;
+    return { kind: "check-failed" };
+  }
   return { kind: "not-found" };
 }
 

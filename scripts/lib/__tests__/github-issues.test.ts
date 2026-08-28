@@ -238,7 +238,12 @@ describe("retry surface stays reads-only (source guards)", () => {
     // Pass 3 P1: recall enumeration must FAIL THE RUN after retries — the old degrade-to-[]
     // catch ("will retry next run") silently skipped a whole repo's recall pass.
     expect(sweepSrc).not.toContain("recall-pass search failed");
-    // Pass 3 P2: transient exhaustion in the list-scan counts as a degraded decision read.
-    expect(sweepSrc).toContain("if (isTransientGhFailure(err)) unitSkipsTransient++;");
+    // Pass 3 P2 as corrected by pass 4 P2: list-scan transient exhaustion is counted in
+    // findTwin, gated on check-failed actually becoming the unit's outcome — never inside
+    // twinCandidatesViaList's catch, where a search-index hit would still resolve the unit
+    // normally while falsely marking the run degraded.
+    expect(sweepSrc).toContain("transient: isTransientGhFailure(err)");
+    expect(sweepSrc).toContain("if (listResult.transient) unitSkipsTransient++;");
+    expect(sweepSrc).not.toContain("if (isTransientGhFailure(err)) unitSkipsTransient++;");
   });
 });
