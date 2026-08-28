@@ -1,0 +1,59 @@
+name: Railway Incident Ledger
+
+# ops-pipeline#167 leg 2 — durable Railway incident ledger.
+#
+# Every 6h: fetch status.railway.com, parse activeIncidents + recentIncidents, and
+# reconcile ONE standing issue (label `railway-incident-ledger`) whose body is the
+# incident table. Rows are keyed by slug and SURVIVE after the page's ~3-month retention
+# drops them (Rule #453 — deliberately not a mirror); the table is the evidence base for
+# docs/runbooks/railway-exit-playbook.md.
+#
+# Cadence (Rule #448): the claimed SLA is "ledger complete within 24h of an incident
+# appearing on the page"; recentIncidents backfills anything that starts AND resolves
+# between polls, so 6h only bounds row-appearance latency. 6h < 24h.
+#
+# Fail-loud (Rule #456): fetch failure or PARSE_ERROR = red run + a deduped PROBE FAILED
+# comment on the ledger issue. The issue timeline stays quiet on no-news runs (the body is
+# edited only when rows actually change — Rule #292 by construction).
+#
+# ⚠️ After merge, dispatch once with dry_run=true, then once live (creates the issue and
+# ingests the August 2026 incident census, including the YYU63JUO seed) — Rules #198/#280
+# + #464 (first firing is part of the ship).
+
+on:
+  schedule:
+    - cron: "17 */6 * * *" # every 6h (GH Actions cron is UTC-only — Rule #94)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real fetch + real issue read, ZERO mutations — prints the planned delta"
+        type: boolean
+        default: false
+
+permissions:
+  issues: write # the ledger issue IS the durable state
+  contents: read
+
+concurrency:
+  group: railway-incident-ledger
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Reconcile Railway incident ledger
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: npx tsx railway-incident-ledger.ts ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}

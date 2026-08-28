@@ -1,0 +1,83 @@
+name: Railway Status Gate
+
+# ops-pipeline#167 leg 1 — vendor-status deploy gate (CLAUDE.md Rule #117 narrative).
+#
+# Reusable workflow: any Railway-deploying workflow in the org calls this FIRST and makes
+# its deploy job `needs:` it. If status.railway.com shows an ACTIVE incident touching a
+# deploy-path component (Deployments / Builds / GitHub Auto-Deploys / API) in a relevant
+# region, this job fails -> the deploy job is skipped (Rule #320: the implicit success()
+# on `needs` is exactly the intent here). Fail-OPEN on fetch/parse problems (Rule #295 —
+# a dead status page is not evidence Railway is degraded), loud in both directions.
+#
+# First consumer: studiob/.github/workflows/deploy-api.yml (the fleet's only GHA-driven
+# Railway deploy). Seed incident: 2026-08-18 23:19Z YYU63JUO "Deployments are slow to
+# progress and are prone to timeout failure" — a deploy launched into it stalled mid-flight.
+#
+# CROSS-REPO NOTE (do not "simplify" the checkout): a called reusable workflow runs in the
+# CALLER's repository context — a bare `actions/checkout` here would check out the CALLER
+# (e.g. studiob), not this repo's gate script. The explicit `repository:` below is
+# load-bearing. ops-pipeline is public, so no token is needed for it.
+#
+# workflow_dispatch = the planted-verdict rung (Rules #464/#471): `simulate` evaluates a
+# committed REAL-capture fixture through the full parse+verdict+exit path —
+#   hold-fixture    -> expect a RED run (HOLD)
+#   ignored-fixture -> expect a GREEN run (CLEAR with an ignored foreign-region incident)
+#   live            -> real fetch against status.railway.com
+#
+# ⚠️ After merge, dispatch once per simulate mode and confirm real runs (Rules #198/#280 —
+# GitHub validates Actions identifiers only at dispatch time).
+
+on:
+  workflow_call:
+    inputs:
+      skip:
+        description: "Kevin-authorized deploy-during-incident override (loud, exits 0 without fetching)"
+        type: boolean
+        required: false
+        default: false
+  workflow_dispatch:
+    inputs:
+      skip:
+        description: "Exercise the skip escape hatch"
+        type: boolean
+        default: false
+      simulate:
+        description: "live = real fetch; *-fixture = planted-verdict rung on committed real captures"
+        type: choice
+        options:
+          - live
+          - hold-fixture
+          - ignored-fixture
+        default: live
+
+permissions:
+  contents: read
+
+jobs:
+  railway-status-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Load-bearing (see header): called workflows run in the CALLER's context.
+          repository: studio-b-ai/ops-pipeline
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Run Railway status gate
+        working-directory: scripts
+        env:
+          RAILWAY_STATUS_GATE_SKIP: ${{ inputs.skip && '1' || '' }}
+          SIMULATE: ${{ inputs.simulate || 'live' }}
+        run: |
+          case "$SIMULATE" in
+            hold-fixture)    export RAILWAY_STATUS_FIXTURE="lib/__tests__/fixtures/railway-status/synthetic-active-hold.txt" ;;
+            ignored-fixture) export RAILWAY_STATUS_FIXTURE="lib/__tests__/fixtures/railway-status/synthetic-active-ignored.txt" ;;
+          esac
+          npx tsx railway-status-gate.ts
