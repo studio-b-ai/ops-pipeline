@@ -354,9 +354,15 @@ function gh(args: string[]): string {
 }
 
 /** How many trailing timeline items (in the four requested types) `fetchAuthorityTimeline`
- *  fetches per PR. `truncated` fires whenever the connection's `totalCount` exceeds
- *  what was actually returned — see the comment on that comparison below for why it's
- *  computed against `nodes.length` rather than this literal constant. */
+ *  fetches per PR. `truncated` fires whenever the window provably misses earlier
+ *  relevant events (`pageInfo.hasPreviousPage`) or the connection's `filteredCount`
+ *  exceeds what was actually returned — see the comment on that derivation below.
+ *  `filteredCount`, NOT `totalCount`: live-proven 2026-08-28 (studiob#613, run
+ *  33218268263) that `totalCount` IGNORES the `itemTypes:` filter — an ordinary
+ *  issue comment (e.g. the train's own CLICK DUE receipt) pushes `totalCount` past
+ *  `nodes.length` on a fully-complete window, which read as permanent
+ *  "timeline-truncated" fail-closed refusal of a healthy PR. `filteredCount`
+ *  respects the filter. */
 export const AUTHORITY_TIMELINE_PAGE_SIZE = 250;
 
 const AUTHORITY_TIMELINE_QUERY = `
@@ -367,7 +373,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
         itemTypes: [LABELED_EVENT, UNLABELED_EVENT, PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT]
         last: ${AUTHORITY_TIMELINE_PAGE_SIZE}
       ) {
-        totalCount
+        filteredCount
+        pageInfo { hasPreviousPage }
         nodes {
           __typename
           ... on LabeledEvent { label { name } actor { login } createdAt }
@@ -399,7 +406,8 @@ interface GraphQLTimelineResponse {
     repository?: {
       pullRequest?: {
         timelineItems?: {
-          totalCount: number;
+          filteredCount: number;
+          pageInfo?: { hasPreviousPage?: boolean | null } | null;
           nodes: GraphQLTimelineNode[];
         } | null;
       } | null;
@@ -453,27 +461,32 @@ export function fetchAuthorityTimeline(repo: string, prNumber: number): { timeli
   // Fail closed on a malformed/untrustworthy connection shape rather than trust the
   // compile-time `as GraphQLTimelineResponse` assertion above at runtime (codex P1,
   // ops#190 A1 review): `JSON.parse` + `as` performs ZERO runtime validation, so a
-  // missing, null, or non-numeric `totalCount` would silently coerce
-  // `conn.totalCount > timeline.length` below to `false` (e.g. `undefined > 5` is
+  // missing, null, or non-numeric `filteredCount` would silently coerce
+  // `conn.filteredCount > timeline.length` below to `false` (e.g. `undefined > 5` is
   // `false`, and `null > 5` is also `false` since `null` coerces to `0`) — reporting
   // NOT-truncated on a response this function has no trustworthy signal about, which
   // `evaluateLabelAuthority` could then walk as if it were a complete, reliable
-  // window. Same reasoning for `nodes` not actually being an array at runtime, and
-  // for a `totalCount` smaller than the node count actually received (internally
-  // inconsistent — GitHub's `totalCount` can never be less than the nodes in the same
-  // response). Any of these throws, matching this function's existing
-  // throw-on-untrustworthy-shape convention immediately above and in the
-  // unrecognized-`__typename` branch below (Rule #4: doubt resolves toward refusal —
-  // the caller's fail-closed error handling, not this function, decides the outcome).
+  // window. Same reasoning for `nodes` not actually being an array at runtime, for
+  // `pageInfo.hasPreviousPage` not actually being a boolean (a missing pageInfo must
+  // refuse, never read as "no previous page"), and for a `filteredCount` smaller than
+  // the node count actually received (internally inconsistent — the FILTERED count can
+  // never be less than the nodes the same filtered query returned). Any of these
+  // throws, matching this function's existing throw-on-untrustworthy-shape convention
+  // immediately above and in the unrecognized-`__typename` branch below (Rule #4:
+  // doubt resolves toward refusal — the caller's fail-closed error handling, not this
+  // function, decides the outcome).
   if (!Array.isArray(conn.nodes)) {
     throw new Error(`fetchAuthorityTimeline: GraphQL response "nodes" is not an array for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
   }
-  if (typeof conn.totalCount !== "number" || !Number.isFinite(conn.totalCount) || conn.totalCount < 0) {
-    throw new Error(`fetchAuthorityTimeline: GraphQL response "totalCount" is not a valid non-negative number for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+  if (typeof conn.filteredCount !== "number" || !Number.isFinite(conn.filteredCount) || conn.filteredCount < 0) {
+    throw new Error(`fetchAuthorityTimeline: GraphQL response "filteredCount" is not a valid non-negative number for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
   }
-  if (conn.totalCount < conn.nodes.length) {
+  if (typeof conn.pageInfo?.hasPreviousPage !== "boolean") {
+    throw new Error(`fetchAuthorityTimeline: GraphQL response "pageInfo.hasPreviousPage" is not a boolean for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+  }
+  if (conn.filteredCount < conn.nodes.length) {
     throw new Error(
-      `fetchAuthorityTimeline: GraphQL response is internally inconsistent (totalCount ${conn.totalCount} < ` +
+      `fetchAuthorityTimeline: GraphQL response is internally inconsistent (filteredCount ${conn.filteredCount} < ` +
         `nodes.length ${conn.nodes.length}) for ${repo}#${prNumber}`,
     );
   }
@@ -546,15 +559,22 @@ export function fetchAuthorityTimeline(repo: string, prNumber: number): { timeli
     };
   });
 
-  // Computed against `timeline.length` (== `nodes.length`) rather than the literal
-  // `AUTHORITY_TIMELINE_PAGE_SIZE` constant: `nodes.length` is always <= that
-  // constant given `last: N` in the query, so the two comparisons agree whenever the
-  // fetch behaved as expected — but comparing against the ACTUAL returned count also
-  // correctly flags truncation in the (should-never-happen) case where fewer nodes
-  // came back than the page size allows, which the literal-250 form would miss. This
-  // is strictly more conservative than the doc's literal "`totalCount > 250`" phrasing,
-  // never less (Rule #4: doubt resolves toward refusal).
-  return { timeline, truncated: conn.totalCount > timeline.length };
+  // Truncation = `pageInfo.hasPreviousPage` (the connection's own windowing signal:
+  // relevant events exist BEFORE this `last: N` window) OR `filteredCount >
+  // timeline.length` as a belt-and-suspenders inconsistency guard. Deliberately NOT
+  // `totalCount`: live-proven 2026-08-28 (studiob#613, train run 33218268263 +
+  // three direct GraphQL probes) that `totalCount` on `timelineItems` counts the
+  // UNFILTERED timeline — it ignores the `itemTypes:` argument — so any ordinary
+  // issue comment (including the train's OWN CLICK DUE receipt comment) pushes it
+  // past `nodes.length` on a complete window, permanently fail-closing a healthy PR
+  // as "timeline-truncated" one tick after the train itself comments. Probe receipt:
+  // filteredCount:2 / nodes:2 / hasPreviousPage:false / totalCount:3 on a PR with 2
+  // relevant events + 1 comment. `filteredCount` respects the filter, and comparing
+  // it against the ACTUAL returned count (not the literal page-size constant) still
+  // catches the should-never-happen short-page case (Rule #4: doubt resolves toward
+  // refusal — but a signal proven to fire on healthy PRs is a false-refusal
+  // generator, not conservatism; Rule #471's planted GOOD control caught this).
+  return { timeline, truncated: conn.pageInfo.hasPreviousPage === true || conn.filteredCount > timeline.length };
 }
 
 /**
