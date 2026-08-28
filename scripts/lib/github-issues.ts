@@ -29,6 +29,79 @@ export function gh(args: string[]): string {
 }
 
 /**
+ * Transient-failure predicate for `gh` invocations (ops-pipeline#158). Deliberately TIGHT
+ * (Rule #425 — an over-broad transient predicate retries what it must not):
+ *  - `HTTP 5\d\d` — gh surfaces the status line on stderr (`gh: … (HTTP 502)`); cannot match
+ *    4xx, which MUST pass through untouched (isOrgMember's 404 semantics and closeIfOpen's
+ *    check-failed semantics both depend on 4xx propagating on the first attempt).
+ *  - "couldn't respond to your request in time" — GitHub's 50x error-page phrase, which gh
+ *    relays verbatim when the API returns the HTML unicorn page (the 2026-08-17 incident's
+ *    exact stderr shape).
+ *  - ECONNRESET / ETIMEDOUT — socket-level transport failures.
+ */
+const TRANSIENT_GH_PATTERNS: RegExp[] = [
+  /HTTP 5\d\d/,
+  /couldn't respond to your request in time/i,
+  /ECONNRESET/,
+  /ETIMEDOUT/,
+];
+
+export function isTransientGhFailure(err: unknown): boolean {
+  const detail =
+    err instanceof Error
+      ? `${(err as NodeJS.ErrnoException & { stderr?: string }).stderr ?? ""}\n${err.message}`
+      : String(err);
+  return TRANSIENT_GH_PATTERNS.some((p) => p.test(detail));
+}
+
+/** Synchronous sleep — these are sync CLI scripts (execFileSync end to end), so a Promise-based
+ * sleep has nothing to await it; `Atomics.wait` blocks the thread without spinning the CPU. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+export interface GhRetryOptions {
+  /** Total attempts including the first (default 3). */
+  attempts?: number;
+  /** Injectable for tests — defaults to a real blocking sleep. */
+  sleep?: (ms: number) => void;
+  /** Short label for the retry log line (never interpolate full args — bodies may be long). */
+  label?: string;
+}
+
+/**
+ * Bounded retry for READ-ONLY `gh` calls (ops-pipeline#158): ≤3 attempts, retrying ONLY on
+ * `isTransientGhFailure` shapes, with flat jittered backoff (1–5 s) between attempts. A
+ * non-transient failure (4xx, auth, parse) is rethrown immediately on the first attempt —
+ * byte-identical behavior to the unwrapped call.
+ *
+ * ⚠️ NEVER wrap MUTATING calls (issue create/close/comment/edit, label ops) in this: a 5xx can
+ * arrive AFTER the server committed the write (timeout-after-commit), and a retry then mints a
+ * duplicate issue/comment. Mutators stay fail-loud one-shot; the sweeps' own idempotency
+ * (open-issue-as-dedup-state, closeIfOpen re-checks, marker-deduped receipts) self-heals them
+ * on the next scheduled run instead.
+ */
+export function withGhRetry<T>(fn: () => T, opts: GhRetryOptions = {}): T {
+  const attempts = opts.attempts ?? 3;
+  const sleep = opts.sleep ?? sleepSync;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isTransientGhFailure(err) || attempt === attempts) throw err;
+      const backoffMs = 1000 + Math.floor(Math.random() * 4000);
+      console.error(
+        `[gh-retry] transient failure on ${opts.label ?? "gh call"} (attempt ${attempt}/${attempts}) — retrying in ${backoffMs}ms`,
+      );
+      sleep(backoffMs);
+    }
+  }
+  throw lastErr; // structurally unreachable (loop always returns or throws)
+}
+
+/**
  * Issues carrying `label` in `repo` matching `state`. Rule #322: `--json` always returns valid
  * JSON (a real `[]` for none) — no jq-"null" style traps to guard against.
  *
@@ -44,10 +117,10 @@ export function gh(args: string[]): string {
  * operational signal, not a normal monitor page-cap risk).
  */
 export function listIssuesByLabel(repo: string, label: string, state: "open" | "closed" | "all", limit = 1000): IssueRef[] {
-  const out = gh([
+  const out = withGhRetry(() => gh([
     "issue", "list", "--repo", repo, "--label", label, "--state", state,
     "--limit", String(limit), "--json", "number,title,state",
-  ]);
+  ]), { label: `issue list ${repo}` });
   const parsed = JSON.parse(out) as IssueRef[];
   return Array.isArray(parsed) ? parsed : [];
 }
@@ -145,13 +218,13 @@ export interface IssueComment {
  * Link headers so a long thread's later comments are never silently dropped (Rule #331).
  */
 export function listIssueComments(repo: string, issueNumber: number): IssueComment[] {
-  const out = gh([
+  const out = withGhRetry(() => gh([
     "api",
     `repos/${repo}/issues/${issueNumber}/comments`,
     "--paginate",
     "--jq",
     ".[] | {id, body, login: .user.login, createdAt: .created_at}",
-  ]);
+  ]), { label: `comments ${repo}#${issueNumber}` });
   // `--paginate` concatenates one JSON value per page on its own line, not a single array.
   return out
     .split("\n")
@@ -175,7 +248,10 @@ export interface CommentReaction {
  * later reactor's 👎 from the authorization check — mirrors `listIssueComments`'s own guard.
  */
 export function getCommentReactions(repo: string, commentId: number): CommentReaction[] {
-  const out = gh(["api", `repos/${repo}/issues/comments/${commentId}/reactions`, "--paginate", "--jq", ".[] | {content, login: .user.login}"]);
+  const out = withGhRetry(
+    () => gh(["api", `repos/${repo}/issues/comments/${commentId}/reactions`, "--paginate", "--jq", ".[] | {content, login: .user.login}"]),
+    { label: `reactions ${repo} comment ${commentId}` },
+  );
   return out
     .split("\n")
     .filter((line) => line.trim().length > 0)
@@ -222,7 +298,10 @@ export function getCommentReactions(repo: string, commentId: number): CommentRea
  */
 export function isOrgMember(org: string, login: string): boolean {
   try {
-    gh(["api", `orgs/${org}/members/${login}`]);
+    // withGhRetry preserves the 404 contract exactly: a 404 fails `isTransientGhFailure`, so it
+    // is rethrown on the FIRST attempt and lands in this catch unchanged — only genuine 5xx /
+    // transport blips are retried before reaching the ambiguous-failure throw below.
+    withGhRetry(() => gh(["api", `orgs/${org}/members/${login}`]), { label: `org-membership ${org}/${login}` });
     return true;
   } catch (err) {
     const detail = err instanceof Error ? `${(err as NodeJS.ErrnoException & { stderr?: string }).stderr ?? ""}\n${err.message}` : String(err);

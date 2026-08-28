@@ -127,6 +127,7 @@ import {
   commentIssue,
   gh,
   getCommentReactions,
+  isTransientGhFailure,
   listIssueComments,
   listIssuesByLabel,
   removeLabel,
@@ -539,6 +540,20 @@ function applyDisposition(ctx: {
   }
 }
 
+/**
+ * Per-unit transient-skip counter (ops-pipeline#158). One issue whose comment thread is
+ * unreadable after `withGhRetry`'s bounded retries (a lingering GitHub 5xx window) must
+ * degrade to SKIPPING that unit — not abort the whole fleet sweep, which is what the
+ * 2026-08-17 outage did: one 504 mid-thread killed the run and every later repo's units
+ * went unprocessed. Skipped units re-enter on the next scheduled run (the open issue IS
+ * the state — nothing is lost, only deferred). Deliberately NOT applied to the
+ * per-repo ENUMERATION calls (listIssuesByLabel in main/runOrphanTwinCleanup and the
+ * recall search): if enumeration itself fails post-retry, the sweep genuinely cannot see
+ * the repo's units and MUST fail loud so the #358 consecutive-failure escalation still
+ * fires during a real outage.
+ */
+let unitSkipsTransient = 0;
+
 function processIssue(
   ownRepo: string,
   ownRepoShort: string,
@@ -546,7 +561,15 @@ function processIssue(
   dryRun: boolean,
   isAuthorizedReactor: (login: string) => boolean,
 ): CrossRepoDisposition {
-  const comments = listIssueComments(ownRepo, issue.number);
+  let comments: IssueComment[];
+  try {
+    comments = listIssueComments(ownRepo, issue.number);
+  } catch (err) {
+    if (!isTransientGhFailure(err)) throw err;
+    unitSkipsTransient++;
+    console.log(`  WARN [crossrepo] ${ownRepo}#${issue.number}: comments unreadable after retries — main-pass unit SKIPPED this run`);
+    return { kind: "skip" };
+  }
   const trusted = trustedComments(comments);
   const probeComment = findLast(trusted, PROBE_MARKER);
   const routeReceiptPresent = hasRouteReceipt(trusted.map((c) => c.body));
@@ -750,7 +773,16 @@ function runRecallPass(repo: string, dryRun: boolean, isAuthorizedReactor: (logi
   console.log(`[crossrepo] ${repo}: ${candidates.length} issue(s) ever cross-repo-routed by this sweep — recall pass.`);
 
   for (const issue of candidates) {
-    const comments = listIssueComments(repo, issue.number);
+    let comments: IssueComment[];
+    try {
+      comments = listIssueComments(repo, issue.number);
+    } catch (err) {
+      if (!isTransientGhFailure(err)) throw err;
+      unitSkipsTransient++;
+      console.log(`  WARN [crossrepo] ${repo}#${issue.number}: comments unreadable after retries — recall unit SKIPPED this run`);
+      dispositions.push({ kind: "skip" });
+      continue;
+    }
     const trusted = trustedComments(comments);
     const routeComment = findLast(trusted, ROUTE_RECEIPT_MARKER);
     const pointer = routeComment ? extractTwinPointer(routeComment.body) : null;
@@ -849,7 +881,15 @@ function runOrphanTwinCleanup(repo: string, dryRun: boolean, isAuthorizedReactor
 
   let handled = 0;
   for (const issue of closedLabeled) {
-    const comments = listIssueComments(repo, issue.number);
+    let comments: IssueComment[];
+    try {
+      comments = listIssueComments(repo, issue.number);
+    } catch (err) {
+      if (!isTransientGhFailure(err)) throw err;
+      unitSkipsTransient++;
+      console.log(`  WARN [crossrepo] ${repo}#${issue.number}: comments unreadable after retries — orphan-twin check SKIPPED this run`);
+      continue;
+    }
     const trusted = trustedComments(comments);
     if (hasRouteReceipt(trusted.map((c) => c.body))) continue; // a route receipt exists (with or without a pointer) — not this function's case, whatever else may be true
 
@@ -914,6 +954,9 @@ async function main(): Promise<void> {
     console.log(`  ${kind.padEnd(20)} ${count}`);
   }
   console.log(`  orphan-twin-cleanup  ${orphansHandled}`);
+  console.log(
+    `  transient-unit-skips ${unitSkipsTransient}${unitSkipsTransient > 0 ? "  ⚠️  DEGRADED RUN — these units were skipped after retry exhaustion and re-enter next scheduled run (ops-pipeline#158)" : ""}`,
+  );
   console.log(`  issue creations: ${creationsApplied}${dryRun ? " (previewed, not applied)" : " applied"}, cap=${ISSUE_CREATION_CAP}`);
   if (creationsCapped > 0) {
     console.log(`  ⚠️  CAPPED — ${creationsCapped} cross-repo filing(s) deferred to the next run (Rule #331).`);
