@@ -1,10 +1,10 @@
 name: Heritage Restart Train
 
-# ops-pipeline#172, rung 0 + rung 1 (CTO seat, Kevin LOCKED option A -- merge authority --
-# 2026-08-19T20:45Z). Full design lives in scripts/restart-train.ts's and
-# scripts/lib/restart-train-lib.ts's header comments; this workflow only mints the fleet
-# App token (repo-hygiene.yml / backlog-staleness.yml's pattern, copied verbatim) and runs
-# the worker with it.
+# ops-pipeline#172, rungs 0 + 1 + 3 (Mechanic seat, Kevin LOCKED option A -- merge authority
+# -- 2026-08-19T20:45Z; rung-3 GO = "done;go", sitting 2026-08-28 §8.4). Full design lives in
+# scripts/restart-train.ts's and scripts/lib/restart-train-lib.ts's header comments; this
+# workflow only mints the fleet App token (repo-hygiene.yml / backlog-staleness.yml's
+# pattern, copied verbatim) and runs the worker with it.
 #
 # Canon: brain vault library/architecture/2026-08-19-heritage-restart-train-design.md
 # (design v0) + library/decisions/2026-08-19-heritage-restart-train-merge-authority-label-gated.md
@@ -25,9 +25,21 @@ name: Heritage Restart Train
 # flight, and its CI rollup is green, the worker posts ONE `CLICK DUE` comment on the
 # queue-head PR itself (+ a mirror on --target) telling a human to click merge; a
 # red/pending rollup posts a HELD-style deduped line instead (Rule #89: never page a human
-# to a red-CI PR). This workflow still fires NOTHING and merges NOTHING -- `--fire` (rung
-# 3's live-merge mode) is not built yet and the worker throws unconditionally if asked for
-# it; CLICK DUE only ever asks a human to click, it never clicks for them.
+# to a red-CI PR).
+#
+# RUNG 3 (ops-pipeline#172; Kevin GO "done;go", sitting 2026-08-28 §8.4) makes this the LIVE
+# merge mode. Scheduled runs (and workflow_dispatch with dry_run=false) pass `--fire`: a
+# green queue head that clears the SAME gate ladder maybePage() always ran (window CLEAR,
+# nothing in flight, rollup green, label authority intact) is sha-pinned squash-MERGED (one
+# attempt, --match-head-commit, fail-closed on any drift/error -- the worker never retries a
+# merge) instead of paged CLICK DUE, train:ready is consumed, train:in-flight is applied, and
+# the observe state machine watches the restart to `END` / `END · FAILED` (studiob: Railway
+# deployment terminal + /health 200 on the NEW deployment, Rule #208; client-asthetik: the
+# merge-push run's deploy job conclusion). Failures open a `restart-train`-labeled machinery
+# issue on ops-pipeline (Rule #165 auto-reconcile: open issue = train LOCKED until a human
+# closes it). ONE merge in flight, ever; train:hold + HERITAGE_TRAIN_ENABLED + the
+# machinery-issue hold still gate every fire. Manual dispatch DEFAULTS to dry_run=true (a
+# safe no-fire tick); the cron is the live train.
 #
 # HERITAGE_TRAIN_ENABLED (repo variable) does NOT exist yet as of this workflow's merge --
 # the job-level `if:` below means BOTH the scheduled AND the workflow_dispatch-triggered
@@ -52,7 +64,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Must stay true in rung 0 -- setting this to false is REFUSED by the worker (throws \"rung 3 not built\", the job goes red on purpose). Rung 3 is what will make this a real live-merge mode."
+        description: "true (default) = safe no-fire tick: schedule/plan/page only, no merge. false = LIVE FIRE for this dispatch -- the worker merges a green queue head exactly as the cron does (rung 3, Kevin GO sitting 2026-08-28 §8.4). Scheduled runs always run live."
         required: false
         type: boolean
         default: true
@@ -76,7 +88,7 @@ concurrency:
 
 jobs:
   plan:
-    name: "Heritage restart train -- rung 0 dry-run scheduler + rung 1 label-authority/paging (fleet App token)"
+    name: "Heritage restart train -- rung 3 live scheduler/merger + observe (fleet App token)"
     runs-on: ubuntu-latest
     # Job-level gate (brief requirement, verbatim) -- applies to BOTH triggers uniformly, not
     # just the schedule: the repo variable does not exist yet, so this job is a no-op on
@@ -127,7 +139,10 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
-          FIRE_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run == false) && '--fire' || '' }}
+          # Rung 3: the SCHEDULE is the live train (cron ticks always fire); manual dispatch
+          # fires only on an explicit dry_run=false. inputs.dry_run is boolean-typed and
+          # github.event_name is GitHub-controlled -- no attacker text flows through this.
+          FIRE_FLAG: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.dry_run == false)) && '--fire' || '' }}
           NOW_INPUT: ${{ inputs.now }}
           TARGET_INPUT: ${{ inputs.target }}
         run: |
