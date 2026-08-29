@@ -297,13 +297,21 @@ export interface RollupItem {
 // EXPECTED ("Status is expected") from SUCCESS — an expected-but-never-reported
 // status must not satisfy the CI leg. https://docs.github.com/graphql/reference/enums#statusstate
 const CLEAN_LEGACY_STATES = new Set(["SUCCESS"]);
-const CLEAN_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+// SKIPPED is NOT here (Rule #459 amendment, 2026-08-28 sitting §3): a SKIPPED
+// conclusion counts as clean ONLY when the check's name is on the sanctioned
+// skip-by-design allowlist for the repo under evaluation — see `isItemClean`'s
+// `sanctionedSkips` parameter and scripts/automerge-skip-allowlist.yaml. Blanket
+// SKIPPED acceptance let a conditionally-skipped load-bearing check (a deploy
+// gate, a pre-deploy qualification) read as satisfied — the #320 transitive-skip
+// class riding straight through the CI leg.
+const CLEAN_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL"]);
 
 /**
  * `gh pr view --json statusCheckRollup` mixes two shapes: legacy commit statuses
  * (`state`) and modern check runs (`status`/`conclusion`). Clean means EVERY item is
  * either a legacy SUCCESS/EXPECTED state, or a COMPLETED check run whose conclusion is
- * SUCCESS/NEUTRAL/SKIPPED. Anything still running, anything failed, any missing or
+ * SUCCESS/NEUTRAL — or SKIPPED with its name on the repo's sanctioned skip-by-design
+ * allowlist. Anything still running, anything failed, any missing or
  * unrecognized conclusion/state value, and any unrecognized item shape is unclean —
  * fail-closed (a rollup format or value this function doesn't recognize must never
  * read as "clean").
@@ -631,11 +639,21 @@ function isTerminal(item: RollupItem): boolean {
   return false; // unrecognized shape — never terminal, so it can never supersede anything
 }
 
-/** True when a SINGLE rollup entry is clean. Unchanged allowlist semantics. */
-function isItemClean(item: RollupItem): boolean {
+/**
+ * True when a SINGLE rollup entry is clean. Allowlist semantics throughout —
+ * with one named gate (Rule #459 amendment): a SKIPPED conclusion is clean ONLY
+ * when the entry's name (check-run `name` / legacy `context`) is in
+ * `sanctionedSkips`, the repo's sanctioned skip-by-design set. An entry that
+ * skipped but carries NO name can never match — fail-closed by construction.
+ */
+function isItemClean(item: RollupItem, sanctionedSkips: ReadonlySet<string>): boolean {
   if (item.state !== undefined) return CLEAN_LEGACY_STATES.has(item.state);
   if (item.status !== undefined) {
     if (item.status !== "COMPLETED") return false; // still running/queued
+    if (item.conclusion === "SKIPPED") {
+      const name = item.name ?? item.context;
+      return name !== undefined && name !== "" && sanctionedSkips.has(name);
+    }
     return !!item.conclusion && CLEAN_CONCLUSIONS.has(item.conclusion);
   }
   // Unrecognized item shape — fail-closed rather than silently treating as clean.
@@ -660,7 +678,19 @@ function rollupTime(item: RollupItem): number {
   return Number.isNaN(t) ? 0 : t;
 }
 
-export function isRollupClean(rollup: RollupItem[]): boolean {
+const NO_SANCTIONED_SKIPS: ReadonlySet<string> = new Set();
+
+/**
+ * @param sanctionedSkips Names of skip-by-design checks whose SKIPPED conclusion
+ *   counts as clean for THIS repo (Rule #459 amendment — load via
+ *   `loadSanctionedSkips(repo)` from ./automerge-skip-allowlist.js). Defaults to
+ *   the EMPTY set: omitting it sanctions nothing, so a caller that never wires
+ *   the allowlist fails closed on every skipped check rather than open.
+ */
+export function isRollupClean(
+  rollup: RollupItem[],
+  sanctionedSkips: ReadonlySet<string> = NO_SANCTIONED_SKIPS,
+): boolean {
   // Empty rollup = NOT clean (codex P3 fix, 2026-07-31): "full CI green" requires
   // CI to exist. A caller repo with zero checks — or an unexpectedly-empty rollup
   // response — must queue for a human, not vacuously pass the CI leg. Repos without
@@ -707,7 +737,7 @@ export function isRollupClean(rollup: RollupItem[]): boolean {
     //     refuses rather than picking one by array order (Rule #318: no
     //     nondeterministic tie-breaks). This also covers the all-timestamps-missing
     //     case, where every entry ties at 0 and the old every-entry behavior applies.
-    if (items.some((item) => rollupTime(item) === newest && !isItemClean(item))) return false;
+    if (items.some((item) => rollupTime(item) === newest && !isItemClean(item, sanctionedSkips))) return false;
   }
 
   return true;

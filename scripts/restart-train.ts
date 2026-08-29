@@ -188,6 +188,7 @@ import {
   type WorkflowRunLike,
 } from "./lib/restart-train-fire.js";
 import { isRollupClean, evaluateMergeReadiness, type RollupItem } from "./lib/automerge-classify.js";
+import { loadSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
 import { parseArgs, parseTarget, CALENDAR_REPO, CALENDAR_ISSUE, type Flags } from "./lib/restart-train-args.js";
 
 const TICKET_REPOS = ["studio-b-ai/studiob", "studio-b-ai/client-asthetik"] as const;
@@ -786,7 +787,7 @@ async function maybePage(
   const readiness = evaluateMergeReadiness({
     state: prJson.state,
     isDraft: prJson.isDraft,
-    ciClean: isRollupClean(prJson.statusCheckRollup),
+    ciClean: isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(ticket.repo)),
     mergeStateStatus: prJson.mergeStateStatus,
   });
 

@@ -73,6 +73,7 @@ import {
   type PrDiffClass,
   type RollupItem,
 } from "./lib/automerge-classify.js";
+import { loadSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
 import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
@@ -303,7 +304,7 @@ async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[],
   const author = prJson.author.login;
   const labels = prJson.labels.map((l) => l.name);
   const totalChangedLines = prJson.additions + prJson.deletions;
-  const ciClean = isRollupClean(prJson.statusCheckRollup);
+  const ciClean = isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo));
 
   // ── Leg "ci-rollup" (cheap, no diff fetch, no API spend): state + non-draft + CI +
   //    merge readiness. isDraft is checked here because GitHub reports
@@ -720,7 +721,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   const readiness = evaluateMergeReadiness({
     state: prJson.state,
     isDraft: prJson.isDraft,
-    ciClean: isRollupClean(prJson.statusCheckRollup),
+    ciClean: isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo)),
     mergeStateStatus: prJson.mergeStateStatus,
   });
   if (!readiness.ready) {
