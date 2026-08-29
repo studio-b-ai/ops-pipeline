@@ -23,9 +23,16 @@ export interface Flags {
   /** Rung 1 Leg B (ops-pipeline#172): default OFF. Without it, behavior is byte-identical to
    *  rung 0/Leg A — no CI-rollup check, no in-flight check, no `CLICK DUE` posting. Independent
    *  of `--post` (which still gates whether anything actually gets written, exactly as it does
-   *  for every other posting path in this worker) and independent of `--fire` (still throws
-   *  unconditionally above — this flag never builds a merge path). */
+   *  for every other posting path in this worker). */
   page: boolean;
+  /** Rung 3 (ops-pipeline#172; Kevin GO "done;go", sitting 2026-08-28 §8.4): default OFF. With
+   *  it, a green ready queue head is sha-pinned squash-MERGED instead of paged as CLICK DUE, and
+   *  the observe state machine runs to END / END · FAILED. Three coherence guards, all throws:
+   *  `--fire` refuses `--now` (live merges run on the REAL clock only — a simulated clock could
+   *  fire outside the window law); `--fire` requires `--post` (a merge with no ledger receipts
+   *  would be invisible, #4/#412) and `--page` (the fire path lives inside the paging gate
+   *  ladder — fire without page is a no-op the operator would misread as armed, #376). */
+  fire: boolean;
 }
 
 /** The human restart calendar — a READ source for this worker, never a post target. */
@@ -34,8 +41,16 @@ export const CALENDAR_ISSUE = 280;
 export const DEFAULT_TARGET = "studio-b-ai/ops-pipeline#172";
 
 export function parseArgs(argv: string[]): Flags {
-  if (argv.includes("--fire")) {
-    throw new Error("rung 3 not built — this worker only ever runs --dry-run in rung 0 (ops-pipeline#172)");
+  const fire = argv.includes("--fire");
+  if (fire && argv.includes("--now")) {
+    throw new Error(
+      "--fire refuses --now — live merges must run on the real clock (the window law is meaningless under a simulated timestamp); drop --now or drop --fire",
+    );
+  }
+  if (fire && (!argv.includes("--post") || !argv.includes("--page"))) {
+    throw new Error(
+      "--fire requires both --post and --page — a live merge without ledger receipts (--post) or outside the paging gate ladder (--page) is incoherent (rung 3, ops-pipeline#172)",
+    );
   }
   const nowIdx = argv.indexOf("--now");
   if (nowIdx !== -1 && !argv[nowIdx + 1]) throw new Error("--now requires an ISO timestamp");
@@ -53,7 +68,7 @@ export function parseArgs(argv: string[]): Flags {
   }
   const post = argv.includes("--post");
   const page = argv.includes("--page");
-  return { dryRun: true, now, target, post, page };
+  return { dryRun: !fire, now, target, post, page, fire };
 }
 
 export function parseTarget(target: string): { repo: string; number: number } {

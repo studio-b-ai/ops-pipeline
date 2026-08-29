@@ -4,8 +4,14 @@ import { CALENDAR_ISSUE, CALENDAR_REPO, DEFAULT_TARGET, parseArgs, parseTarget }
 describe("parseArgs (restart-train)", () => {
   // ───── Negative controls first (Rule #322) ─────
 
-  it("throws on --fire (rung 3 not built)", () => {
-    expect(() => parseArgs(["--fire"])).toThrow(/rung 3 not built/);
+  it("--fire refuses --now — live merges run on the real clock only (window law)", () => {
+    expect(() => parseArgs(["--fire", "--post", "--page", "--now", "2026-08-29T02:00:00Z"])).toThrow(/real clock/);
+  });
+
+  it("--fire requires BOTH --post and --page (a silent or unreachable fire path is incoherent)", () => {
+    expect(() => parseArgs(["--fire"])).toThrow(/requires both --post and --page/);
+    expect(() => parseArgs(["--fire", "--post"])).toThrow(/requires both --post and --page/);
+    expect(() => parseArgs(["--fire", "--page"])).toThrow(/requires both --post and --page/);
   });
 
   it("throws on an unparsable --now", () => {
@@ -25,13 +31,22 @@ describe("parseArgs (restart-train)", () => {
 
   // ───── Positive paths ─────
 
-  it("defaults: dry-run true, post false, page false, target = ops-pipeline#172, now = a parsable timestamp", () => {
+  it("defaults: dry-run true, fire false, post false, page false, target = ops-pipeline#172, now = a parsable timestamp", () => {
     const f = parseArgs([]);
     expect(f.dryRun).toBe(true);
+    expect(f.fire).toBe(false);
     expect(f.post).toBe(false);
     expect(f.page).toBe(false);
     expect(f.target).toBe(DEFAULT_TARGET);
     expect(Number.isNaN(Date.parse(f.now))).toBe(false);
+  });
+
+  it("--fire with --post + --page arms the live path: fire true, dryRun false (rung 3, Kevin GO sitting 2026-08-28 §8.4)", () => {
+    const f = parseArgs(["--fire", "--post", "--page"]);
+    expect(f.fire).toBe(true);
+    expect(f.dryRun).toBe(false);
+    expect(f.post).toBe(true);
+    expect(f.page).toBe(true);
   });
 
   it("accepts an explicit non-calendar target and --now/--post", () => {
