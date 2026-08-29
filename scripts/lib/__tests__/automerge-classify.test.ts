@@ -325,15 +325,13 @@ describe("isRollupClean", () => {
     expect(isRollupClean([{ state: "SUCCESS" }, { state: "EXPECTED" }])).toBe(false);
   });
 
-  it("is clean with all COMPLETED check runs at SUCCESS/NEUTRAL/SKIPPED", () => {
+  it("is clean with all COMPLETED check runs at SUCCESS/NEUTRAL", () => {
     // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
     const rollup = [
       // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
       { status: "COMPLETED", conclusion: "SUCCESS" },
       // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
       { status: "COMPLETED", conclusion: "NEUTRAL" },
-      // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
-      { status: "COMPLETED", conclusion: "SKIPPED" },
     ];
     expect(isRollupClean(rollup)).toBe(true);
   });
@@ -341,6 +339,89 @@ describe("isRollupClean", () => {
   it("is clean with a mix of legacy and check-run shapes, all green", () => {
     // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
     expect(isRollupClean([{ state: "SUCCESS" }, { status: "COMPLETED", conclusion: "SUCCESS" }])).toBe(true);
+  });
+
+  // ───── Sanctioned skips (Rule #459 amendment, Friday sitting 2026-08-28 §3) ─────
+  // SKIPPED is clean ONLY when the check's name is in the caller-supplied sanctioned
+  // set. Negative controls first (Rule #322).
+
+  it("is UNCLEAN with a bare SKIPPED conclusion and no sanctioned set — the pre-amendment blanket-clean behavior is gone", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    expect(isRollupClean([{ status: "COMPLETED", conclusion: "SKIPPED", name: "deploy" }])).toBe(false);
+  });
+
+  it("is UNCLEAN when the skipped check's name is NOT in the sanctioned set", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    const rollup = [{ status: "COMPLETED", conclusion: "SKIPPED", name: "build / Pre-Deploy Qualification" }];
+    expect(isRollupClean(rollup, new Set(["Slack Notification"]))).toBe(false);
+  });
+
+  it("is UNCLEAN for an UNNAMED skipped entry even with a non-empty sanctioned set — no name can never match", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    const rollup = [{ status: "COMPLETED", conclusion: "SKIPPED" }];
+    expect(isRollupClean(rollup, new Set(["Slack Notification"]))).toBe(false);
+  });
+
+  it("is UNCLEAN when a sanctioned skip coexists with an unsanctioned one — sanction is per-entry, never blanket", () => {
+    const sanctioned = new Set(["Slack Notification"]);
+    const rollup = [
+      // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+      { status: "COMPLETED", conclusion: "SKIPPED", name: "Slack Notification" },
+      // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+      { status: "COMPLETED", conclusion: "SKIPPED", name: "deploy / Deploy to production" },
+    ];
+    expect(isRollupClean(rollup, sanctioned)).toBe(false);
+  });
+
+  it("is UNCLEAN when a newer run of a sanctioned-skip check FAILS — supersession recency still governs", () => {
+    const sanctioned = new Set(["Post-Deploy Smoke"]);
+    const rollup = [
+      // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+      { status: "COMPLETED", conclusion: "SKIPPED", name: "Post-Deploy Smoke", startedAt: "2026-08-29T10:00:00Z", completedAt: "2026-08-29T10:01:00Z" },
+      // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+      { status: "COMPLETED", conclusion: "FAILURE", name: "Post-Deploy Smoke", startedAt: "2026-08-29T11:00:00Z", completedAt: "2026-08-29T11:01:00Z" },
+    ];
+    expect(isRollupClean(rollup, sanctioned)).toBe(false);
+  });
+
+  it("is UNCLEAN for a sanctioned name whose skip is still IN_PROGRESS-shaped — the COMPLETED gate fires first", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    const rollup = [{ status: "IN_PROGRESS", conclusion: "SKIPPED", name: "Slack Notification" }];
+    expect(isRollupClean(rollup, new Set(["Slack Notification"]))).toBe(false);
+  });
+
+  it("is clean when the skipped check's name IS in the sanctioned set", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    const rollup = [{ status: "COMPLETED", conclusion: "SKIPPED", name: "Slack Notification" }];
+    expect(isRollupClean(rollup, new Set(["Slack Notification"]))).toBe(true);
+  });
+
+  it("matches a sanctioned skip via the legacy `context` key when `name` is absent", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    const rollup = [{ status: "COMPLETED", conclusion: "SKIPPED", context: "Slack Notification" }];
+    expect(isRollupClean(rollup, new Set(["Slack Notification"]))).toBe(true);
+  });
+
+  it("is clean with a green rollup carrying a sanctioned skip alongside real successes", () => {
+    const sanctioned = new Set(["e2e / flake-detection"]);
+    const rollup = [
+      // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+      { status: "COMPLETED", conclusion: "SUCCESS", name: "test" },
+      // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+      { status: "COMPLETED", conclusion: "SKIPPED", name: "e2e / flake-detection" },
+    ];
+    expect(isRollupClean(rollup, sanctioned)).toBe(true);
+  });
+
+  it("is clean when a newer run of a sanctioned check SKIPS over an older failure — supersession works in the sanctioned direction too", () => {
+    const sanctioned = new Set(["Post-Deploy Smoke"]);
+    const rollup = [
+      // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+      { status: "COMPLETED", conclusion: "FAILURE", name: "Post-Deploy Smoke", startedAt: "2026-08-29T10:00:00Z", completedAt: "2026-08-29T10:01:00Z" },
+      // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+      { status: "COMPLETED", conclusion: "SKIPPED", name: "Post-Deploy Smoke", startedAt: "2026-08-29T11:00:00Z", completedAt: "2026-08-29T11:01:00Z" },
+    ];
+    expect(isRollupClean(rollup, sanctioned)).toBe(true);
   });
 });
 

@@ -1,0 +1,50 @@
+# Sanctioned skip-by-design check names — Rule #459 amendment (Friday sitting
+# 2026-08-28 §3, Mechanic package item 3: "durable allowlist = Mechanic's build").
+#
+# CONTRACT: a check-run whose conclusion is SKIPPED counts toward "CI clean"
+# ONLY when its name appears here under the repo being evaluated. Every other
+# SKIPPED entry is UNCLEAN — the gate/train waits for a human (fail-closed).
+# Repos absent from this file sanction NOTHING. The per-merge manual form for
+# an interactive one-off is `# CHECKS-GATE-EXEMPT: <reason>` on the merge
+# command itself — per-train, never standing; this file is the standing set.
+#
+# WHAT QUALIFIES: checks that skip BY DESIGN on PR events — failure-conditional
+# notify jobs, main-only deploy smoke, advisory/shadow suites, jobs gated on a
+# decommissioned dependency. WHAT NEVER QUALIFIES: a load-bearing check that
+# skips CONDITIONALLY (a skipped deploy/qualification/validation job is exactly
+# the state the gate exists to catch — Rule #320's transitive-skip class).
+#
+# Names are matched EXACTLY against the rollup entry's `name` (check runs) or
+# `context` (legacy statuses) — copy them verbatim from a live rollup, template
+# artifacts included (see the client-asthetik ui-tests-local entry: GitHub
+# reports the UNEXPANDED `${{ inputs.* }}` name when the job skips before
+# expansion; the observed string is the key, per the Rule #374 verbatim-mirror
+# discipline).
+#
+# Seeded 2026-08-29 from a live population probe (Rule #465): 15 most-recent
+# PRs per sweep-caller repo + both restart-train ticket repos, aggregating
+# every conclusion==SKIPPED name. Repos with zero observed skips (ops-pipeline,
+# asthetik-trade-theme, asthetik-portal, studiob-price-sync, brain) carry no
+# row on purpose.
+#
+# Consumed by scripts/lib/automerge-skip-allowlist.ts →
+# isRollupClean(rollup, sanctionedSkips) in scripts/lib/automerge-classify.ts.
+# Editing this file is a normal PR to ops-pipeline (Mechanic-owned); callers
+# pick it up on their next sweep via the reusable workflow's @main checkout.
+
+repos:
+  studio-b-ai/bolt-wms:
+    - "e2e / flake-detection"
+    - "Slack Notification"
+  studio-b-ai/webhook-router:
+    - "Slack Recovery Notice"
+    - "Slack Alert on Failure"
+    - "Post-Deploy Smoke"
+  studio-b-ai/studiob:
+    - "Notify on Failure"
+  studio-b-ai/client-asthetik:
+    - "qualify / ui-tests-local ${{ inputs.ui_tests_local_path }} (advisory)"
+    - "qualify / ui-test-suite @acumatica"
+    - "qualify / sandbox publish dry-run"
+    - "qualify / Notify on qualifier failure"
+    - "Auto-qualifier (shadow)"
