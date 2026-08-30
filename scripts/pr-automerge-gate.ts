@@ -209,6 +209,14 @@ function addLabel(repo: string, pr: number, label: string): void {
   gh(["pr", "edit", String(pr), "--repo", repo, "--add-label", label]);
 }
 
+/** ops#190 B1 (codex pass-2 P2 fix): undo of addLabel for the abort paths — a
+ *  `automerge:code-fix` label left on an UNMERGED PR would let a later HUMAN merge
+ *  fire the B2 tripwire on code this gate never merged. Throws on failure; the
+ *  caller treats cleanup as best-effort (log loudly, never mask the abort). */
+function removeLabel(repo: string, pr: number, label: string): void {
+  gh(["pr", "edit", String(pr), "--repo", repo, "--remove-label", label]);
+}
+
 // ───────────────────────────── diff parsing ─────────────────────────────
 
 function stripAbPrefix(p: string): string {
@@ -551,9 +559,32 @@ async function evaluate(
   // merge without the label would be INVISIBLE to the canary. Label-apply failure
   // therefore ABORTS the merge (fail-closed): an unmerged PR beats an unwatched
   // merge.
+  // Codex pass-2 P2 fix: if an abort fires AFTER the B2 label lands (revalidate
+  // delta, merge-call failure), the label must not stay behind on the unmerged PR —
+  // a later human merge would then trip B2's canary on code this gate never merged.
+  // Only a label THIS run added is removed (a pre-existing one isn't ours to pull);
+  // removal failure logs loudly but never masks the abort itself.
+  let mustCleanCodeFixLabel = false;
+  const cleanupCodeFixLabel = (context: string): void => {
+    if (!mustCleanCodeFixLabel) return;
+    try {
+      removeLabel(repo, pr, CODE_FIX_MERGE_LABEL);
+      mustCleanCodeFixLabel = false;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(
+        `[warn] pr-automerge-gate ${repo}#${pr}: failed to remove '${CODE_FIX_MERGE_LABEL}' after ${context} — ` +
+          `the label is now STALE on an unmerged PR, and a later HUMAN merge would fire the B2 tripwire on code ` +
+          `this gate never merged. Remove it manually. Underlying error: ${message}`,
+      );
+    }
+  };
+
   if (prClass === "code-fix") {
+    const labelPreexisting = labels.includes(CODE_FIX_MERGE_LABEL);
     try {
       addLabel(repo, pr, CODE_FIX_MERGE_LABEL);
+      mustCleanCodeFixLabel = !labelPreexisting;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.log(
@@ -595,6 +626,7 @@ async function evaluate(
       // No [gate-receipt] line: the gate QUALIFIED on the state it evaluated — this is
       // the designed abort-on-delta, an operational outcome, not a gate miss (same
       // rationale as the TOCTOU catch below).
+      cleanupCodeFixLabel("a revalidate abort");
       return;
     }
   }
@@ -614,6 +646,8 @@ async function evaluate(
     // No [gate-receipt] line here: the gate itself QUALIFIED (every leg passed) — this
     // is an operational merge-attempt failure, not a gate miss, and the original
     // #279 gate never emitted a receipt for it either (no PR comment on this path).
+    // (No-op for every class except code-fix — the flag is only ever set there.)
+    cleanupCodeFixLabel("a failed merge attempt");
     return;
   }
 
