@@ -88,11 +88,11 @@ import {
   evaluateMergeReadiness,
   gateDecisionForClass,
   isRollupClean,
+  parseUnifiedDiff,
   reconcileFileClasses,
   repoClassFor,
   requiredChecksSatisfied,
   type GateFile,
-  type ParsedDiffFile,
   type PrDiffClass,
   type RollupItem,
 } from "./lib/automerge-classify.js";
@@ -215,93 +215,6 @@ function addLabel(repo: string, pr: number, label: string): void {
  *  caller treats cleanup as best-effort (log loudly, never mask the abort). */
 function removeLabel(repo: string, pr: number, label: string): void {
   gh(["pr", "edit", String(pr), "--repo", repo, "--remove-label", label]);
-}
-
-// ───────────────────────────── diff parsing ─────────────────────────────
-
-function stripAbPrefix(p: string): string {
-  if (p === "/dev/null") return p;
-  return p.replace(/^[ab]\//, "");
-}
-
-/**
- * Parses a unified diff (as produced by `gh pr diff`) into one entry per file, each
- * carrying the raw content of every added/removed line (leading +/- stripped).
- *
- * Binary files ("Binary files a/x and b/x differ" — no +++/--- hunk lines) are
- * captured with `binary: true` and no content lines. `classifyDiffFile` (via
- * `reconcileFileClasses`) checks that flag FIRST and always returns "code" for it,
- * regardless of path — a binary diff must never silently pass as doc/comment-only
- * just because it happens to live under `docs/` (codex P2 finding, 2026-07-30
- * review).
- *
- * This function does NOT itself decide which files "count" — a pure rename or
- * mode-only change produces zero hunks and is simply absent from the returned list.
- * `reconcileFileClasses` in the caller closes that gap by reconciling against the
- * PR's own AUTHORITATIVE file list (`gh pr view --json files`) and fail-closing any
- * path missing from this parse to "code" (codex P1 finding, 2026-07-30 review).
- */
-function parseUnifiedDiff(diff: string): ParsedDiffFile[] {
-  const files: ParsedDiffFile[] = [];
-  let oldPath: string | null = null;
-  let newPath: string | null = null;
-  let added: string[] = [];
-  let removed: string[] = [];
-  let binary = false;
-
-  function flush(): void {
-    const path = newPath && newPath !== "/dev/null" ? newPath : oldPath;
-    if (path && path !== "/dev/null") {
-      files.push({ path, added, removed, binary });
-    }
-    oldPath = null;
-    newPath = null;
-    added = [];
-    removed = [];
-    binary = false;
-  }
-
-  // Header-zone tracking (codex P2 fix, 2026-07-31): `---`/`+++` lines are file
-  // headers ONLY between a `diff --git` line and that file's first `@@` hunk. Inside
-  // hunks, a changed content line can legitimately begin with those bytes (an added
-  // `++counter;` renders as `+++counter;`) — without the zone gate such lines were
-  // swallowed as phantom headers and vanished from classification (fail-open).
-  let inHeaderZone = false;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("diff --git ")) {
-      flush();
-      inHeaderZone = true;
-      continue;
-    }
-    if (line.startsWith("@@")) {
-      inHeaderZone = false;
-      continue;
-    }
-    if (inHeaderZone && line.startsWith("--- ")) {
-      oldPath = stripAbPrefix(line.slice(4).trim());
-      continue;
-    }
-    if (inHeaderZone && line.startsWith("+++ ")) {
-      newPath = stripAbPrefix(line.slice(4).trim());
-      continue;
-    }
-    const binaryMatch = /^Binary files (.+) and (.+) differ$/.exec(line);
-    if (binaryMatch) {
-      newPath = stripAbPrefix(binaryMatch[2].trim());
-      binary = true;
-      continue;
-    }
-    if (line.startsWith("+")) {
-      added.push(line.slice(1));
-      continue;
-    }
-    if (line.startsWith("-")) {
-      removed.push(line.slice(1));
-      continue;
-    }
-  }
-  flush();
-  return files;
 }
 
 // ───────────────────────────── independent review leg ─────────────────────────────
