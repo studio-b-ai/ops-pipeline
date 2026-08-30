@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Sync + drift-check scripts. Reads ops.yaml + infra/hubspot.yaml, reconciles Slack canvas + HubSpot live state.",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "sync:canvas": "tsx sync-canvas.ts",
     "sync:hubspot": "tsx sync-hubspot.ts",
