@@ -23,6 +23,14 @@ export interface Args {
    *  whose branch-protection gates aren't independently verifiable from
    *  statusCheckRollup (see the bolt-wms canary caller). */
   sensitivePathPatterns: string[];
+  /** ops#190 B1: caller-declared safe-path globs for the code-fix class (allowlist-
+   *  primary — see classifyPrDiffClass's `safePathGlobs`). Empty = the code-fix
+   *  class is INERT even when enabled. */
+  safePathGlobs: string[];
+  /** ops#190 B1: the caller's named-checks allowlist for the code-fix class (doc
+   *  §4.1 move 4 — each named check must be strictly SUCCESS on the head commit).
+   *  Empty = the named-checks leg fails closed, so code-fix can never merge. */
+  requiredChecks: string[];
   /** ops#190 rung A2: when true the runner evaluates the A-side `train:ready`
    *  label-authority gate (`evaluateTrainReady`) instead of the B-side squasher
    *  diff-classification gate. The two gates are structurally separate (doc §3.1 vs
@@ -45,12 +53,28 @@ export function parseArgs(argv: string[]): Args {
   // presence (a confused invocation), not about whether the value survived trimming.
   let sensitivePathFlagSeen = false;
   const sensitivePathPatterns: string[] = [];
+  // Same flag-presence tracking + trim-and-drop rules as --sensitive-path (see that
+  // flag's comment below) — both of these are squasher-side configuration, so both
+  // participate in the --train-ready mutual exclusion, and both arrive through the
+  // same comma-splitting workflow input plumbing with the same whitespace hazards.
+  let safePathGlobFlagSeen = false;
+  const safePathGlobs: string[] = [];
+  let requiredCheckFlagSeen = false;
+  const requiredChecks: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo") repo = argv[++i];
     else if (argv[i] === "--pr") pr = Number(argv[++i]);
     else if (argv[i] === "--enabled-classes") enabledClassesRaw = argv[++i];
     else if (argv[i] === "--train-ready") trainReady = true;
-    else if (argv[i] === "--sensitive-path") {
+    else if (argv[i] === "--safe-path-glob") {
+      safePathGlobFlagSeen = true;
+      const trimmed = argv[++i]?.trim();
+      if (trimmed) safePathGlobs.push(trimmed);
+    } else if (argv[i] === "--required-check") {
+      requiredCheckFlagSeen = true;
+      const trimmed = argv[++i]?.trim();
+      if (trimmed) requiredChecks.push(trimmed);
+    } else if (argv[i] === "--sensitive-path") {
       sensitivePathFlagSeen = true;
       // Trim before storing (codex P2 finding, 2026-08-02 pass 2): the reusable
       // workflow's caller-facing input is a single comma-separated string
@@ -78,9 +102,9 @@ export function parseArgs(argv: string[]): Args {
   // ignoring the other's flags. Presence is what matters, not validity: even
   // `--enabled-classes docs-comment` (the default value, explicitly passed)
   // combined with --train-ready signals a confused caller.
-  if (trainReady && (enabledClassesRaw !== undefined || sensitivePathFlagSeen)) {
+  if (trainReady && (enabledClassesRaw !== undefined || sensitivePathFlagSeen || safePathGlobFlagSeen || requiredCheckFlagSeen)) {
     throw new Error(
-      "--train-ready is mutually exclusive with --enabled-classes/--sensitive-path " +
+      "--train-ready is mutually exclusive with --enabled-classes/--sensitive-path/--safe-path-glob/--required-check " +
         "(A-side label-authority gate vs B-side squasher gate — one invocation evaluates exactly one)",
     );
   }
@@ -110,5 +134,5 @@ export function parseArgs(argv: string[]): Args {
     enabledClasses = requested as PrDiffClass[];
   }
 
-  return { repo, pr, enabledClasses, sensitivePathPatterns, trainReady };
+  return { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, trainReady };
 }

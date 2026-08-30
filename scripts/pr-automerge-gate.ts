@@ -18,9 +18,12 @@
  *      gate), ci-infra (<=40 lines, every file a declarative `.github/{workflows,
  *      actions}/**.y(a)ml` path, no src/**, no dependency/migration files), or
  *      test-only (<=40 lines, every file a test file/setup, zero src/** RUNTIME
- *      files, no dependency/migration files). A mixed-shape diff (e.g. a workflow
- *      file AND a test file together) satisfies no candidate and resolves to `null`
- *      — never a partial/best-effort merge across classes.
+ *      files, no dependency/migration files), or code-fix (<=150 lines, runtime
+ *      paths allowed — guarded instead by leg 7's allowlist/denylist/named-checks;
+ *      ops#190 B1, resolves LAST so the longer-proven classes always win). A
+ *      mixed-shape diff (e.g. a workflow file AND a test file together) satisfies
+ *      no candidate and resolves to `null` — never a partial/best-effort merge
+ *      across classes.
  *   3. the resolved class is in THIS CALLER's `--enabled-classes` set (defaults to
  *      `docs-comment` ONLY — a caller that never passes `--enabled-classes` gets
  *      EXACTLY the original #279 gate's scope, unchanged; opting into ci-infra/
@@ -34,6 +37,21 @@
  *      (strict, case-sensitive) or the whole leg is FLAG. ANY API error (network,
  *      auth, rate limit, malformed response) is ALSO FLAG — fail-closed, never
  *      silently treated as clean.
+ *   7. (code-fix ONLY — ops#190 B1, doc §4.1) three extra legs plus a partition:
+ *      every changed file matches >=1 caller-declared safe_path_glob (allowlist-
+ *      PRIMARY: empty/absent globs leave the class INERT even when enabled); no
+ *      file hits the built-in NON-overridable denylist (migrations, SQL, auth/
+ *      middleware, pricing, Customization/**, .github/**, package manifests — the
+ *      backstop BEATS the allowlist); and every caller-named required check is
+ *      strictly SUCCESS on the head commit (`requiredChecksSatisfied` — SKIPPED is
+ *      not green here even when sanctioned, NEUTRAL is not SUCCESS, an empty
+ *      required_checks list fails closed). Repo-class partition: in TRAIN-class
+ *      repos (`repoClassFor` — studiob, client-asthetik) a code-fix that passes
+ *      EVERY leg is never merged by the squasher — it gets `train:candidate` + a
+ *      candidate comment, and the human `train:ready` authority (rung A1) owns the
+ *      merge decision. In standard repos the `automerge:code-fix` label is applied
+ *      BEFORE the merge (the B2 post-merge tripwire triggers on it, doc §4.2);
+ *      label-apply failure ABORTS the merge.
  *
  * Cost discipline: legs 2-5 are cheap (already-fetched PR metadata + a diff parse)
  * and are evaluated BEFORE the paid Anthropic API call. If any of them already fail,
@@ -50,13 +68,15 @@
  * PR number, resolved class (or "unclassified"), verdict, and on a miss, which leg
  * failed first. Log-based only: no new storage, no Slack, no issues.
  *
- * This script NEVER closes, labels, or edits a PR beyond the merge itself and one
- * machine-readable receipt comment on successful merge. It never retries a failed
- * merge attempt in the same run (composes #109/#161: undiagnosed retries are how one
- * failure becomes a compounded one).
+ * This script NEVER closes or edits a PR beyond: the merge itself, one machine-
+ * readable receipt comment on successful merge, and (code-fix only, leg 7) the
+ * `automerge:code-fix` / `train:candidate` labels + the candidate comment. It never
+ * retries a failed merge attempt in the same run (composes #109/#161: undiagnosed
+ * retries are how one failure becomes a compounded one).
  *
  * Usage: tsx pr-automerge-gate.ts --repo <org/repo> --pr <n>
- *   [--enabled-classes docs-comment,ci-infra,test-only] [--sensitive-path <regex>]...
+ *   [--enabled-classes docs-comment,ci-infra,test-only,code-fix]
+ *   [--sensitive-path <regex>]... [--safe-path-glob <glob>]... [--required-check <name>]...
  * Secrets: GH_TOKEN (gh CLI auth), ANTHROPIC_API_KEY (independent review leg).
  */
 
@@ -64,10 +84,13 @@ import { execFileSync } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   classifyPrDiffClass,
+  codeFixRevalidateDeltas,
   evaluateMergeReadiness,
   gateDecisionForClass,
   isRollupClean,
   reconcileFileClasses,
+  repoClassFor,
+  requiredChecksSatisfied,
   type GateFile,
   type ParsedDiffFile,
   type PrDiffClass,
@@ -92,6 +115,15 @@ import {
 
 const REVIEW_MODEL = "claude-sonnet-5";
 const REVIEW_MAX_TOKENS = 512;
+
+// ops#190 B1 label vocabulary (doc §4.1/§4.2). CODE_FIX_MERGE_LABEL is applied
+// BEFORE the merge in standard repos — it is the B2 post-merge tripwire's workflow
+// trigger FILTER (zero authority: the tripwire re-derives its own verdict against
+// server state). TRAIN_CANDIDATE_LABEL is what a fully-passing code-fix gets in a
+// TRAIN-class repo instead of a merge — the human `train:ready` authority (rung A1)
+// owns the merge decision from there.
+const CODE_FIX_MERGE_LABEL = "automerge:code-fix";
+const TRAIN_CANDIDATE_LABEL = "train:candidate";
 
 // ───────────────────────────── gh helpers ─────────────────────────────
 
@@ -168,6 +200,21 @@ function mergePr(repo: string, pr: number, headRefOid: string): void {
 
 function commentOnPr(repo: string, pr: number, body: string): void {
   gh(["pr", "comment", String(pr), "--repo", repo, "--body", body]);
+}
+
+/** ops#190 B1: the gate's ONLY label writes — `automerge:code-fix` (standard repos,
+ *  pre-merge, B2's trigger filter) and `train:candidate` (train-class repos, instead
+ *  of a merge). Throws on failure; both callers treat that as fail-closed. */
+function addLabel(repo: string, pr: number, label: string): void {
+  gh(["pr", "edit", String(pr), "--repo", repo, "--add-label", label]);
+}
+
+/** ops#190 B1 (codex pass-2 P2 fix): undo of addLabel for the abort paths — a
+ *  `automerge:code-fix` label left on an UNMERGED PR would let a later HUMAN merge
+ *  fire the B2 tripwire on code this gate never merged. Throws on failure; the
+ *  caller treats cleanup as best-effort (log loudly, never mask the abort). */
+function removeLabel(repo: string, pr: number, label: string): void {
+  gh(["pr", "edit", String(pr), "--repo", repo, "--remove-label", label]);
 }
 
 // ───────────────────────────── diff parsing ─────────────────────────────
@@ -299,7 +346,25 @@ async function independentReview(diff: string, systemPrompt: string): Promise<{ 
 
 // ───────────────────────────── main ─────────────────────────────
 
-async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[], sensitivePathPatterns: string[]): Promise<void> {
+async function evaluate(
+  repo: string,
+  pr: number,
+  enabledClasses: PrDiffClass[],
+  sensitivePathPatterns: string[],
+  safePathGlobs: string[],
+  requiredChecks: string[],
+): Promise<void> {
+  // ops#190 B1 misconfiguration tripwire (loud, non-fatal): 'code-fix' enabled with
+  // no safe_path_globs is a VALID but INERT configuration (allowlist-primary,
+  // fail-closed — doc §4.1). Say so on every run rather than letting the caller
+  // discover it from a month of silent misses (Rule #464's inert-guard lesson).
+  if (enabledClasses.includes("code-fix") && safePathGlobs.length === 0) {
+    console.log(
+      `[config] pr-automerge-gate ${repo}#${pr}: 'code-fix' is in --enabled-classes but NO --safe-path-glob was ` +
+        `provided — the class is INERT (allowlist-primary, fail-closed). Declare safe_path_globs to activate it.`,
+    );
+  }
+
   const prJson = fetchPr(repo, pr);
   const author = prJson.author.login;
   const labels = prJson.labels.map((l) => l.name);
@@ -357,7 +422,7 @@ async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[],
   const files: GateFile[] = reconcileFileClasses(authoritativePaths, parsed);
 
   // ── Leg "class-match"/"line-cap": resolve the PR-level diff class ──
-  const classification = classifyPrDiffClass({ files, totalChangedLines, sensitivePathPatterns });
+  const classification = classifyPrDiffClass({ files, totalChangedLines, sensitivePathPatterns, safePathGlobs });
   if (classification.prClass === null) {
     const leg: GateReceiptLeg = classification.failureLeg ?? "other";
     console.log(`[wait] pr-automerge-gate ${repo}#${pr}: no diff class resolved (${leg}) — ` + classification.reasons.join("; "));
@@ -374,6 +439,19 @@ async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[],
     console.log(
       formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "class-match", reasons: [reason] }),
     );
+    return;
+  }
+
+  // ── code-fix already handed to the train (ops#190 B1): once `train:candidate` is
+  // on, the squasher's work here is DONE — the human train:ready authority owns the
+  // merge decision. Short-circuit BEFORE the remaining legs (and before the paid
+  // review) so scheduled re-runs don't re-spend on a PR whose outcome can't change.
+  if (prClass === "code-fix" && repoClassFor(repo) === "train" && labels.includes(TRAIN_CANDIDATE_LABEL)) {
+    console.log(
+      `[no-op] pr-automerge-gate ${repo}#${pr}: already labeled '${TRAIN_CANDIDATE_LABEL}' — the train:ready ` +
+        `authority owns the merge decision now; nothing to re-evaluate (no review spend).`,
+    );
+    console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "candidate" }));
     return;
   }
 
@@ -399,6 +477,24 @@ async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[],
     return;
   }
 
+  // ── Leg "named-checks" (code-fix ONLY, cheap — still before any API spend): the
+  // caller's named-checks allowlist (ops#190 B1, doc §4.1 move 4). STRICTER than the
+  // ci-rollup leg on purpose: every named check must exist, be terminal, and be
+  // strictly SUCCESS on the head commit — SKIPPED is not green here even when the
+  // skip allowlist sanctions it elsewhere, NEUTRAL is not SUCCESS, and an EMPTY
+  // required_checks list fails closed (the class can never merge without one).
+  if (prClass === "code-fix") {
+    const namedChecks = requiredChecksSatisfied(prJson.statusCheckRollup, requiredChecks);
+    if (!namedChecks.ok) {
+      console.log(
+        `[wait] pr-automerge-gate ${repo}#${pr}: named-checks leg failed (review NOT invoked — no spend): ` +
+          namedChecks.reasons.join("; "),
+      );
+      console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "named-checks", reasons: namedChecks.reasons }));
+      return;
+    }
+  }
+
   // ── Paid leg: independent review — every other leg already passes, class-aware prompt ──
   const review = await independentReview(diff, reviewSystemPromptFor(prClass));
 
@@ -419,6 +515,122 @@ async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[],
     return;
   }
 
+  // ── code-fix repo-class partition (ops#190 B1, doc §4.1 move 5): in a TRAIN-class
+  // repo the squasher NEVER merges — every merge to main rides the human
+  // `train:ready` authority (rung A1). A code-fix that passed EVERY leg (review
+  // included) becomes a train CANDIDATE: label + comment, then done. Verdict
+  // "candidate" is a healthy terminal outcome, not a miss.
+  if (prClass === "code-fix" && repoClassFor(repo) === "train") {
+    try {
+      addLabel(repo, pr, TRAIN_CANDIDATE_LABEL);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(
+        `[no-op] pr-automerge-gate ${repo}#${pr}: code-fix passed every leg but applying '${TRAIN_CANDIDATE_LABEL}' ` +
+          `FAILED — most likely the label does not exist in this repo yet (B3 setup item). Not retried this run ` +
+          `(Rules #109/#161); the next scheduled run re-evaluates. Underlying error: ${message}`,
+      );
+      return;
+    }
+    commentOnPr(
+      repo,
+      pr,
+      [
+        `**squasher auto-merge gate — TRAIN CANDIDATE** (class: \`code-fix\`; ops#190 B1)`,
+        "",
+        `Every gate leg passed (shape, line cap, safe_path_globs, built-in denylist, named checks, independent ` +
+          `review CLEAN) — but this repo is TRAIN-class, where the squasher never merges. Applied ` +
+          `\`${TRAIN_CANDIDATE_LABEL}\`; a merge-authorized human decides \`train:ready\` (Rule #279).`,
+        "",
+        `Evaluated sha: \`${prJson.headRefOid}\`.`,
+      ].join("\n"),
+    );
+    console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "candidate" }));
+    console.log(
+      `[candidate] pr-automerge-gate ${repo}#${pr}: all legs passed; train-class repo — labeled ` +
+        `'${TRAIN_CANDIDATE_LABEL}', merge decision stays with the train:ready authority.`,
+    );
+    return;
+  }
+
+  // ── code-fix in a STANDARD repo: apply the B2 trigger label BEFORE the merge.
+  // The post-merge 5xx tripwire's workflow triggers on `automerge:code-fix` (doc
+  // §4.2 — a cheap FILTER only; the tripwire re-derives its own verdict), so a
+  // merge without the label would be INVISIBLE to the canary. Label-apply failure
+  // therefore ABORTS the merge (fail-closed): an unmerged PR beats an unwatched
+  // merge.
+  // Codex pass-2 P2 fix: if an abort fires AFTER the B2 label lands (revalidate
+  // delta, merge-call failure), the label must not stay behind on the unmerged PR —
+  // a later human merge would then trip B2's canary on code this gate never merged.
+  // Only a label THIS run added is removed (a pre-existing one isn't ours to pull);
+  // removal failure logs loudly but never masks the abort itself.
+  let mustCleanCodeFixLabel = false;
+  const cleanupCodeFixLabel = (context: string): void => {
+    if (!mustCleanCodeFixLabel) return;
+    try {
+      removeLabel(repo, pr, CODE_FIX_MERGE_LABEL);
+      mustCleanCodeFixLabel = false;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(
+        `[warn] pr-automerge-gate ${repo}#${pr}: failed to remove '${CODE_FIX_MERGE_LABEL}' after ${context} — ` +
+          `the label is now STALE on an unmerged PR, and a later HUMAN merge would fire the B2 tripwire on code ` +
+          `this gate never merged. Remove it manually. Underlying error: ${message}`,
+      );
+    }
+  };
+
+  if (prClass === "code-fix") {
+    const labelPreexisting = labels.includes(CODE_FIX_MERGE_LABEL);
+    try {
+      addLabel(repo, pr, CODE_FIX_MERGE_LABEL);
+      mustCleanCodeFixLabel = !labelPreexisting;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(
+        `[no-op] pr-automerge-gate ${repo}#${pr}: code-fix passed every leg but applying '${CODE_FIX_MERGE_LABEL}' ` +
+          `FAILED — merge ABORTED (the B2 post-merge tripwire triggers on that label; merging without it would be ` +
+          `an UNWATCHED merge). Most likely the label does not exist in this repo yet (B3 setup item). ` +
+          `Underlying error: ${message}`,
+      );
+      return;
+    }
+
+    // ── Revalidate-then-merge (doc §4.1 move 5; codex B1 pass-1 P1 fix): re-fetch the
+    // PR as the LAST call before the merge API call — legs 1–6 evaluated a snapshot
+    // that is now minutes old (the paid review sits between fetch and here), and for
+    // executable code that window gets a re-check, not a shrug. ANY delta aborts this
+    // cycle; the sha pin below remains the backstop for a race past the revalidate.
+    // Scoped to code-fix only — docs/ci-infra/test-only keep their proven, byte-
+    // identical path (Rule #109).
+    const fresh = fetchPr(repo, pr);
+    const revalidateDeltas = codeFixRevalidateDeltas(
+      { headRefOid: prJson.headRefOid, authorLogin: author, labels },
+      {
+        headRefOid: fresh.headRefOid,
+        authorLogin: fresh.author.login,
+        labels: fresh.labels.map((l) => l.name),
+        state: fresh.state,
+        isDraft: fresh.isDraft,
+        mergeStateStatus: fresh.mergeStateStatus,
+        statusCheckRollup: fresh.statusCheckRollup,
+      },
+      { mergeLabel: CODE_FIX_MERGE_LABEL, sanctionedSkips: loadSanctionedSkips(repo), requiredChecks },
+    );
+    if (revalidateDeltas.length > 0) {
+      console.log(
+        `[no-op] pr-automerge-gate ${repo}#${pr}: revalidate detected server-state delta(s) between evaluation ` +
+          `and merge — merge ABORTED this cycle (doc §4.1 move 5, fail-closed; not retried per Rules #109/#161 — ` +
+          `the next scheduled/triggered run re-evaluates current state): ${revalidateDeltas.join("; ")}`,
+      );
+      // No [gate-receipt] line: the gate QUALIFIED on the state it evaluated — this is
+      // the designed abort-on-delta, an operational outcome, not a gate miss (same
+      // rationale as the TOCTOU catch below).
+      cleanupCodeFixLabel("a revalidate abort");
+      return;
+    }
+  }
+
   // ── All legs pass — attempt the SHA-pinned merge ──
   try {
     mergePr(repo, pr, prJson.headRefOid);
@@ -434,6 +646,8 @@ async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[],
     // No [gate-receipt] line here: the gate itself QUALIFIED (every leg passed) — this
     // is an operational merge-attempt failure, not a gate miss, and the original
     // #279 gate never emitted a receipt for it either (no PR comment on this path).
+    // (No-op for every class except code-fix — the flag is only ever set there.)
+    cleanupCodeFixLabel("a failed merge attempt");
     return;
   }
 
@@ -446,6 +660,14 @@ async function evaluate(repo: string, pr: number, enabledClasses: PrDiffClass[],
     `| author === kbibelhausen | ✅ (${author}) |`,
     `| label \`bugsquasher\` present | ✅ (${labels.join(", ")}) |`,
     `| totalChangedLines | ✅ (${totalChangedLines}) |`,
+    ...(prClass === "code-fix"
+      ? [
+          `| safe_path_globs (allowlist-primary) | ✅ every file matched (${safePathGlobs.length} glob(s)) |`,
+          `| built-in denylist backstop | ✅ no hits |`,
+          `| named checks strictly SUCCESS | ✅ (${requiredChecks.join(", ")}) |`,
+          `| B2 tripwire label \`${CODE_FIX_MERGE_LABEL}\` | ✅ applied pre-merge |`,
+        ]
+      : []),
     `| CI clean | ✅ |`,
     `| independent review (Claude Sonnet 5) | ✅ CLEAN |`,
     "",
@@ -854,7 +1076,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
  * misconfiguration/bug worth a red CI run), not swallowed into a silent "wait".
  */
 async function main(): Promise<void> {
-  const { repo, pr, enabledClasses, sensitivePathPatterns, trainReady } = parseArgs(process.argv.slice(2));
+  const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, trainReady } = parseArgs(process.argv.slice(2));
   // ops#190 rung A2: `--train-ready` routes to the A-side label-authority gate.
   // `evaluateTrainReady` NEVER throws (its wrapper is the fail-closed catch-all —
   // every outcome, including unexpected errors, resolves to a refusal with its own
@@ -868,7 +1090,7 @@ async function main(): Promise<void> {
     return;
   }
   try {
-    await evaluate(repo, pr, enabledClasses, sensitivePathPatterns);
+    await evaluate(repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.log(
