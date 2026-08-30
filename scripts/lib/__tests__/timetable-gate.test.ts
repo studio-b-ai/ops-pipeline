@@ -117,6 +117,13 @@ describe("parseArcs", () => {
     expect(rejected[0].reason).toMatch(/>14 days out/);
   });
 
+  it("rejects a nonexistent calendar day — Date.parse normalization is not validation", () => {
+    const y = GOOD_ARC_YAML.replace('expires: "2026-09-10"', 'expires: "2026-09-31"');
+    const { valid, rejected } = parseArcs(y, TODAY);
+    expect(valid).toEqual([]);
+    expect(rejected[0].reason).toMatch(/not a real calendar day/);
+  });
+
   it("rejects a missing required field and an empty allowed_paths", () => {
     const noRepo = GOOD_ARC_YAML.replace(/ *repo: .*\n/, "");
     expect(parseArcs(noRepo, TODAY).valid).toEqual([]);
@@ -212,6 +219,19 @@ describe("evaluateWindow", () => {
     expect(evaluateWindow(ruled(band), WED_1230_ET).open).toBe(false);
     expect(evaluateWindow(ruled(band), new Date("2026-09-02T23:30:00Z")).open).toBe(true); // 19:30 ET
     expect(evaluateWindow(ruled(band), new Date("2026-09-05T16:00:00Z")).open).toBe(true); // Saturday
+  });
+
+  it("out-of-range clocks and inverted spans fail closed, never open", () => {
+    // `outside 25:00-26:00` would otherwise be open every weekday (codex P2).
+    const bad = evaluateWindow(ruled("outside 25:00-26:00 ET weekdays"), WED_1230_ET);
+    expect(bad.open).toBe(false);
+    expect(bad.reason).toMatch(/invalid clock/);
+    const weekly = evaluateWindow(ruled("Wed 25:00 ET"), WED_1230_ET);
+    expect(weekly.open).toBe(false);
+    expect(weekly.reason).toMatch(/invalid clock/);
+    const inverted = evaluateWindow(ruled("outside 18:00-08:00 ET weekdays"), WED_1230_ET);
+    expect(inverted.open).toBe(false);
+    expect(inverted.reason).toMatch(/inverted or empty span/);
   });
 
   it("BARRED and unrecognized bands are closed even when RULED", () => {

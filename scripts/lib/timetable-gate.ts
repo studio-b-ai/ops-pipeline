@@ -273,8 +273,13 @@ export function parseArcs(yamlText: string, today: Date): ParsedArcs {
       rejected.push({ ref: label, reason: `expires \`${expires}\` is not YYYY-MM-DD` });
       return;
     }
-    const expMs = Date.parse(`${expires}T23:59:59Z`);
-    if (Number.isNaN(expMs) || expMs < todayMs) {
+    const dayMs = Date.parse(`${expires}T00:00:00Z`);
+    if (Number.isNaN(dayMs) || new Date(dayMs).toISOString().slice(0, 10) !== expires) {
+      rejected.push({ ref: label, reason: `expires \`${expires}\` is not a real calendar day` });
+      return;
+    }
+    const expMs = dayMs + 86_399_000;
+    if (expMs < todayMs) {
       rejected.push({ ref: label, reason: `arc expired ${expires} — renewal = a fresh word` });
       return;
     }
@@ -424,7 +429,12 @@ export function evaluateWindow(
   if (weekly) {
     const wantDow =
       weekly[1].slice(0, 1).toUpperCase() + weekly[1].slice(1, 3).toLowerCase();
-    const start = Number(weekly[2]) * 60 + Number(weekly[3]);
+    const wh = Number(weekly[2]);
+    const wm = Number(weekly[3]);
+    if (wh > 23 || wm > 59) {
+      return { open: false, reason: `band \`${band}\` has an invalid clock — fail-closed` };
+    }
+    const start = wh * 60 + wm;
     const { dow, minutes } = etParts(publishAt);
     if (dow !== wantDow) {
       return { open: false, reason: `publish lands ${dow}, window is ${wantDow} (${band})` };
@@ -441,8 +451,15 @@ export function evaluateWindow(
     /^outside\s+(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})\s+ET\s+weekdays$/i,
   );
   if (outside) {
-    const lo = Number(outside[1]) * 60 + Number(outside[2]);
-    const hi = Number(outside[3]) * 60 + Number(outside[4]);
+    const [oh1, om1, oh2, om2] = [outside[1], outside[2], outside[3], outside[4]].map(Number);
+    if (oh1 > 23 || oh2 > 23 || om1 > 59 || om2 > 59) {
+      return { open: false, reason: `band \`${band}\` has an invalid clock — fail-closed` };
+    }
+    const lo = oh1 * 60 + om1;
+    const hi = oh2 * 60 + om2;
+    if (lo >= hi) {
+      return { open: false, reason: `band \`${band}\` has an inverted or empty span — fail-closed` };
+    }
     const { dow, minutes } = etParts(publishAt);
     if (dow === "Sat" || dow === "Sun") return { open: true, reason: `weekend (${band})` };
     if (minutes >= lo && minutes < hi) {
