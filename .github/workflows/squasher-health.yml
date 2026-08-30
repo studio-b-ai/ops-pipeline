@@ -46,14 +46,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout ops-pipeline (monitor scripts live here, not in the caller repo)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: studio-b-ai/ops-pipeline
           ref: main
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Install deps
         working-directory: scripts

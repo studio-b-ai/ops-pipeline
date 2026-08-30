@@ -30,18 +30,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout consumer repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Checkout ops-pipeline (sync logic)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: studio-b-ai/ops-pipeline
           ref: v1
           path: .ops-pipeline
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22"
 
       - name: Install ops-pipeline deps
         working-directory: .ops-pipeline/scripts
