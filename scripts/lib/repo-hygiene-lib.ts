@@ -28,6 +28,27 @@
  *      authorship data), so its `Finding.baselineEdit` is always `null` — Rule #412: an
  *      alert must not imply a baseline edit exists when none would do anything.
  *
+ * Finding classes v2 (census ③, 2026-08-30 — the Fleet Maintenance Census fold; seed:
+ * brain `library/decisions/2026-08-29-maintenance-tax-build-vs-buy-posture-seed.md`):
+ * the baseline IS the census. Each active (non-archived) repo's baseline line carries
+ * optional census fields — `class293` (Rule #293 state) + `verdict` (maintenance
+ * posture) + `verdictAt` + `note` — and three new classes enforce them:
+ *   6. census-verdict-missing — live, unarchived, and its baseline line has missing/
+ *      invalid/TBD census fields. TBD is a VALID value that still flags: the standing
+ *      pressure that keeps unworded repos visible until a human words them (Rule #465 —
+ *      an invalid enum value must flag too, or a typo silently exempts a repo from
+ *      classes 7/8).
+ *   7. unexecuted-retirement — verdict=retire but the repo is still live unarchived:
+ *      the standing kill-list tracker. Retire verdicts are Kevin-worded (Rules #97/#366);
+ *      this class only ever tracks execution of an already-worded retirement.
+ *   8. freeze-violation — verdict=freeze but live pushedAt > verdictAt: a frozen repo
+ *      moved. Pure ISO-8601 string compare (both UTC "Z" strings) — no clock read.
+ *      All three carry `baselineEdit: null` — resolution is human judgment or live
+ *      action, never a mechanical baseline accept (see NULL_EDIT_NOTES). Archived repos
+ *      are census-exempt by construction (Dead per Rule #293's vocabulary); a repo added
+ *      via a class-1 ADD line arrives census-bare and class 6 demands its verdict on the
+ *      next run — new repos cannot silently skip the census.
+ *
  * Rule #465 (a summary line always prints every class with its count including 0) is
  * `summarizeFindings` below — the SAME function feeds both the worker's console output
  * and the issue body's closing line, so the two can never drift apart.
@@ -36,15 +57,16 @@
  * forces one full re-evaluation): `BASELINE_RULES_VERSION` is this worker's compiled-in
  * rule vocabulary version; `renderDriftIssueBody` compares it against the baseline FILE's
  * own `rulesVersion` and prepends a loud mismatch note when they differ. This worker has
- * no incremental/skip path in v1 (`diffFleet` always re-evaluates every repo, every run —
- * there is no watermark to short-circuit), so the practical effect of a mismatch today is
- * the note itself: a human reading the issue should not assume the finding classes below
- * mean what they meant when the baseline was last reviewed. The seam exists so a future
- * versioned rule change (a v2 finding class, a changed threshold) has somewhere to hook
- * "was this baseline ever re-reviewed under the new rules" without inventing new plumbing.
+ * no incremental/skip path (`diffFleet` always re-evaluates every repo, every run — there
+ * is no watermark to short-circuit), so the practical effect of a mismatch today is the
+ * note itself: a human reading the issue should not assume the finding classes below mean
+ * what they meant when the baseline was last reviewed. The seam did its job at v2: the
+ * census fold bumped this to 2 together with a full baseline re-seed in the same PR, so a
+ * v1 baseline meeting a v2 worker (or vice versa) announces itself instead of silently
+ * half-applying the census classes.
  */
 
-export const BASELINE_RULES_VERSION = 1;
+export const BASELINE_RULES_VERSION = 2;
 
 /** ≥7d since push ⇒ outside the freshness window the worker bothers fetching commits for. Informational only — see class 5's header note. */
 export const BOT_CHURN_LOOKBACK_DAYS = 7;
@@ -52,6 +74,24 @@ export const BOT_CHURN_LOOKBACK_DAYS = 7;
 /** ≥90% of the last (up to 20) commits bot-authored ⇒ "freshness is machine churn". */
 export const BOT_CHURN_MIN_BOT_RATIO_NUM = 9; // integer-safe ratio: botCommits / totalCommits >= 9/10
 export const BOT_CHURN_MIN_BOT_RATIO_DEN = 10;
+
+// ───────────────────────────── census vocabulary (v2) ─────────────────────────────
+
+/** Rule #293's four terminal states + TBD (valid-but-flagging — see class 6's header note). */
+export const CLASS293_VALUES = ["Product", "Internal Tooling", "IP", "Dead", "TBD"] as const;
+export type Class293 = (typeof CLASS293_VALUES)[number];
+
+/**
+ * Maintenance-posture verdicts (census ③'s vocabulary, from the Dispatcher assignment):
+ *   mechanic-covered — standing loops protect it (squasher/automerge, restart-train,
+ *                      monitors, drift gates, CI guards); maintenance lands on machinery first.
+ *   manual-tax       — live (deployed service or active dev) but maintenance lands on humans.
+ *   freeze           — keep, zero investment; any push is anomalous (class 8 enforces).
+ *   retire           — Kevin-worded kill list; class 7 tracks execution until archived.
+ *   TBD              — genuinely unworded; class 6 keeps the pressure on.
+ */
+export const VERDICT_VALUES = ["mechanic-covered", "manual-tax", "freeze", "retire", "TBD"] as const;
+export type Verdict = (typeof VERDICT_VALUES)[number];
 
 // ───────────────────────────── baseline + live shapes ─────────────────────────────
 
@@ -62,6 +102,19 @@ export interface BaselineEntry {
   visibility: string;
   /** ISO 8601 — the live `pushedAt` recorded when this entry was seeded/last accepted into the baseline. Informational context only; never itself diffed (there is no "freshness drifted" finding class). */
   pushedAtAtSeed: string;
+  // ── census fields (v2, human-authored — the worker never writes them; Rule #379/#381).
+  // Optional so archived rows carry none (census-exempt) and a fresh class-1 ADD line is
+  // legal census-bare (class 6 then demands the verdict). Typed `string`, not the enums:
+  // these arrive from a hand-edited JSON file, and an out-of-vocabulary value must FLOW
+  // THROUGH to validation and flag (Rule #465), not fail some upstream cast.
+  /** Rule #293 state — validated against CLASS293_VALUES by class 6. */
+  class293?: string;
+  /** Maintenance posture — validated against VERDICT_VALUES by class 6; drives classes 7/8. */
+  verdict?: string;
+  /** ISO 8601 UTC — when the verdict was authored. REQUIRED for verdict=freeze (class 8's comparand). */
+  verdictAt?: string;
+  /** Free-text coverage/rationale one-liner (what protects it, or why frozen/retiring). */
+  note?: string;
 }
 
 export interface BaselineFile {
@@ -136,6 +189,9 @@ export const FINDING_CLASSES = [
   "archived-flip",
   "visibility-flip",
   "bot-churn-freshness",
+  "census-verdict-missing",
+  "unexecuted-retirement",
+  "freeze-violation",
 ] as const;
 
 export type FindingClass = (typeof FINDING_CLASSES)[number];
@@ -160,19 +216,47 @@ function byName<T extends { name: string }>(a: T, b: T): number {
   return a.name.localeCompare(b.name);
 }
 
-/** Single-line JSON matching `repo-baseline.json`'s per-entry format — see repo-hygiene-worker.ts's seeding for the identical shape/key order. */
+/** Single-line JSON matching `repo-baseline.json`'s per-entry format — see repo-hygiene-worker.ts's seeding for the identical shape/key order. Stable key order; `JSON.stringify` drops `undefined` values, so census-bare rows (archived repos, fresh class-1 ADD lines) render without the census keys at all. */
 function formatBaselineEntry(e: BaselineEntry): string {
-  return JSON.stringify({ name: e.name, archived: e.archived, visibility: e.visibility, pushedAtAtSeed: e.pushedAtAtSeed });
+  return JSON.stringify({
+    name: e.name,
+    archived: e.archived,
+    visibility: e.visibility,
+    pushedAtAtSeed: e.pushedAtAtSeed,
+    class293: e.class293,
+    verdict: e.verdict,
+    verdictAt: e.verdictAt,
+    note: e.note,
+  });
 }
 
-/** What `repo`'s baseline entry would be if its CURRENT live state were fully accepted — every field, not just whichever one triggered a given finding. `pushedAtAtSeed` refreshes to the live `pushedAt` (harmless: this field is never itself diffed, and refreshing it reflects "current as of this accepted edit"). */
-function liveEntrySnapshot(repo: LiveRepo): BaselineEntry {
-  return { name: repo.name, archived: repo.isArchived, visibility: repo.visibility, pushedAtAtSeed: repo.pushedAt };
+/**
+ * What `repo`'s baseline entry would be if its CURRENT live state were fully accepted —
+ * every field, not just whichever one triggered a given finding. `pushedAtAtSeed`
+ * refreshes to the live `pushedAt` (harmless: this field is never itself diffed, and
+ * refreshing it reflects "current as of this accepted edit"). Census fields are
+ * human-authored state, not live state — an accept line must CARRY them from the existing
+ * baseline entry, not strip them: a class-3/4 accept that silently deleted a repo's
+ * census would re-fire class 6 next run and lose the human's words (the census sibling of
+ * the full-state law in the flip comment below). `entry` is absent only at class-1 ADD
+ * sites, where the row is deliberately census-bare.
+ */
+function liveEntrySnapshot(repo: LiveRepo, entry?: BaselineEntry): BaselineEntry {
+  return {
+    name: repo.name,
+    archived: repo.isArchived,
+    visibility: repo.visibility,
+    pushedAtAtSeed: repo.pushedAt,
+    class293: entry?.class293,
+    verdict: entry?.verdict,
+    verdictAt: entry?.verdictAt,
+    note: entry?.note,
+  };
 }
 
 /**
  * Diffs a live org enumeration against the committed baseline, producing findings for
- * exactly the five v1 classes, grouped in `FINDING_CLASSES` order and sorted by repo name
+ * the eight classes (five v1 + three census v2), grouped in `FINDING_CLASSES` order and sorted by repo name
  * within each class — deterministic output for identical inputs (no Map/Set iteration-
  * order dependence leaks through), so `renderDriftIssueBody`'s output is stable run-to-run
  * when nothing actually changed (an already-open issue's body should not churn on a no-op
@@ -229,7 +313,7 @@ export function diffFleet(baseline: BaselineFile, live: LiveRepo[]): Finding[] {
     const archivedDiffers = entry.archived !== repo.isArchived;
     const visibilityDiffers = entry.visibility.toUpperCase() !== repo.visibility.toUpperCase();
     if (!archivedDiffers && !visibilityDiffers) continue;
-    const fullLiveLine = `UPDATE its "repos" line to: ${formatBaselineEntry(liveEntrySnapshot(repo))}`;
+    const fullLiveLine = `UPDATE its "repos" line to: ${formatBaselineEntry(liveEntrySnapshot(repo, entry))}`;
     if (archivedDiffers) {
       findings.push({
         class: "archived-flip",
@@ -261,13 +345,73 @@ export function diffFleet(baseline: BaselineFile, live: LiveRepo[]): Finding[] {
     });
   }
 
+  // 6-8. census classes (v2) — active repos present in BOTH baseline and live. The
+  // exemption reads LIVE `isArchived`, not the baseline's flag (a stale baseline archived
+  // flag already fires class 3, and a repo archived live needs no verdict regardless of
+  // what the baseline claims). Gone repos fire class 2, not census pressure. All three
+  // classes carry `baselineEdit: null` — resolution is human judgment or live action
+  // (see NULL_EDIT_NOTES), never a mechanical accept.
+  for (const entry of [...baseline.repos].sort(byName)) {
+    const repo = liveByName.get(entry.name);
+    if (!repo || repo.isArchived) continue;
+
+    // 6. census-verdict-missing — ONE aggregated finding per repo naming every census gap
+    // (missing, out-of-vocabulary, TBD, or structurally unusable), so a repo with three
+    // defects is one line to act on, not three interleaved findings.
+    const gaps: string[] = [];
+    if (entry.class293 === undefined) gaps.push("class293 missing");
+    else if (!(CLASS293_VALUES as readonly string[]).includes(entry.class293)) gaps.push(`class293 invalid ("${entry.class293}")`);
+    else if (entry.class293 === "TBD") gaps.push("class293 TBD");
+    if (entry.verdict === undefined) gaps.push("verdict missing");
+    else if (!(VERDICT_VALUES as readonly string[]).includes(entry.verdict)) gaps.push(`verdict invalid ("${entry.verdict}")`);
+    else if (entry.verdict === "TBD") gaps.push("verdict TBD");
+    if (entry.verdict === "freeze" && entry.verdictAt === undefined) gaps.push("verdict=freeze without verdictAt (class 8 has no comparand)");
+    if (entry.verdictAt !== undefined && !/^\d{4}-\d{2}-\d{2}T/.test(entry.verdictAt)) gaps.push(`verdictAt malformed ("${entry.verdictAt}")`);
+    if (gaps.length > 0) {
+      findings.push({
+        class: "census-verdict-missing",
+        repo: entry.name,
+        detail: `\`${entry.name}\` is live and unarchived but its census is incomplete: ${gaps.join("; ")}.`,
+        baselineEdit: null,
+      });
+    }
+
+    // 7. unexecuted-retirement — worded retire, still live unarchived. Fires alongside
+    // class 6 when the same row ALSO has census gaps (independent defects, both real).
+    if (entry.verdict === "retire") {
+      findings.push({
+        class: "unexecuted-retirement",
+        repo: entry.name,
+        detail: `\`${entry.name}\` carries verdict=retire${entry.verdictAt ? ` (worded ${entry.verdictAt})` : ""} but is still live and unarchived — the retirement has not been executed (Rule #366 full-leg teardown).`,
+        baselineEdit: null,
+      });
+    }
+
+    // 8. freeze-violation — a frozen repo moved. Only fires with a well-formed verdictAt
+    // (missing/malformed already fires class 6 — one root cause, one class). Lexicographic
+    // compare is correct for same-shape ISO-8601 UTC "Z" strings; no clock read.
+    if (
+      entry.verdict === "freeze" &&
+      entry.verdictAt !== undefined &&
+      /^\d{4}-\d{2}-\d{2}T/.test(entry.verdictAt) &&
+      repo.pushedAt > entry.verdictAt
+    ) {
+      findings.push({
+        class: "freeze-violation",
+        repo: entry.name,
+        detail: `\`${entry.name}\` is verdict=freeze (as of ${entry.verdictAt}) but was pushed ${repo.pushedAt} — a frozen repo moved.`,
+        baselineEdit: null,
+      });
+    }
+  }
+
   return findings;
 }
 
 // ───────────────────────────── summary line (Rule #465) ─────────────────────────────
 
 /**
- * Always lists every one of the five classes with its count, including 0 — Rule #465. The
+ * Always lists every class with its count, including 0 — Rule #465. The
  * SAME function renders the worker's console summary line AND the issue body's closing
  * line, so the two outputs can never disagree about what this run found.
  */
@@ -311,14 +455,32 @@ const FINDING_CLASS_LABELS: Record<FindingClass, string> = {
   "archived-flip": "Archived-state flip",
   "visibility-flip": "Visibility flip",
   "bot-churn-freshness": "Bot-churn freshness (informational)",
+  "census-verdict-missing": "Census verdict missing/invalid",
+  "unexecuted-retirement": "Unexecuted retirement (kill-list tracker)",
+  "freeze-violation": "Freeze violation",
+};
+
+/**
+ * Per-class resolution guidance for findings whose `baselineEdit` is null — Rule #412:
+ * the body must say what resolution looks like, and for these classes it is human
+ * judgment or live action, never a mechanical baseline accept.
+ */
+const NULL_EDIT_NOTES: Partial<Record<FindingClass, string>> = {
+  "bot-churn-freshness": "Informational — no baseline edit; this class has no baseline representation.",
+  "census-verdict-missing":
+    "Resolve by human judgment: add/fix the census fields (class293/verdict/verdictAt) on this repo's baseline line — values are decisions, not mechanical accepts (retire verdicts are Kevin-worded).",
+  "unexecuted-retirement":
+    "Resolve by EXECUTING the retirement (Rule #366 full-leg teardown, Kevin-worded #97) and archiving the repo — or re-verdict the baseline line if the retirement is rescinded. No mechanical baseline accept exists.",
+  "freeze-violation":
+    "Resolve by investigating the push (who/why), then either re-verdict the repo (it is not frozen in practice) or refresh verdictAt after confirming the push was sanctioned.",
 };
 
 /**
  * Renders the aggregate issue body — regenerated fresh every run (Rule #412: a stale body
  * would misstate current drift), grouped by class in `FINDING_CLASSES` order, each finding
  * carrying the exact baseline-edit line that would resolve it (or an explicit
- * "informational" note for the one class that has none). Handles the zero-findings case
- * too (all five sections render "_none_") even though the worker's own all-clean path uses
+ * per-class resolution note for the classes that have none). Handles the zero-findings case
+ * too (all sections render "_none_") even though the worker's own all-clean path uses
  * a dedicated close comment instead of this body — kept correct so a dry-run preview or a
  * future caller can render "what the body would say right now" unconditionally.
  */
@@ -355,7 +517,7 @@ export function renderDriftIssueBody(findings: Finding[], meta: DriftMeta): stri
     } else {
       for (const f of inClass) {
         lines.push(`- ${f.detail}`);
-        lines.push(f.baselineEdit ? `  Resolve: \`${f.baselineEdit}\`` : `  Informational — no baseline edit; this class has no baseline representation.`);
+        lines.push(f.baselineEdit ? `  Resolve: \`${f.baselineEdit}\`` : `  ${NULL_EDIT_NOTES[f.class] ?? "Informational — no baseline edit."}`);
       }
     }
     lines.push("");

@@ -25,6 +25,13 @@ function baselineEntry(overrides: Partial<BaselineEntry> = {}): BaselineEntry {
     archived: false,
     visibility: "PUBLIC",
     pushedAtAtSeed: "2026-08-01T00:00:00Z",
+    // Census-complete by default (v2) — mirrors the re-seeded production baseline, where
+    // every active row carries a census. Tests exercising census GAPS override these to
+    // undefined explicitly (the spread sets the property to undefined, which the lib
+    // treats identically to absent — and JSON.stringify drops it from rendered lines).
+    class293: "Internal Tooling",
+    verdict: "mechanic-covered",
+    verdictAt: "2026-08-01T00:00:00Z",
     ...overrides,
   };
 }
@@ -92,7 +99,7 @@ describe("diffFleet — baseline-repo-gone", () => {
     const gone = baselineEntry({ name: "deleted-or-transferred", archived: true, visibility: "PRIVATE" });
     const findings = diffFleet(baseline([gone]), []);
     expect(findings[0].baselineEdit).toBe(
-      'REMOVE this line from "repos": {"name":"deleted-or-transferred","archived":true,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-01T00:00:00Z"}',
+      'REMOVE this line from "repos": {"name":"deleted-or-transferred","archived":true,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-01T00:00:00Z","class293":"Internal Tooling","verdict":"mechanic-covered","verdictAt":"2026-08-01T00:00:00Z"}',
     );
   });
 });
@@ -126,7 +133,7 @@ describe("diffFleet — archived-flip", () => {
     // pushedAtAtSeed refreshes to the LIVE pushedAt, not the stale baseline seed date —
     // this line is built from live state end to end, never `{...entry, oneField}`.
     expect(flip.baselineEdit).toBe(
-      'UPDATE its "repos" line to: {"name":"acuops-pipeline","archived":true,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-14T00:00:00Z"}',
+      'UPDATE its "repos" line to: {"name":"acuops-pipeline","archived":true,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-14T00:00:00Z","class293":"Internal Tooling","verdict":"mechanic-covered","verdictAt":"2026-08-01T00:00:00Z"}',
     );
   });
 
@@ -272,6 +279,171 @@ describe("diffFleet — deterministic ordering", () => {
   });
 });
 
+// ───────────────────────────── diffFleet: census classes (v2) ─────────────────────────────
+
+describe("diffFleet — census-verdict-missing", () => {
+  // Negative control first (Rule #322): a census-complete active row is clean.
+  it("does NOT flag a live unarchived repo with a complete valid census", () => {
+    const findings = diffFleet(baseline([baselineEntry()]), [liveRepo()]);
+    expect(findings).toEqual([]);
+  });
+
+  it("flags a census-bare row with ONE aggregated finding naming every gap", () => {
+    const entry = baselineEntry({ class293: undefined, verdict: undefined, verdictAt: undefined });
+    const findings = diffFleet(baseline([entry]), [liveRepo()]);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].class).toBe("census-verdict-missing");
+    expect(findings[0].detail).toContain("class293 missing");
+    expect(findings[0].detail).toContain("verdict missing");
+    expect(findings[0].baselineEdit).toBeNull();
+  });
+
+  it("flags an out-of-vocabulary verdict — a typo must not silently exempt (Rule #465)", () => {
+    const entry = baselineEntry({ verdict: "frozen" }); // typo for "freeze"
+    const findings = diffFleet(baseline([entry]), [liveRepo()]);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].class).toBe("census-verdict-missing");
+    expect(findings[0].detail).toContain('verdict invalid ("frozen")');
+  });
+
+  it("flags verdict=TBD — valid vocabulary, standing pressure", () => {
+    const findings = diffFleet(baseline([baselineEntry({ verdict: "TBD" })]), [liveRepo()]);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].detail).toContain("verdict TBD");
+  });
+
+  it("flags class293 missing / invalid / TBD independently of a valid verdict", () => {
+    const missing = diffFleet(baseline([baselineEntry({ class293: undefined })]), [liveRepo()]);
+    expect(missing).toHaveLength(1);
+    expect(missing[0].detail).toContain("class293 missing");
+    const invalid = diffFleet(baseline([baselineEntry({ class293: "Tooling" })]), [liveRepo()]);
+    expect(invalid).toHaveLength(1);
+    expect(invalid[0].detail).toContain('class293 invalid ("Tooling")');
+    const tbd = diffFleet(baseline([baselineEntry({ class293: "TBD" })]), [liveRepo()]);
+    expect(tbd).toHaveLength(1);
+    expect(tbd[0].detail).toContain("class293 TBD");
+  });
+
+  it("flags verdict=freeze without verdictAt as class 6, and class 8 stays silent (no comparand)", () => {
+    const entry = baselineEntry({ verdict: "freeze", verdictAt: undefined });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ pushedAt: "2026-07-01T00:00:00Z" })]);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].class).toBe("census-verdict-missing");
+    expect(findings[0].detail).toContain("without verdictAt");
+  });
+
+  it("flags a malformed verdictAt", () => {
+    const findings = diffFleet(baseline([baselineEntry({ verdictAt: "yesterday" })]), [liveRepo()]);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].detail).toContain('verdictAt malformed ("yesterday")');
+  });
+
+  it("does NOT fire for a live-ARCHIVED repo, even census-bare (census-exempt by construction)", () => {
+    const entry = baselineEntry({ archived: true, class293: undefined, verdict: undefined, verdictAt: undefined });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ isArchived: true })]);
+    expect(findings).toEqual([]);
+  });
+
+  it("exemption reads the LIVE archived flag: an archived-flip repo fires the flip but NOT census pressure", () => {
+    const entry = baselineEntry({ archived: false, class293: undefined, verdict: undefined, verdictAt: undefined });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ isArchived: true })]);
+    expect(findings.map((f) => f.class)).toEqual(["archived-flip"]);
+  });
+
+  it("does NOT fire for a baseline repo that is GONE live (class 2 owns that)", () => {
+    const entry = baselineEntry({ name: "gone-repo", class293: undefined, verdict: undefined, verdictAt: undefined });
+    const findings = diffFleet(baseline([entry]), []);
+    expect(findings.map((f) => f.class)).toEqual(["baseline-repo-gone"]);
+  });
+
+  it("a class-1 ADD line is census-bare by design — the new repo does not fire class 6 this run", () => {
+    const findings = diffFleet(baseline([]), [liveRepo({ name: "brand-new-repo" })]);
+    expect(findings.map((f) => f.class)).toEqual(["new-unmapped-repo"]);
+    // The ADD line carries no census keys; once applied, class 6 demands the verdict next run.
+    expect(findings[0].baselineEdit).toContain("brand-new-repo");
+    expect(findings[0].baselineEdit).not.toContain("class293");
+  });
+});
+
+describe("diffFleet — unexecuted-retirement", () => {
+  it("does NOT flag verdict=retire on a repo already ARCHIVED live (retirement executed — negative control)", () => {
+    const entry = baselineEntry({ archived: true, verdict: "retire", class293: "Dead" });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ isArchived: true })]);
+    expect(findings).toEqual([]);
+  });
+
+  it("flags verdict=retire on a live unarchived repo, naming the verdict date and Rule #366", () => {
+    const entry = baselineEntry({ verdict: "retire", class293: "Dead", verdictAt: "2026-08-30T00:00:00Z" });
+    const findings = diffFleet(baseline([entry]), [liveRepo()]);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].class).toBe("unexecuted-retirement");
+    expect(findings[0].detail).toContain("worded 2026-08-30T00:00:00Z");
+    expect(findings[0].detail).toContain("#366");
+    expect(findings[0].baselineEdit).toBeNull();
+  });
+
+  it("retire with census gaps fires BOTH class 6 and class 7 (independent defects)", () => {
+    const entry = baselineEntry({ verdict: "retire", class293: undefined });
+    const findings = diffFleet(baseline([entry]), [liveRepo()]);
+    expect(findings.map((f) => f.class).sort()).toEqual(["census-verdict-missing", "unexecuted-retirement"]);
+  });
+});
+
+describe("diffFleet — freeze-violation", () => {
+  it("does NOT flag a frozen repo whose last push precedes the verdict (negative control)", () => {
+    const entry = baselineEntry({ verdict: "freeze", verdictAt: "2026-08-30T00:00:00Z" });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ pushedAt: "2026-07-01T00:00:00Z" })]);
+    expect(findings).toEqual([]);
+  });
+
+  it("flags a frozen repo pushed AFTER the verdict", () => {
+    const entry = baselineEntry({ verdict: "freeze", verdictAt: "2026-08-01T00:00:00Z" });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ pushedAt: "2026-08-15T12:00:00Z" })]);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].class).toBe("freeze-violation");
+    expect(findings[0].detail).toContain("2026-08-15T12:00:00Z");
+    expect(findings[0].detail).toContain("frozen repo moved");
+    expect(findings[0].baselineEdit).toBeNull();
+  });
+
+  it("does NOT fire for an archived frozen repo regardless of dates", () => {
+    const entry = baselineEntry({ archived: true, verdict: "freeze", verdictAt: "2026-08-01T00:00:00Z" });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ isArchived: true, pushedAt: "2026-08-15T12:00:00Z" })]);
+    expect(findings).toEqual([]);
+  });
+});
+
+describe("diffFleet — census pass-through on accept lines", () => {
+  it("a flip's UPDATE line carries the baseline row's census fields verbatim (accepting a flip must not strip the census)", () => {
+    const entry = baselineEntry({ verdict: "manual-tax", class293: "Product", verdictAt: "2026-08-30T00:00:00Z", note: "deployed on studiob-platform" });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ visibility: "PRIVATE" })]);
+    expect(findings).toHaveLength(1);
+    const flip = findings[0];
+    expect(flip.class).toBe("visibility-flip");
+    expect(flip.baselineEdit).toContain('"class293":"Product"');
+    expect(flip.baselineEdit).toContain('"verdict":"manual-tax"');
+    expect(flip.baselineEdit).toContain('"verdictAt":"2026-08-30T00:00:00Z"');
+    expect(flip.baselineEdit).toContain('"note":"deployed on studiob-platform"');
+  });
+
+  it("dual-flip resolve lines stay IDENTICAL with census fields present", () => {
+    const entry = baselineEntry({ name: "dual", verdict: "manual-tax", class293: "Product" });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ name: "dual", isArchived: true, visibility: "PRIVATE" })]);
+    const a = findings.find((f) => f.class === "archived-flip")!;
+    const v = findings.find((f) => f.class === "visibility-flip")!;
+    expect(a.baselineEdit).toBe(v.baselineEdit);
+    expect(a.baselineEdit).toContain('"verdict":"manual-tax"');
+  });
+
+  it("a census-bare row's REMOVE line renders without census keys at all (v1-shape line survives)", () => {
+    const entry = baselineEntry({ name: "bare-gone", class293: undefined, verdict: undefined, verdictAt: undefined });
+    const findings = diffFleet(baseline([entry]), []);
+    expect(findings[0].baselineEdit).toBe(
+      'REMOVE this line from "repos": {"name":"bare-gone","archived":false,"visibility":"PUBLIC","pushedAtAtSeed":"2026-08-01T00:00:00Z"}',
+    );
+  });
+});
+
 // ───────────────────────────── bot-churn classification ─────────────────────────────
 
 describe("isBotAuthoredCommit", () => {
@@ -347,7 +519,7 @@ describe("isBotChurn — threshold edges", () => {
 // ───────────────────────────── summarizeFindings (Rule #465) ─────────────────────────────
 
 describe("summarizeFindings — always prints every class including 0 (Rule #465)", () => {
-  it("with zero findings, every one of the five classes still appears at =0", () => {
+  it("with zero findings, every class still appears at =0", () => {
     const line = summarizeFindings([]);
     for (const cls of FINDING_CLASSES) {
       expect(line).toContain(`${cls}=0`);
@@ -369,11 +541,11 @@ describe("summarizeFindings — always prints every class including 0 (Rule #465
     expect(line).toContain("total=2");
   });
 
-  it("prints all five class names even when findings carry an unexpected count distribution", () => {
+  it("prints every class name even when findings carry an unexpected count distribution", () => {
     const findings: Finding[] = FINDING_CLASSES.map((c, i) => ({ class: c, repo: `r${i}`, detail: "d", baselineEdit: null }));
     const line = summarizeFindings(findings);
     for (const cls of FINDING_CLASSES) expect(line).toContain(`${cls}=1`);
-    expect(line).toContain("total=5");
+    expect(line).toContain(`total=${FINDING_CLASSES.length}`);
   });
 });
 
@@ -450,6 +622,22 @@ describe("renderDriftIssueBody", () => {
     // "  Resolve: `...`" line must not appear anywhere — the footer's generic *instruction*
     // to "Apply the `Resolve:` line(s) above" is a DIFFERENT string shape (unindented prose,
     // no backtick immediately after the colon) and must not false-fail this check.
+    expect(body).not.toContain("  Resolve: `");
+  });
+
+  it("renders census findings with their per-class resolution notes, never a mechanical Resolve line", () => {
+    const findings: Finding[] = [
+      { class: "census-verdict-missing", repo: "a", detail: "`a` census incomplete.", baselineEdit: null },
+      { class: "unexecuted-retirement", repo: "b", detail: "`b` retire unexecuted.", baselineEdit: null },
+      { class: "freeze-violation", repo: "c", detail: "`c` frozen repo moved.", baselineEdit: null },
+    ];
+    const body = renderDriftIssueBody(findings, meta);
+    expect(body).toContain("Census verdict missing/invalid (1)");
+    expect(body).toContain("Unexecuted retirement (kill-list tracker) (1)");
+    expect(body).toContain("Freeze violation (1)");
+    expect(body).toContain("values are decisions, not mechanical accepts");
+    expect(body).toContain("EXECUTING the retirement");
+    expect(body).toContain("investigating the push");
     expect(body).not.toContain("  Resolve: `");
   });
 
