@@ -48,3 +48,23 @@ repos:
     - "qualify / sandbox publish dry-run"
     - "qualify / Notify on qualifier failure"
     - "Auto-qualifier (shadow)"
+    # RULING 2026-08-30 (ops#235; first observed on the ca#314/ca#342
+    # Customization merges — absent from the 8/29 seed because that window
+    # held no Customization-touching PR): the acuops-build deploy-chain
+    # names that skip by design on every pull_request event —
+    #   deploy                            (caller: event_name != 'pull_request')
+    #   build / Pre-Deploy Qualification  (pipeline: same gate)
+    #   build / Validate on Staging       (pipeline: PR-only && dry_run != true,
+    #                                      and the caller pins dry_run=true on
+    #                                      ALL pull_request events)
+    #   build / 24h Dispatch Cap          (pipeline: same gate)
+    # — are deliberately NOT sanctioned here, even though each was verified
+    # event-gated from its origin/main if: condition. The committed-data-file
+    # test's Rule #320 ban on deploy/build-prefixed names is load-bearing:
+    # it keeps the unattended paths (squasher, restart-train) from ever
+    # green-lighting a Customization merge, which fires a Heritage app-pool
+    # restart (Rule #11). Customization merges are always Kevin-worded and
+    # interactive — use the per-merge `# CHECKS-GATE-EXEMPT: <reason>` form
+    # there. "build / build-bin" is additionally content-conditional
+    # (detect-code-change.code_changed) — the exact transitive-skip state
+    # the gate exists to catch.
