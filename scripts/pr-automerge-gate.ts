@@ -33,7 +33,9 @@
  *   5. label `bugsquasher` present
  *   6. independent review: the ENTIRE raw diff is sent to Claude Sonnet 5, with a
  *      class-aware system prompt (`reviewSystemPromptFor` — test-only adds an extra
- *      assertion-weakening question), which must return exactly the string `CLEAN`
+ *      assertion-weakening question; code-fix gets its OWN minimal-targeted-fix
+ *      rubric, ops#190 B3, since the base docs-only rubric can never CLEAN a
+ *      behavioral fix), which must return exactly the string `CLEAN`
  *      (strict, case-sensitive) or the whole leg is FLAG. ANY API error (network,
  *      auth, rate limit, malformed response) is ALSO FLAG — fail-closed, never
  *      silently treated as clean.
