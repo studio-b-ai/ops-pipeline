@@ -117,6 +117,15 @@ describe("parseArcs", () => {
     expect(rejected[0].reason).toMatch(/>14 days out/);
   });
 
+  it("14-day boundary is exact: day 14 accepted, day 15 rejected", () => {
+    const at14 = GOOD_ARC_YAML.replace('expires: "2026-09-10"', 'expires: "2026-09-15"');
+    expect(parseArcs(at14, TODAY).valid).toHaveLength(1);
+    const at15 = GOOD_ARC_YAML.replace('expires: "2026-09-10"', 'expires: "2026-09-16"');
+    const r = parseArcs(at15, TODAY);
+    expect(r.valid).toEqual([]);
+    expect(r.rejected[0].reason).toMatch(/>14 days out/);
+  });
+
   it("rejects a nonexistent calendar day — Date.parse normalization is not validation", () => {
     const y = GOOD_ARC_YAML.replace('expires: "2026-09-10"', 'expires: "2026-09-31"');
     const { valid, rejected } = parseArcs(y, TODAY);
