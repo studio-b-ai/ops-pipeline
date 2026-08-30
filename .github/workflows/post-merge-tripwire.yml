@@ -31,8 +31,12 @@
 #         project_id: <railway project uuid>
 #         environment_id: <railway environment uuid>
 #         service_id: <railway service uuid>
-#         safe_path_globs: "src/**,scripts/**"
-#         required_checks: "test,typecheck"
+#         safe_path_globs: |
+#           src/**
+#           scripts/**
+#         required_checks: |
+#           Build & Check
+#           gitleaks / Secret scan (gitleaks, Rule 363)
 #       secrets:
 #         RAILWAY_API_TOKEN: ${{ secrets.RAILWAY_API_TOKEN }}
 #         FLEET_APP_ID: ${{ secrets.FLEET_APP_ID }}
@@ -87,17 +91,17 @@ on:
         required: true
         type: string
       safe_path_globs:
-        description: "Comma-separated safe-path globs for the code-fix re-derivation (empty = refuse everything, fail-closed)"
+        description: "Newline-separated safe-path globs for the code-fix re-derivation (empty = refuse everything, fail-closed)"
         required: false
         type: string
         default: ""
       sensitive_path_patterns:
-        description: "Comma-separated sensitive-path regex deny patterns"
+        description: "Newline-separated sensitive-path regex deny patterns"
         required: false
         type: string
         default: ""
       required_checks:
-        description: "Comma-separated required check names the merged PR's rollup must satisfy (empty = fail-closed refuse)"
+        description: "Newline-separated required check names the merged PR's rollup must satisfy (empty = fail-closed refuse). Newline-delimited because real check names contain commas (e.g. 'gitleaks / Secret scan (gitleaks, Rule 363)')"
         required: false
         type: string
         default: ""
@@ -210,28 +214,27 @@ jobs:
             --service-id "$T_SERVICE_ID"
             --target-dir "$GITHUB_WORKSPACE/target-repo"
           )
-          # Comma-split + trim each repeatable input — same defense-in-depth shape
-          # as squasher-automerge.yml (untrimmed " b" entries would be silently
-          # inert; parseTripwireArgs trims again behind this).
+          # Newline-split + trim each repeatable input. NOT comma-split: real
+          # check names contain commas ("gitleaks / Secret scan (gitleaks, Rule
+          # 363)") — a comma delimiter would shear that into two never-matching
+          # names and fail-closed refuse every run (#464 inert-guard shape).
+          # Blank lines drop; parseTripwireArgs trims again behind this.
           if [ -n "$T_SAFE_GLOBS" ]; then
-            IFS=',' read -ra globs <<< "$T_SAFE_GLOBS"
-            for g in "${globs[@]}"; do
+            while IFS= read -r g; do
               trimmed="$(printf '%s' "$g" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
               [ -n "$trimmed" ] && args+=(--safe-path-glob "$trimmed")
-            done
+            done <<< "$T_SAFE_GLOBS"
           fi
           if [ -n "$T_SENSITIVE" ]; then
-            IFS=',' read -ra pats <<< "$T_SENSITIVE"
-            for p in "${pats[@]}"; do
+            while IFS= read -r p; do
               trimmed="$(printf '%s' "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
               [ -n "$trimmed" ] && args+=(--sensitive-path "$trimmed")
-            done
+            done <<< "$T_SENSITIVE"
           fi
           if [ -n "$T_REQUIRED_CHECKS" ]; then
-            IFS=',' read -ra checks <<< "$T_REQUIRED_CHECKS"
-            for c in "${checks[@]}"; do
+            while IFS= read -r c; do
               trimmed="$(printf '%s' "$c" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
               [ -n "$trimmed" ] && args+=(--required-check "$trimmed")
-            done
+            done <<< "$T_REQUIRED_CHECKS"
           fi
           npx tsx post-merge-tripwire.ts "${args[@]}"
