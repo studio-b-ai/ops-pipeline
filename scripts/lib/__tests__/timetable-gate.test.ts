@@ -386,6 +386,12 @@ describe("evaluateDeparture — one negative control per check", () => {
   it("13: an undeclared interception point fails", () => {
     expect(run((f) => (f.invokedVia = undefined)).failures[0]).toMatch(/out-of-band/);
   });
+
+  it("13: an UNSANCTIONED interception point fails — truthiness is not membership", () => {
+    const r = run((f) => (f.invokedVia = "manual-script"));
+    expect(r.verdict).toBe("FALL_THROUGH");
+    expect(r.failures[0]).toMatch(/not a sanctioned interception point/);
+  });
 });
 
 // ---------------------------------------------------------------------------

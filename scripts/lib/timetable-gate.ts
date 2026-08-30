@@ -119,10 +119,18 @@ export interface DepartureFacts {
   /**
    * §8 item 13 — which sanctioned interception point invoked the engine.
    * Structural: real coverage is the wiring's job; the engine records +
-   * asserts the caller declared one.
+   * validates set MEMBERSHIP (typed as string because runtime callers are
+   * outside TypeScript's union — truthiness alone would be fail-open).
    */
-  invokedVia?: "bash-gh-merge-hook" | "mcp-merge-hook" | "deploy-command-guard";
+  invokedVia?: string;
 }
+
+/** §8 item 13 — the only interception points that may invoke the engine. */
+export const SANCTIONED_INVOCATION_POINTS: readonly string[] = [
+  "bash-gh-merge-hook",
+  "mcp-merge-hook",
+  "deploy-command-guard",
+];
 
 // ---------------------------------------------------------------------------
 // Gate-level denylist (§8) — no arc can allow these. Engine-owned.
@@ -636,6 +644,13 @@ export function evaluateDeparture(
   // -- Check 13 (§8): invoked from a sanctioned interception point ----------
   if (!facts.invokedVia) {
     add("13", "gate-coverage", "fail", "caller did not declare its interception point — engine invoked out-of-band");
+  } else if (!SANCTIONED_INVOCATION_POINTS.includes(facts.invokedVia)) {
+    add(
+      "13",
+      "gate-coverage",
+      "fail",
+      `\`${facts.invokedVia}\` is not a sanctioned interception point (${SANCTIONED_INVOCATION_POINTS.join(", ")})`,
+    );
   } else {
     add("13", "gate-coverage", "pass", `via ${facts.invokedVia}`);
   }
