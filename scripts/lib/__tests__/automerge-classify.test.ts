@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyDiffFile,
   classifyPrDiffClass,
+  codeFixRevalidateDeltas,
   compileSafePathGlob,
   evaluateMergeReadiness,
   gateDecision,
@@ -898,7 +899,11 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
     const result = classifyPrDiffClass({ files: GOOD.files, totalChangedLines: 3 });
     expect(result.prClass).toBeNull();
     expect(result.failureLeg).toBe("class-match");
-    expect(result.reasons.some((r) => r.includes("class inert"))).toBe(true);
+    // Codex B1 pass-1 P2 fix: with NO globs supplied the code-fix candidate never
+    // joins the set at all, so a legacy caller's missed-PR receipts stay
+    // byte-identical — no "code-fix: class inert" reason line appears. The
+    // enabled-with-zero-globs diagnostic lives in the runner's [config] note.
+    expect(result.reasons.some((r) => r.includes("code-fix"))).toBe(false);
   });
 
   it("is INERT when every supplied glob is empty/whitespace (compiles to zero globs)", () => {
@@ -944,20 +949,30 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
     expect(result.reasons.some((r) => r.includes("Customization/**"))).toBe(true);
   });
 
-  it("denylist: executable code under .github/actions/** (not ci-infra shape, and code-fix refuses it too)", () => {
+  it("denylist: executable code under .github/actions/ (not ci-infra shape, and code-fix refuses it too)", () => {
     const result = classifyPrDiffClass({ ...GOOD, safePathGlobs: ["**"], files: files([".github/actions/setup/index.js"]) });
     expect(result.prClass).toBeNull();
-    expect(result.reasons.some((r) => r.includes(".github/actions/**"))).toBe(true);
+    expect(result.reasons.some((r) => r.includes(".github/**"))).toBe(true);
   });
 
-  it("denylist: .github/workflows/** stays refused by code-fix even in a mixed diff where ci-infra's shape already failed", () => {
+  it("denylist: .github/workflows/ stays refused by code-fix even in a mixed diff where ci-infra's shape already failed", () => {
     const result = classifyPrDiffClass({
       ...GOOD,
       safePathGlobs: ["**"],
       files: files([".github/workflows/deploy.yml", "src/lib/order-notes.ts"]),
     });
     expect(result.prClass).toBeNull();
-    expect(result.reasons.some((r) => r.includes(".github/workflows/**"))).toBe(true);
+    expect(result.reasons.some((r) => r.includes(".github/**"))).toBe(true);
+  });
+
+  it("denylist: repo-policy files directly under .github/ (codex B1 pass-1 P1 fix — CODEOWNERS/dependabot.yml are authority-adjacent, never a 'small code fix')", () => {
+    const result = classifyPrDiffClass({
+      ...GOOD,
+      safePathGlobs: ["**"],
+      files: files([".github/dependabot.yml", "src/lib/order-notes.ts"]),
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("denylist") && r.includes(".github/**"))).toBe(true);
   });
 
   it("denylist: package manifests/lockfiles (dependency changes are Rule #289's class, never a 'small code fix')", () => {
@@ -1114,5 +1129,97 @@ describe("requiredChecksSatisfied (ops#190 B1 — the named-checks leg)", () => 
   it("rejects a legacy commit-status shape whose state is not SUCCESS", () => {
     const rollup: RollupItem[] = [{ context: "build", state: "ERROR", createdAt: T1 }];
     expect(requiredChecksSatisfied(rollup, ["build"]).ok).toBe(false);
+  });
+});
+
+// ─────────────────── codeFixRevalidateDeltas (ops#190 B1, doc §4.1 move 5) ───────────────────
+// Codex B1 pass-1 P1 fix: the runner re-fetches the PR as the LAST call before the
+// merge API call and aborts on ANY delta. This predicate DEFAULTS to flagging, so the
+// Rule #471 non-default plant here is the known-GOOD: an unchanged world (plus the
+// gate's own just-applied B2 label) must return ZERO deltas or the leg can never merge.
+describe("codeFixRevalidateDeltas", () => {
+  const MERGE_LABEL = "automerge:code-fix";
+  const NO_SKIPS: ReadonlySet<string> = new Set();
+  const cleanRollup: RollupItem[] = [
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    { name: "build", status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-08-30T00:00:10Z" },
+  ];
+  const ORIGINAL = { headRefOid: "abc123", authorLogin: "kbibelhausen", labels: ["bugsquasher"] };
+  function fresh(overrides: Record<string, unknown> = {}) {
+    return {
+      headRefOid: "abc123",
+      authorLogin: "kbibelhausen",
+      labels: ["bugsquasher", MERGE_LABEL],
+      state: "OPEN",
+      isDraft: false,
+      mergeStateStatus: "CLEAN",
+      statusCheckRollup: cleanRollup,
+      ...overrides,
+    };
+  }
+  const OPTS = { mergeLabel: MERGE_LABEL, sanctionedSkips: NO_SKIPS, requiredChecks: ["build"] };
+
+  // ───── Known-good FIRST here (Rule #471: plant the verdict the guard does NOT default to) ─────
+
+  it("known-GOOD: unchanged world + the gate's own just-applied B2 label returns zero deltas", () => {
+    expect(codeFixRevalidateDeltas(ORIGINAL, fresh(), OPTS)).toEqual([]);
+  });
+
+  it("label ORDER differences are not a delta (set semantics — GitHub's ordering can't false-abort)", () => {
+    expect(codeFixRevalidateDeltas(ORIGINAL, fresh({ labels: [MERGE_LABEL, "bugsquasher"] }), OPTS)).toEqual([]);
+  });
+
+  // ───── Delta directions ─────
+
+  it("flags a moved head", () => {
+    const deltas = codeFixRevalidateDeltas(ORIGINAL, fresh({ headRefOid: "def456" }), OPTS);
+    expect(deltas.some((d) => d.includes("head moved") && d.includes("def456"))).toBe(true);
+  });
+
+  it("flags a changed author (authority input — 'impossible' is not a gate)", () => {
+    const deltas = codeFixRevalidateDeltas(ORIGINAL, fresh({ authorLogin: "mallory" }), OPTS);
+    expect(deltas.some((d) => d.includes("author changed"))).toBe(true);
+  });
+
+  it("flags a removed label (a human pulling `bugsquasher` mid-evaluation aborts the merge)", () => {
+    const deltas = codeFixRevalidateDeltas(ORIGINAL, fresh({ labels: [MERGE_LABEL] }), OPTS);
+    expect(deltas.some((d) => d.includes("label set changed") && d.includes("removed: bugsquasher"))).toBe(true);
+  });
+
+  it("flags an ADDED foreign label (a stop-style label landing mid-evaluation aborts the merge)", () => {
+    const deltas = codeFixRevalidateDeltas(ORIGINAL, fresh({ labels: ["bugsquasher", MERGE_LABEL, "train:hold"] }), OPTS);
+    expect(deltas.some((d) => d.includes("label set changed") && d.includes("added: train:hold"))).toBe(true);
+  });
+
+  it("flags the merge label MISSING from the fresh read (fail-closed on an unconfirmed B2 label write)", () => {
+    const deltas = codeFixRevalidateDeltas(ORIGINAL, fresh({ labels: ["bugsquasher"] }), OPTS);
+    expect(deltas.some((d) => d.includes(`removed: ${MERGE_LABEL}`))).toBe(true);
+  });
+
+  it("flags a state change (PR closed/merged mid-evaluation) as a readiness regression", () => {
+    const deltas = codeFixRevalidateDeltas(ORIGINAL, fresh({ state: "CLOSED" }), OPTS);
+    expect(deltas.some((d) => d.includes("merge readiness regressed") && d.includes("state=CLOSED"))).toBe(true);
+  });
+
+  it("flags a draft flip as a readiness regression", () => {
+    const deltas = codeFixRevalidateDeltas(ORIGINAL, fresh({ isDraft: true }), OPTS);
+    expect(deltas.some((d) => d.includes("merge readiness regressed") && d.includes("isDraft=true"))).toBe(true);
+  });
+
+  it("flags a fresh CI failure in the rollup as a readiness regression", () => {
+    const rollup: RollupItem[] = [
+      ...cleanRollup,
+      // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+      { name: "lint", status: "COMPLETED", conclusion: "FAILURE", completedAt: "2026-08-30T00:00:20Z" },
+    ];
+    const deltas = codeFixRevalidateDeltas(ORIGINAL, fresh({ statusCheckRollup: rollup }), OPTS);
+    expect(deltas.some((d) => d.includes("merge readiness regressed") && d.includes("ciClean=false"))).toBe(true);
+  });
+
+  it("flags a named required check that regressed independently of the rollup leg", () => {
+    // Rollup itself stays clean (only `build`, SUCCESS) — but requiredChecks names
+    // `tests` too, which never reported on the fresh read. Isolates the named leg.
+    const deltas = codeFixRevalidateDeltas(ORIGINAL, fresh(), { ...OPTS, requiredChecks: ["build", "tests"] });
+    expect(deltas.some((d) => d.includes("named checks regressed") && d.includes("'tests' never reported"))).toBe(true);
   });
 });

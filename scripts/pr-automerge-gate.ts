@@ -84,6 +84,7 @@ import { execFileSync } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   classifyPrDiffClass,
+  codeFixRevalidateDeltas,
   evaluateMergeReadiness,
   gateDecisionForClass,
   isRollupClean,
@@ -561,6 +562,39 @@ async function evaluate(
           `an UNWATCHED merge). Most likely the label does not exist in this repo yet (B3 setup item). ` +
           `Underlying error: ${message}`,
       );
+      return;
+    }
+
+    // ── Revalidate-then-merge (doc §4.1 move 5; codex B1 pass-1 P1 fix): re-fetch the
+    // PR as the LAST call before the merge API call — legs 1–6 evaluated a snapshot
+    // that is now minutes old (the paid review sits between fetch and here), and for
+    // executable code that window gets a re-check, not a shrug. ANY delta aborts this
+    // cycle; the sha pin below remains the backstop for a race past the revalidate.
+    // Scoped to code-fix only — docs/ci-infra/test-only keep their proven, byte-
+    // identical path (Rule #109).
+    const fresh = fetchPr(repo, pr);
+    const revalidateDeltas = codeFixRevalidateDeltas(
+      { headRefOid: prJson.headRefOid, authorLogin: author, labels },
+      {
+        headRefOid: fresh.headRefOid,
+        authorLogin: fresh.author.login,
+        labels: fresh.labels.map((l) => l.name),
+        state: fresh.state,
+        isDraft: fresh.isDraft,
+        mergeStateStatus: fresh.mergeStateStatus,
+        statusCheckRollup: fresh.statusCheckRollup,
+      },
+      { mergeLabel: CODE_FIX_MERGE_LABEL, sanctionedSkips: loadSanctionedSkips(repo), requiredChecks },
+    );
+    if (revalidateDeltas.length > 0) {
+      console.log(
+        `[no-op] pr-automerge-gate ${repo}#${pr}: revalidate detected server-state delta(s) between evaluation ` +
+          `and merge — merge ABORTED this cycle (doc §4.1 move 5, fail-closed; not retried per Rules #109/#161 — ` +
+          `the next scheduled/triggered run re-evaluates current state): ${revalidateDeltas.join("; ")}`,
+      );
+      // No [gate-receipt] line: the gate QUALIFIED on the state it evaluated — this is
+      // the designed abort-on-delta, an operational outcome, not a gate miss (same
+      // rationale as the TOCTOU catch below).
       return;
     }
   }

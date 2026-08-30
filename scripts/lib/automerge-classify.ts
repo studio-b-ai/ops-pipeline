@@ -454,8 +454,11 @@ const CODE_FIX_BUILTIN_DENYLIST: { label: string; test: (path: string) => boolea
   { label: "auth/middleware", test: (p) => /auth|middleware/i.test(p) },
   { label: "pricing-write", test: (p) => /pricing|price/i.test(p) },
   { label: "Customization/**", test: (p) => /^Customization\//.test(p) },
-  { label: ".github/actions/**", test: (p) => /^\.github\/actions\//.test(p) },
-  { label: ".github/workflows/**", test: (p) => /^\.github\/workflows\//.test(p) },
+  // Wider than the doc §4.1's named minimum (actions/** + workflows/**) — codex B1
+  // pass-1 P1: CODEOWNERS, dependabot.yml, PR templates and every other repo-policy
+  // file under .github/ are CI/authority-adjacent, never a "small code fix". ci-infra
+  // remains the sanctioned class for workflow YAML; code-fix claims NOTHING here.
+  { label: ".github/**", test: (p) => /^\.github\//.test(p) },
   // Beyond the doc's named minimum, same fail-closed direction: a dependency change
   // is its own class of risk (Rule #289 — bumps need lockfile+manifest reasoning)
   // and no "small code fix" needs to ride one.
@@ -699,10 +702,18 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
     evalDocsComment(files, totalChangedLines),
     evalCiInfra(files, totalChangedLines),
     evalTestOnly(files, totalChangedLines),
-    // LAST on purpose (B1): the widest class only ever picks up what the narrower,
-    // longer-proven classes refused — existing resolutions stay byte-identical.
-    evalCodeFix(files, totalChangedLines, safePathGlobs),
   ];
+  // LAST on purpose (B1): the widest class only ever picks up what the narrower,
+  // longer-proven classes refused — existing resolutions stay byte-identical.
+  // And it joins the candidate set ONLY when the caller supplied at least one
+  // safe-path glob (codex B1 pass-1 P2): a caller that never opted in must get
+  // byte-identical receipts — no "code-fix: class inert" reason lines appearing
+  // on every legacy missed-PR comment. A caller that DID supply globs which all
+  // trim to nothing still gets the inert-reason diagnostic (opt-in-but-broken),
+  // and the runner's [config] note covers the enabled-with-zero-globs case.
+  if (safePathGlobs && safePathGlobs.length > 0) {
+    candidates.push(evalCodeFix(files, totalChangedLines, safePathGlobs));
+  }
 
   const fullMatch = candidates.find((c) => c.shapeOk && c.lineCapOk);
   if (fullMatch) {
@@ -973,4 +984,83 @@ export function evaluateMergeReadiness(input: MergeReadinessInput): { ready: boo
     input.state === "OPEN" && !input.isDraft && input.ciClean && input.mergeStateStatus === "CLEAN";
   const detail = `state=${input.state} isDraft=${input.isDraft} ciClean=${input.ciClean} mergeStateStatus=${input.mergeStateStatus}`;
   return { ready, detail };
+}
+
+// ───────────────── code-fix revalidate-then-merge (ops#190 B1, doc §4.1 move 5) ─────────────────
+
+/** The PR fields the revalidate leg re-fetches immediately before the merge API call
+ *  (doc §4.1 move 5: "re-fetch the PR once more (labels, headRefOid, state,
+ *  mergeStateStatus); any delta ⇒ abort this cycle"). FRESH is that re-fetch;
+ *  ORIGINAL is the subset of the evaluation-start fetch the comparison needs. */
+export interface RevalidateSnapshot {
+  headRefOid: string;
+  authorLogin: string;
+  labels: string[];
+  state: string;
+  isDraft: boolean;
+  mergeStateStatus: string;
+  statusCheckRollup: RollupItem[];
+}
+
+/**
+ * ops#190 B1 (codex B1 pass-1 P1 fix): pure delta predicate for the revalidate leg —
+ * the runner calls it on a fresh `fetchPr` as the LAST thing before the merge API
+ * call, and ANY returned delta aborts the cycle (fail-closed; the next scheduled run
+ * re-evaluates current state). The sha-pinned merge remains the backstop for a race
+ * past the revalidate — code changes cannot merge regardless; label-state changes
+ * inside that final revalidate→merge gap are the doc's accepted residual (§9).
+ *
+ * Deltas checked:
+ *  - head moved (the sha pin would also refuse, but aborting here skips a doomed
+ *    merge call and logs the cause precisely instead of as a generic TOCTOU catch);
+ *  - author changed (an authority input; should be impossible on GitHub — checked
+ *    because "impossible" is not a gate);
+ *  - merge readiness regressed on FRESH server state (state / draft / CI rollup /
+ *    mergeStateStatus — the same pure predicate as the evaluation-start leg);
+ *  - a named required check regressed from strict SUCCESS on the fresh rollup;
+ *  - the label SET changed vs (original ∪ {mergeLabel}): the gate's OWN just-applied
+ *    B2 trigger label is expected and NOT a delta; anything else added or removed
+ *    (a human pulling `bugsquasher`, a `train:hold`-style stop label landing) is.
+ */
+export function codeFixRevalidateDeltas(
+  original: Pick<RevalidateSnapshot, "headRefOid" | "authorLogin" | "labels">,
+  fresh: RevalidateSnapshot,
+  opts: { mergeLabel: string; sanctionedSkips: ReadonlySet<string>; requiredChecks: string[] },
+): string[] {
+  const deltas: string[] = [];
+
+  if (fresh.headRefOid !== original.headRefOid) {
+    deltas.push(`head moved: ${original.headRefOid} → ${fresh.headRefOid}`);
+  }
+  if (fresh.authorLogin !== original.authorLogin) {
+    deltas.push(`author changed: ${original.authorLogin} → ${fresh.authorLogin}`);
+  }
+
+  const readiness = evaluateMergeReadiness({
+    state: fresh.state,
+    isDraft: fresh.isDraft,
+    ciClean: isRollupClean(fresh.statusCheckRollup, opts.sanctionedSkips),
+    mergeStateStatus: fresh.mergeStateStatus,
+  });
+  if (!readiness.ready) {
+    deltas.push(`merge readiness regressed: ${readiness.detail}`);
+  }
+
+  const named = requiredChecksSatisfied(fresh.statusCheckRollup, opts.requiredChecks);
+  if (!named.ok) {
+    deltas.push(...named.reasons.map((r) => `named checks regressed: ${r}`));
+  }
+
+  const expected = new Set([...original.labels, opts.mergeLabel]);
+  const freshSet = new Set(fresh.labels);
+  const added = [...freshSet].filter((l) => !expected.has(l));
+  const removed = [...expected].filter((l) => !freshSet.has(l));
+  if (added.length > 0 || removed.length > 0) {
+    const parts: string[] = [];
+    if (added.length > 0) parts.push(`added: ${added.join(", ")}`);
+    if (removed.length > 0) parts.push(`removed: ${removed.join(", ")}`);
+    deltas.push(`label set changed (${parts.join("; ")})`);
+  }
+
+  return deltas;
 }
