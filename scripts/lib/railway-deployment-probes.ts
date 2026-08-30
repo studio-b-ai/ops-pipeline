@@ -211,3 +211,168 @@ export function latestSuccessfulDeployment(deployments: DeploymentRecord[]): Dep
   if (successes.length === 0) return null;
   return successes.reduce((latest, d) => (d.updatedAt > latest.updatedAt ? d : latest));
 }
+
+// ───────────────────────────── deployments with commit meta (post-merge tripwire, ops#190 B2) ─────────────────────────────
+
+/**
+ * Same root `Query.deployments` connection as SERVICE_DEPLOYMENTS_QUERY plus the `meta` JSON
+ * field. LIVE-VERIFIED 2026-08-30 against studiob-platform/webhook-router (3 real deployments):
+ * `meta` is a JSON object whose keys include `commitHash` (full 40-char sha), `branch`, `repo`,
+ * `commitMessage`, `imageDigest`. The tripwire attributes a merged PR's deployment by
+ * `meta.commitHash === merge_commit_sha` — a deployment with no meta (or no commitHash, e.g. an
+ * image-based redeploy) parses to `commitHash: null` and simply never attributes.
+ */
+const DEPLOYMENTS_WITH_META_QUERY = `
+query TripwireDeployments($projectId: String!, $environmentId: String!, $serviceId: String!, $first: Int!) {
+  deployments(input: { projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId }, first: $first) {
+    edges {
+      node {
+        id
+        status
+        createdAt
+        updatedAt
+        meta
+      }
+    }
+  }
+}`;
+
+export interface DeploymentWithMeta extends DeploymentRecord {
+  /** meta.commitHash (full sha) when present; null for deployments Railway created without commit metadata. */
+  commitHash: string | null;
+}
+
+interface RawDeploymentWithMetaNode extends RawDeploymentNode {
+  meta: unknown;
+}
+
+interface DeploymentsWithMetaData {
+  deployments: { edges: Array<{ node: RawDeploymentWithMetaNode }> } | null;
+}
+
+/** Pure: same error contract as the other parse* functions in this family — throws, caller wraps in try/catch. */
+export function parseDeploymentsWithMetaResponse(json: GraphQLResponse<DeploymentsWithMetaData>): DeploymentWithMeta[] {
+  if (json.errors && json.errors.length > 0) {
+    throw new Error(json.errors.map((e) => e.message).join("; "));
+  }
+  const edges = json.data?.deployments?.edges;
+  if (!edges) {
+    throw new Error("deployments query returned no data");
+  }
+  return edges.map((e) => {
+    const meta = e.node.meta;
+    const commitHash =
+      meta !== null && typeof meta === "object" && typeof (meta as Record<string, unknown>).commitHash === "string"
+        ? ((meta as Record<string, unknown>).commitHash as string)
+        : null;
+    return { id: e.node.id, status: e.node.status, createdAt: e.node.createdAt, updatedAt: e.node.updatedAt, commitHash };
+  });
+}
+
+export type DeploymentsWithMetaFetchResult = { ok: true; deployments: DeploymentWithMeta[] } | { ok: false; error: string };
+
+/** Network seam: never throws — errors come back as {ok:false} (same contract as fetchServiceDeployments). */
+export async function fetchDeploymentsWithMeta(
+  token: string,
+  projectId: string,
+  environmentId: string,
+  serviceId: string,
+  first = 20,
+): Promise<DeploymentsWithMetaFetchResult> {
+  try {
+    const json = await graphqlRequest<DeploymentsWithMetaData>(token, DEPLOYMENTS_WITH_META_QUERY, {
+      projectId,
+      environmentId,
+      serviceId,
+      first,
+    });
+    const deployments = parseDeploymentsWithMetaResponse(json);
+    return { ok: true, deployments };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// ───────────────────────────── HTTP metrics by status (post-merge tripwire, ops#190 B2) ─────────────────────────────
+
+/**
+ * Root `Query.httpMetricsGroupedByStatus` — LIVE-VERIFIED 2026-08-30 against webhook-router
+ * production (15-min window): returns one group PER STATUS CODE THAT OCCURRED (200/202/400/404 in
+ * the smoke); an ABSENT 5xx group means zero 5xx responses in the window, not missing data. Each
+ * sample's `ts` is epoch SECONDS and `value` is the request count in that step bucket.
+ *
+ * Note: the `MetricMeasurement` enum behind the generic `metrics` query has NO HTTP values
+ * (introspected 2026-08-30) — this grouped query is the ONLY GraphQL path to 5xx counts.
+ */
+const HTTP_METRICS_BY_STATUS_QUERY = `
+query TripwireHttpMetrics($environmentId: String!, $serviceId: String!, $startDate: DateTime!, $endDate: DateTime!, $stepSeconds: Int) {
+  httpMetricsGroupedByStatus(
+    environmentId: $environmentId
+    serviceId: $serviceId
+    startDate: $startDate
+    endDate: $endDate
+    stepSeconds: $stepSeconds
+  ) {
+    statusCode
+    samples { ts value }
+  }
+}`;
+
+export interface HttpSample {
+  /** Epoch seconds of the step bucket. */
+  ts: number;
+  /** Request count in the bucket. */
+  value: number;
+}
+
+export interface HttpStatusGroup {
+  statusCode: number;
+  samples: HttpSample[];
+}
+
+interface HttpMetricsByStatusData {
+  httpMetricsGroupedByStatus: HttpStatusGroup[] | null;
+}
+
+/**
+ * Pure: same error contract as the other parse* functions. An empty ARRAY is valid data (a
+ * zero-traffic window returns []); only GraphQL errors or a null/absent field throw — the
+ * tripwire must be able to tell "no traffic" (pass with note) from "metrics unavailable"
+ * (escalate blind-instrument, Rule #322/#456).
+ */
+export function parseHttpMetricsByStatusResponse(json: GraphQLResponse<HttpMetricsByStatusData>): HttpStatusGroup[] {
+  if (json.errors && json.errors.length > 0) {
+    throw new Error(json.errors.map((e) => e.message).join("; "));
+  }
+  const groups = json.data?.httpMetricsGroupedByStatus;
+  if (groups === null || groups === undefined) {
+    throw new Error("httpMetricsGroupedByStatus query returned no data");
+  }
+  return groups;
+}
+
+export type HttpMetricsFetchResult = { ok: true; groups: HttpStatusGroup[] } | { ok: false; error: string };
+
+/** Network seam: never throws — errors come back as {ok:false}; the tripwire escalates on that instead of passing (a blind instrument is never a pass). */
+export async function fetchHttpMetricsGroupedByStatus(
+  token: string,
+  environmentId: string,
+  serviceId: string,
+  startDateIso: string,
+  endDateIso: string,
+  stepSeconds: number,
+): Promise<HttpMetricsFetchResult> {
+  try {
+    const json = await graphqlRequest<HttpMetricsByStatusData>(token, HTTP_METRICS_BY_STATUS_QUERY, {
+      environmentId,
+      serviceId,
+      startDate: startDateIso,
+      endDate: endDateIso,
+      stepSeconds,
+    });
+    const groups = parseHttpMetricsByStatusResponse(json);
+    return { ok: true, groups };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
