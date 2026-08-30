@@ -62,11 +62,11 @@ jobs:
       run:
         working-directory: scripts
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: scripts/package-lock.json
 
@@ -88,7 +88,7 @@ jobs:
     name: "CFO brief — July classification regression"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The classifier ships as a verbatim copy of the seat-proven ruleset
       # (penny-exact on July 2026, codex-hardened). This gate asserts the

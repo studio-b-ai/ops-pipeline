@@ -137,7 +137,7 @@ jobs:
       FLEET_APP_KEY_SET: ${{ secrets.FLEET_APP_PRIVATE_KEY != '' }}
     steps:
       - name: Check out ops-pipeline (tripwire scripts)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: studio-b-ai/ops-pipeline
           ref: main
@@ -169,7 +169,7 @@ jobs:
           fi
 
       - name: Check out target repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ inputs.repo }}
           token: ${{ steps.token.outputs.value }}
@@ -179,9 +179,9 @@ jobs:
           fetch-depth: 50
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Install script dependencies
         working-directory: scripts
