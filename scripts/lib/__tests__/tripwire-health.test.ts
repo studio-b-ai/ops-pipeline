@@ -3,6 +3,7 @@ import {
   attributeDeployment,
   BOOT_GRACE_SECONDS,
   classifyHealthWindow,
+  detectWindowContamination,
   TRIP_MIN_5XX_BUCKETS,
   TRIP_MIN_5XX_TOTAL,
   WINDOW_SECONDS,
@@ -346,5 +347,81 @@ describe("parseUnifiedDiff", () => {
 
   it("returns an empty list for an empty diff", () => {
     expect(parseUnifiedDiff("")).toHaveLength(0);
+  });
+});
+
+describe("detectWindowContamination", () => {
+  // Railway metrics are SERVICE-scoped (codex P1, 2026-08-30 pass 1) — these cases pin
+  // exactly which post-window deployment states poison the verdict and which stay clean.
+  const bound = { id: "dep-bound", createdAt: "2026-08-30T04:05:00.000Z" };
+  const boundDep = dep({ id: "dep-bound" }); // SUCCESS at the bound createdAt by fixture default
+
+  // ── clean cases ──
+  it("is clean when the bound deployment is the only one and still SUCCESS", () => {
+    expect(detectWindowContamination([boundDep], bound)).toEqual({ contaminated: false });
+  });
+
+  it("is clean when a newer deployment FAILED (never took traffic)", () => {
+    // pg-enum-drift-exempt: Railway DeploymentStatus enum value, not a Postgres enum
+    const newerFailed = dep({ id: "dep-newer", status: "FAILED", createdAt: "2026-08-30T04:09:00.000Z" });
+    expect(detectWindowContamination([boundDep, newerFailed], bound)).toEqual({ contaminated: false });
+  });
+
+  it("is clean when a newer deployment is still building (hasn't taken traffic yet)", () => {
+    // pg-enum-drift-exempt: Railway DeploymentStatus enum value, not a Postgres enum
+    const newerBuilding = dep({ id: "dep-newer", status: "DEPLOYING", createdAt: "2026-08-30T04:09:00.000Z" });
+    expect(detectWindowContamination([boundDep, newerBuilding], bound)).toEqual({ contaminated: false });
+  });
+
+  it("is clean when an OLDER deployment shows SUCCESS or REMOVED (pre-window history)", () => {
+    // pg-enum-drift-exempt: Railway DeploymentStatus enum value, not a Postgres enum
+    const olderRemoved = dep({ id: "dep-older", status: "REMOVED", createdAt: "2026-08-30T03:50:00.000Z" });
+    const olderSuccess = dep({ id: "dep-oldest", createdAt: "2026-08-30T03:30:00.000Z" });
+    expect(detectWindowContamination([boundDep, olderRemoved, olderSuccess], bound)).toEqual({ contaminated: false });
+  });
+
+  // ── contaminated cases (each names its reason so the escalation carries the mechanism) ──
+  it("flags a newer SUCCESS deployment (it is now serving the metrics we read)", () => {
+    const newerLive = dep({ id: "dep-newer", createdAt: "2026-08-30T04:09:00.000Z" });
+    const result = detectWindowContamination([boundDep, newerLive], bound);
+    expect(result.contaminated).toBe(true);
+    if (result.contaminated) expect(result.reason).toContain("dep-newer");
+  });
+
+  it("flags a newer REMOVED deployment (it served during the window, then was itself replaced)", () => {
+    // pg-enum-drift-exempt: Railway DeploymentStatus enum value, not a Postgres enum
+    const newerRemoved = dep({ id: "dep-newer", status: "REMOVED", createdAt: "2026-08-30T04:09:00.000Z" });
+    const result = detectWindowContamination([boundDep, newerRemoved], bound);
+    expect(result.contaminated).toBe(true);
+    if (result.contaminated) expect(result.reason).toContain("dep-newer");
+  });
+
+  it("flags the bound deployment no longer being SUCCESS (displaced mid-window)", () => {
+    // pg-enum-drift-exempt: Railway DeploymentStatus enum value, not a Postgres enum
+    const boundDisplaced = dep({ id: "dep-bound", status: "REMOVED" });
+    const result = detectWindowContamination([boundDisplaced], bound);
+    expect(result.contaminated).toBe(true);
+    if (result.contaminated) expect(result.reason).toContain("REMOVED");
+  });
+
+  it("flags the bound deployment being absent from the refetched page", () => {
+    const unrelated = dep({ id: "dep-other" });
+    const result = detectWindowContamination([unrelated], bound);
+    expect(result.contaminated).toBe(true);
+    if (result.contaminated) expect(result.reason).toContain("absent");
+  });
+
+  it("fails closed on a deployment with an unparseable createdAt (cannot rule it out)", () => {
+    const broken = dep({ id: "dep-broken", createdAt: "not-a-timestamp" });
+    const result = detectWindowContamination([boundDep, broken], bound);
+    expect(result.contaminated).toBe(true);
+    if (result.contaminated) expect(result.reason).toContain("dep-broken");
+  });
+
+  it("fails closed when the BOUND createdAt itself is unparseable", () => {
+    const badBound = { id: "dep-bound", createdAt: "garbage" };
+    const result = detectWindowContamination([boundDep], badBound);
+    expect(result.contaminated).toBe(true);
+    if (result.contaminated) expect(result.reason).toContain("unparseable");
   });
 });

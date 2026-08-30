@@ -50,6 +50,11 @@ export interface TripwireArgs {
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHA_RE = /^[0-9a-f]{40}$/i;
 const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+// Full date + time + explicit zone, nothing less (codex P1, 2026-08-30 pass 1):
+// Date.parse alone accepts "123" (year 123!) and date-only/zoneless strings — any of
+// which silently moves the attribution floor and can bind a pre-existing same-sha
+// deployment. GitHub's closed_at is always this shape.
+const ISO_8601_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
 
 function requireValue(argv: string[], i: number, flag: string): string {
   const v = argv[i + 1];
@@ -109,7 +114,7 @@ export function parseTripwireArgs(argv: string[]): TripwireArgs {
       }
       case "--closed-at": {
         const v = requireValue(argv, i, arg).trim();
-        if (Number.isNaN(Date.parse(v))) throw new Error(`--closed-at must be an ISO-8601 timestamp, got: ${v}`);
+        if (!ISO_8601_RE.test(v) || Number.isNaN(Date.parse(v))) throw new Error(`--closed-at must be an ISO-8601 timestamp, got: ${v}`);
         closedAt = v;
         i++;
         break;

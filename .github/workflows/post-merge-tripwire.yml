@@ -124,8 +124,13 @@ jobs:
     timeout-minutes: 75
     env:
       # secrets are not available in step `if:` expressions — env indirection is
-      # the sanctioned presence check for the optional App credentials.
+      # the sanctioned presence check for the optional App credentials. The key's
+      # presence is checked via a boolean expression so no key material ever
+      # lands in env; the mint step requires BOTH (codex P2, 2026-08-30 pass 1:
+      # ID-without-key would fail the mint step before the runner could escalate
+      # or fall back — a red job on a closed-PR event nobody watches).
       FLEET_APP_ID: ${{ secrets.FLEET_APP_ID }}
+      FLEET_APP_KEY_SET: ${{ secrets.FLEET_APP_PRIVATE_KEY != '' }}
     steps:
       - name: Check out ops-pipeline (tripwire scripts)
         uses: actions/checkout@v4
@@ -135,7 +140,7 @@ jobs:
 
       - name: Mint fleet App installation token
         id: mint
-        if: env.FLEET_APP_ID != ''
+        if: env.FLEET_APP_ID != '' && env.FLEET_APP_KEY_SET == 'true'
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.FLEET_APP_ID }}
@@ -152,8 +157,11 @@ jobs:
             echo "value=$MINTED" >> "$GITHUB_OUTPUT"
             echo "Using fleet App installation token (revert PRs will trigger CI)."
           else
+            if [ -n "$FLEET_APP_ID" ] && [ "$FLEET_APP_KEY_SET" != "true" ]; then
+              echo "::warning::FLEET_APP_ID is set but FLEET_APP_PRIVATE_KEY is not — App credentials must be configured as a pair. Falling back to github.token."
+            fi
             echo "value=$FALLBACK" >> "$GITHUB_OUTPUT"
-            echo "::notice::FLEET_APP_ID not provided — falling back to github.token. A revert PR created this way triggers NO workflows (close/reopen it to fire checks; Rule #303)."
+            echo "::notice::No usable fleet App credentials — falling back to github.token. A revert PR created this way triggers NO workflows (close/reopen it to fire checks; Rule #303)."
           fi
 
       - name: Check out target repo

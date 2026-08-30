@@ -113,6 +113,30 @@ describe("parseTripwireArgs", () => {
     expect(() => parseTripwireArgs(baseArgv({ "--closed-at": "not-a-date" }))).toThrow("--closed-at must be an ISO-8601 timestamp");
   });
 
+  // ── closed-at strictness (codex P1, 2026-08-30 pass 1): Date.parse alone accepts all
+  // of these, and each silently moves the attribution floor — the regex must reject them ──
+  it('rejects a bare-number closed-at ("123" parses as year 123 under Date.parse)', () => {
+    expect(() => parseTripwireArgs(baseArgv({ "--closed-at": "123" }))).toThrow("--closed-at must be an ISO-8601 timestamp");
+  });
+
+  it("rejects a date-only closed-at (no time component)", () => {
+    expect(() => parseTripwireArgs(baseArgv({ "--closed-at": "2026-08-30" }))).toThrow("--closed-at must be an ISO-8601 timestamp");
+  });
+
+  it("rejects a zoneless closed-at (no Z or offset)", () => {
+    expect(() => parseTripwireArgs(baseArgv({ "--closed-at": "2026-08-30T04:00:00" }))).toThrow("--closed-at must be an ISO-8601 timestamp");
+  });
+
+  it("accepts a fractional-seconds Z-form closed-at (Railway shape)", () => {
+    const args = parseTripwireArgs(baseArgv({ "--closed-at": "2026-08-30T04:00:00.123Z" }));
+    expect(args.closedAt).toBe("2026-08-30T04:00:00.123Z");
+  });
+
+  it("accepts a numeric-offset closed-at", () => {
+    const args = parseTripwireArgs(baseArgv({ "--closed-at": "2026-08-30T04:00:00+00:00" }));
+    expect(args.closedAt).toBe("2026-08-30T04:00:00+00:00");
+  });
+
   it("rejects a malformed project id", () => {
     expect(() => parseTripwireArgs(baseArgv({ "--project-id": "not-a-uuid" }))).toThrow("--project-id must be a UUID");
   });

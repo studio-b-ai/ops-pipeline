@@ -47,6 +47,7 @@ import { parseTripwireArgs, type TripwireArgs } from "./lib/tripwire-args.js";
 import {
   attributeDeployment,
   classifyHealthWindow,
+  detectWindowContamination,
   STEP_SECONDS,
   WINDOW_SECONDS,
 } from "./lib/tripwire-health.js";
@@ -181,10 +182,18 @@ interface ReDerivation {
  * Re-runs the gate's own qualification predicates against the MERGED artifact: diff class
  * must resolve to "code-fix" under the caller's safe-path globs + sensitive-path denylist,
  * the universal legs (author, `bugsquasher` label) must hold, and the caller's named
- * required checks must be SUCCESS on the final rollup. `ciClean: true` and
- * `reviewVerdict: "CLEAN"` are passed as constants — the pre-merge gate already enforced
- * both to reach merge, and this runner re-verifies CI independently via
- * requiredChecksSatisfied on the merged PR's final rollup rather than re-running a review.
+ * required checks must be SUCCESS on the final rollup.
+ *
+ * `ciClean: true` and `reviewVerdict: "CLEAN"` are constants — deliberately INHERITED,
+ * not re-verified (codex P2, 2026-08-30 pass 1, resolution documented here): CI is
+ * re-verified independently via requiredChecksSatisfied on the final rollup, but the
+ * review leg has no durable machine receipt worth coupling to — the pre-merge gate's
+ * receipt COMMENT would make a brittle oracle whose false refusal (format drift) silently
+ * skips the whole health window, a worse failure than the residual it closes. Stated
+ * consequence (#412): a human who hand-merges a squasher-authored PR with the label
+ * applied gets a health window watched even if the pre-merge review had FLAGged — that
+ * fail-open direction grants monitoring coverage, not merge authority, and every
+ * remediation behind it stays human-gated (#97).
  */
 function reDeriveCodeFix(args: TripwireArgs, pr: MergedPrJson, diff: SquashDiff): ReDerivation {
   const parsed = parseUnifiedDiff(diff.diffText);
@@ -351,7 +360,7 @@ async function main(): Promise<void> {
     );
     return;
   }
-  log(`re-derivation: code-fix confirmed (${diff.paths.length} files, ${diff.totalChangedLines} lines)`);
+  log(`re-derivation: code-fix confirmed — class+author+label+checks re-verified, review leg inherited from the pre-merge gate (${diff.paths.length} files, ${diff.totalChangedLines} lines)`);
 
   // ── attribution: bind exactly one deployment by squash sha + createdAt after close ──
   const attributionDeadline = Date.now() + ATTRIBUTION_TIMEOUT_MS;
@@ -440,6 +449,35 @@ async function main(): Promise<void> {
 
   const startIso = new Date(successAtEpochSec * 1000).toISOString();
   const endIso = new Date((successAtEpochSec + WINDOW_SECONDS) * 1000).toISOString();
+
+  // ── window purity: Railway metrics are SERVICE-scoped, so the verdict is only
+  // attributable to the bound deployment if it stayed the serving deployment for the
+  // whole window (codex P1, 2026-08-30 pass 1). A contaminated window gets NO verdict —
+  // 5xx in it belongs to an unknown mix of deploys, and reverting OUR PR over another
+  // deploy's errors is the #295 false-revert generator.
+  const purity = await fetchDeploymentsWithMeta(railwayToken, args.projectId, args.environmentId, args.serviceId);
+  if (!purity.ok) {
+    log(`purity refetch failed: ${purity.error}`);
+    escalate(
+      args.repo,
+      `tripwire blind: cannot verify window purity for PR #${args.pr}`,
+      `${header}\n\nThe post-window deployments refetch failed, so the tripwire cannot verify that deployment \`${bound.id}\` was still the serving deployment for the whole window — the purity check is part of the instrument, and a blind instrument never passes (Rules #322/#456). NO verdict was rendered (no revert either).\n\n\`\`\`\n${purity.error}\n\`\`\`\n\n- Window: ${startIso} → ${endIso}\n- Manual check of the service's deploy timeline + 5xx rate for that window is needed.`,
+    );
+    commentOnPr(args.repo, args.pr, `${header}\n\n⚠️ Could not verify window purity (deployments refetch failed) — escalated as an issue; NO verdict was rendered.`);
+    return;
+  }
+  const contamination = detectWindowContamination(purity.deployments, bound);
+  if (contamination.contaminated) {
+    log(`window contaminated: ${contamination.reason}`);
+    escalate(
+      args.repo,
+      `tripwire: health window contaminated for PR #${args.pr}`,
+      `${header}\n\nThe health window was CONTAMINATED by deploy activity after the bound deployment — service-level 5xx metrics for it cannot be attributed to this PR, so the tripwire rendered NO verdict (never pass, never trip; Rule #295 — a revert here could punish this PR for another deploy's errors).\n\n- ${contamination.reason}\n- Window: ${startIso} → ${endIso}\n- Manual check: the service's deploy timeline + 5xx rate for that window.`,
+    );
+    commentOnPr(args.repo, args.pr, `${header}\n\n⚠️ **Health window contaminated** by subsequent deploy activity — NO verdict was rendered (escalated as an issue): ${contamination.reason}`);
+    return;
+  }
+
   const metrics = await fetchHttpMetricsGroupedByStatus(
     railwayToken,
     args.environmentId,

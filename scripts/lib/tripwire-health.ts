@@ -77,6 +77,61 @@ export function attributeDeployment(
   return qualifying.reduce((earliest, d) => (Date.parse(d.createdAt) < Date.parse(earliest.createdAt) ? d : earliest));
 }
 
+// ───────────────────────────── window contamination (codex P1, 2026-08-30 pass 1) ─────────────────────────────
+
+export type ContaminationResult = { contaminated: false } | { contaminated: true; reason: string };
+
+/**
+ * Railway HTTP metrics are SERVICE-scoped — there is no per-deployment read — so the
+ * health window is only attributable to the bound deployment if that deployment was the
+ * one serving traffic for the whole window. This checks a POST-window deployments refetch
+ * for anything that breaks that assumption:
+ *
+ * - the bound deployment missing from the refetched page, or no longer SUCCESS (it was
+ *   displaced/removed mid-window);
+ * - any OTHER deployment created after the bound one that reached SUCCESS or REMOVED
+ *   (either way it took traffic at some point — REMOVED means it served and was itself
+ *   replaced);
+ * - a newer deployment whose createdAt cannot be parsed (fail-closed, same posture as
+ *   attribution).
+ *
+ * A newer FAILED/CRASHED/SKIPPED deployment never swapped traffic and a still-building
+ * one hasn't yet — both leave the window clean. Contamination = escalate WITHOUT a
+ * verdict (never pass, never trip): 5xx in a contaminated window belongs to an unknown
+ * mix of deploys, and a revert of OUR PR over another deploy's errors is exactly the
+ * false-revert generator Rule #295 forbids.
+ */
+export function detectWindowContamination(
+  deployments: DeploymentWithMeta[],
+  bound: { id: string; createdAt: string },
+): ContaminationResult {
+  const boundNow = deployments.find((d) => d.id === bound.id);
+  if (boundNow === undefined) {
+    return { contaminated: true, reason: `bound deployment ${bound.id} absent from the post-window deployments page — cannot verify it stayed serving` };
+  }
+  if (boundNow.status !== "SUCCESS") {
+    return { contaminated: true, reason: `bound deployment ${bound.id} is now ${boundNow.status} — it was displaced during the window` };
+  }
+  const boundCreatedMs = Date.parse(bound.createdAt);
+  if (Number.isNaN(boundCreatedMs)) {
+    // attributeDeployment never binds on an unparseable createdAt, but this helper is
+    // exported — fail closed rather than let NaN comparisons misclassify below.
+    return { contaminated: true, reason: `bound deployment ${bound.id} has an unparseable createdAt (${bound.createdAt})` };
+  }
+  for (const d of deployments) {
+    if (d.id === bound.id) continue;
+    const createdMs = Date.parse(d.createdAt);
+    if (Number.isNaN(createdMs)) {
+      return { contaminated: true, reason: `deployment ${d.id} has an unparseable createdAt (${d.createdAt}) — cannot rule it out of the window` };
+    }
+    if (createdMs <= boundCreatedMs) continue;
+    if (d.status === "SUCCESS" || d.status === "REMOVED") {
+      return { contaminated: true, reason: `deployment ${d.id} (created ${d.createdAt}, now ${d.status}) went live after the bound deployment — the window's service-level metrics mix two deploys` };
+    }
+  }
+  return { contaminated: false };
+}
+
 // ───────────────────────────── health-window classification ─────────────────────────────
 
 export interface HealthWindowInput {
