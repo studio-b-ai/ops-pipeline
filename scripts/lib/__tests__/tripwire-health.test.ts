@@ -424,4 +424,20 @@ describe("detectWindowContamination", () => {
     expect(result.contaminated).toBe(true);
     if (result.contaminated) expect(result.reason).toContain("unparseable");
   });
+
+  // ── equal-createdAt tie (codex P1, 2026-08-30 pass 2): a sibling sharing the bound's
+  // exact timestamp is not provably older, and service-scoped metrics carry no
+  // tie-breaker — SUCCESS/REMOVED at the tie must contaminate, never read as clean ──
+  it("flags an equal-createdAt SUCCESS sibling (no tie-breaker proves the bound served the window)", () => {
+    const tieLive = dep({ id: "dep-tie", createdAt: bound.createdAt });
+    const result = detectWindowContamination([boundDep, tieLive], bound);
+    expect(result.contaminated).toBe(true);
+    if (result.contaminated) expect(result.reason).toContain("dep-tie");
+  });
+
+  it("is clean when an equal-createdAt sibling FAILED (never took traffic, tie or not)", () => {
+    // pg-enum-drift-exempt: Railway DeploymentStatus enum value, not a Postgres enum
+    const tieFailed = dep({ id: "dep-tie", status: "FAILED", createdAt: bound.createdAt });
+    expect(detectWindowContamination([boundDep, tieFailed], bound)).toEqual({ contaminated: false });
+  });
 });

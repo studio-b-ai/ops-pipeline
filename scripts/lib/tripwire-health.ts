@@ -124,7 +124,11 @@ export function detectWindowContamination(
     if (Number.isNaN(createdMs)) {
       return { contaminated: true, reason: `deployment ${d.id} has an unparseable createdAt (${d.createdAt}) — cannot rule it out of the window` };
     }
-    if (createdMs <= boundCreatedMs) continue;
+    // Strictly-older only (codex P1, 2026-08-30 pass 2): a deployment sharing the
+    // bound's exact createdAt is not provably older, and service-scoped metrics give
+    // no tie-breaker — an equal-timestamp SUCCESS/REMOVED sibling falls through to
+    // the check below and reads as contamination, never as clean.
+    if (createdMs < boundCreatedMs) continue;
     if (d.status === "SUCCESS" || d.status === "REMOVED") {
       return { contaminated: true, reason: `deployment ${d.id} (created ${d.createdAt}, now ${d.status}) went live after the bound deployment — the window's service-level metrics mix two deploys` };
     }
