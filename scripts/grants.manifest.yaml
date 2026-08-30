@@ -40,7 +40,6 @@ teams:
     repos:
       acumatica-mcp: write
       infra-config: write
-      claude-code-config: write
       client-asthetik: write
       hubspot-mcp: write
       studiob-templates: write
@@ -50,7 +49,6 @@ teams:
     repos:
       acumatica-mcp: admin
       infra-config: admin
-      claude-code-config: admin
       client-asthetik: admin
       hubspot-mcp: admin
       studiob-templates: admin
