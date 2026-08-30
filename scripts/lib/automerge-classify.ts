@@ -328,16 +328,22 @@ const CLEAN_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL"]);
 // evaluated after it, so every existing docs-comment decision is byte-identical to
 // before.
 
-export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only";
+export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only" | "code-fix";
 
 // The single canonical enumeration of valid classes — both the runner's CLI parsing
 // (--enabled-classes validation) and gateDecisionForClass's own runtime guard import
 // this SAME array, so the two can never drift out of sync with each other.
-export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only"];
+export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only", "code-fix"];
 
 const DOCS_COMMENT_LINE_CAP = MAX_CHANGED_LINES; // 10, unchanged
 const CI_INFRA_LINE_CAP = 40;
 const TEST_ONLY_LINE_CAP = 40;
+// ops#190 B1 (doc §4.1): the code-fix class's line cap. Deliberately an ORDER OF
+// MAGNITUDE looser than the other classes because the class is guarded by three
+// legs the others don't have: an allowlist-primary safe_path_globs requirement, a
+// built-in non-overridable denylist backstop, and a per-repo named-checks
+// requirement (`requiredChecksSatisfied`) — plus the same paid independent review.
+const CODE_FIX_LINE_CAP = 150;
 
 // Allowlist, not a denylist — same rationale as CLEAN_LEGACY_STATES/CLEAN_CONCLUSIONS
 // above: only these path shapes count as CI infrastructure, so an unrecognized
@@ -414,6 +420,88 @@ function isMigrationPath(path: string): boolean {
   return /migrat/i.test(path);
 }
 
+// ───────────────────────────── code-fix class machinery (ops#190 B1, doc §4.1) ─────────────────────────────
+
+// Repo-class partition (doc §2 move 2 + §4.1): in a TRAIN-class repo the squasher
+// NEVER merges a code-fix — even one that passes every leg — because these repos'
+// merges ride the human-authorized `train:ready` label authority (studiob deploys
+// restart-adjacent shared machinery; client-asthetik publishes restart the Heritage
+// app pool, Rule #11). A fully-qualifying code-fix there gets `train:candidate`
+// applied + a candidate comment, and a HUMAN decides `train:ready`. Everything not
+// listed here is "standard" (the squasher may merge when the class is enabled).
+export type RepoMergeClass = "train" | "standard";
+
+const TRAIN_CLASS_REPOS = new Set(["studio-b-ai/studiob", "studio-b-ai/client-asthetik"]);
+
+export function repoClassFor(repo: string): RepoMergeClass {
+  return TRAIN_CLASS_REPOS.has(repo) ? "train" : "standard";
+}
+
+/**
+ * Built-in code-fix denylist — the NON-OVERRIDABLE backstop under the caller's
+ * allowlist (doc §4.1: "denylist beats allowlist on overlap"). A caller's
+ * `safe_path_globs` can only ever NARROW what qualifies; nothing a caller passes can
+ * put these shapes back in scope. Entries are deliberately BROAD substring/prefix
+ * matches (same rationale as `isMigrationPath`): over-matching only ever costs "this
+ * PR waits for a human", while under-matching auto-merges into a migration runner,
+ * an auth gate, or a pricing write path. `Customization/**` and pricing paths are
+ * PERMANENTLY outside the autonomous class per the doc's §7 (never enabled, not
+ * config).
+ */
+const CODE_FIX_BUILTIN_DENYLIST: { label: string; test: (path: string) => boolean }[] = [
+  { label: "migration", test: isMigrationPath },
+  { label: "sql", test: (p) => /\.sql$/i.test(p) },
+  { label: "auth/middleware", test: (p) => /auth|middleware/i.test(p) },
+  { label: "pricing-write", test: (p) => /pricing|price/i.test(p) },
+  { label: "Customization/**", test: (p) => /^Customization\//.test(p) },
+  { label: ".github/actions/**", test: (p) => /^\.github\/actions\//.test(p) },
+  { label: ".github/workflows/**", test: (p) => /^\.github\/workflows\//.test(p) },
+  // Beyond the doc's named minimum, same fail-closed direction: a dependency change
+  // is its own class of risk (Rule #289 — bumps need lockfile+manifest reasoning)
+  // and no "small code fix" needs to ride one.
+  { label: "package manifest/lockfile", test: isPackageManifestOrLockfile },
+];
+
+function codeFixDenylistHits(path: string): string[] {
+  return CODE_FIX_BUILTIN_DENYLIST.filter((d) => d.test(path)).map((d) => d.label);
+}
+
+/**
+ * Compiles ONE caller-supplied safe-path glob to an anchored RegExp. Supported
+ * syntax (the whole contract — anything else is matched literally): `**` matches any
+ * characters INCLUDING `/`; `*` matches any characters EXCEPT `/`; `?` matches one
+ * character except `/`. Returns null for an empty/whitespace-only source — a null
+ * glob matches NOTHING (fail-closed: a caller typo like a trailing comma must not
+ * become an accidental match-everything or match-anything entry). No glob library is
+ * added for this (scripts/ has zero runtime deps beyond the SDK/pg/yaml) — the
+ * grammar is deliberately tiny and fully unit-tested instead.
+ */
+export function compileSafePathGlob(glob: string): RegExp | null {
+  const src = glob.trim();
+  if (src === "") return null;
+  let out = "";
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === "*") {
+      if (src[i + 1] === "*") {
+        out += ".*";
+        i++;
+      } else {
+        out += "[^/]*";
+      }
+    } else if (ch === "?") {
+      out += "[^/]";
+    } else {
+      out += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  try {
+    return new RegExp(`^${out}$`);
+  } catch {
+    return null; // unreachable with the escapes above, but never throw out of a guard
+  }
+}
+
 interface CandidateEval {
   prClass: PrDiffClass;
   /** Every file/dependency/migration shape requirement EXCEPT the line cap. */
@@ -472,6 +560,51 @@ function evalTestOnly(files: GateFile[], totalChangedLines: number): CandidateEv
   return { prClass: "test-only", shapeOk, lineCapOk: totalChangedLines <= TEST_ONLY_LINE_CAP, cap: TEST_ONLY_LINE_CAP, shapeReasons };
 }
 
+/**
+ * ops#190 B1 (doc §4.1): the code-fix candidate — allowlist-PRIMARY. Legs, all
+ * required:
+ * - a non-empty compiled `safePathGlobs` set (empty/absent ⇒ the class is INERT
+ *   even when enabled — the caller has not declared what "safe" means for this
+ *   repo, so nothing qualifies);
+ * - EVERY changed file matches ≥1 safe-path glob;
+ * - ZERO files hit the built-in denylist backstop (denylist beats allowlist on
+ *   overlap — checked against every file, including allowlisted ones);
+ * - ≤150 changed lines.
+ *
+ * This candidate is evaluated LAST in classifyPrDiffClass's priority order, so
+ * every existing docs-comment/ci-infra/test-only resolution stays byte-identical —
+ * code-fix only ever picks up diffs the narrower, longer-proven classes refused.
+ * The named-checks leg (`requiredChecksSatisfied`) is deliberately NOT here: it
+ * needs the live statusCheckRollup, which classification doesn't see — the runner
+ * evaluates it as its own gate leg after class resolution.
+ */
+function evalCodeFix(files: GateFile[], totalChangedLines: number, safePathGlobs: string[] | undefined): CandidateEval {
+  const shapeReasons: string[] = [];
+
+  const compiled = (safePathGlobs ?? []).map(compileSafePathGlob).filter((re): re is RegExp => re !== null);
+  if (compiled.length === 0) {
+    shapeReasons.push("code-fix: no safe_path_globs declared — class inert (allowlist-primary, fail-closed)");
+  }
+
+  const outsideGlobs =
+    compiled.length === 0 ? [] : files.filter((f) => !compiled.some((re) => re.test(f.path)));
+  if (outsideGlobs.length > 0) {
+    shapeReasons.push(`code-fix: file(s) outside safe_path_globs: ${outsideGlobs.map((f) => f.path).join(", ")}`);
+  }
+
+  const denyHits = files
+    .map((f) => ({ path: f.path, hits: codeFixDenylistHits(f.path) }))
+    .filter((f) => f.hits.length > 0);
+  if (denyHits.length > 0) {
+    shapeReasons.push(
+      `code-fix: built-in denylist hit(s): ${denyHits.map((f) => `${f.path} (${f.hits.join(", ")})`).join(", ")}`,
+    );
+  }
+
+  const shapeOk = shapeReasons.length === 0;
+  return { prClass: "code-fix", shapeOk, lineCapOk: totalChangedLines <= CODE_FIX_LINE_CAP, cap: CODE_FIX_LINE_CAP, shapeReasons };
+}
+
 export interface ClassifyPrDiffClassInput {
   /** Every changed file's path AND its existing doc|comment-only|code file class
    *  (from classifyDiffFile/reconcileFileClasses) — reused as-is for the unchanged
@@ -490,6 +623,12 @@ export interface ClassifyPrDiffClassInput {
    *  (byte-identical to before this field existed).
    */
   sensitivePathPatterns?: string[];
+  /** ops#190 B1: caller-declared safe-path globs for the code-fix class (see
+   *  `compileSafePathGlob` for the tiny supported grammar). Allowlist-PRIMARY:
+   *  omitted/empty ⇒ the code-fix candidate is INERT (it can never resolve), which
+   *  also keeps every pre-B1 caller's classification byte-identical. Only the
+   *  code-fix candidate reads this — the other three classes ignore it. */
+  safePathGlobs?: string[];
 }
 
 export interface ClassifyPrDiffClassResult {
@@ -524,7 +663,7 @@ export interface ClassifyPrDiffClassResult {
  * longest-proven class gets first refusal.
  */
 export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPrDiffClassResult {
-  const { files, totalChangedLines, sensitivePathPatterns } = input;
+  const { files, totalChangedLines, sensitivePathPatterns, safePathGlobs } = input;
 
   if (files.length === 0) {
     return { prClass: null, failureLeg: "class-match", reasons: ["no changed files"] };
@@ -560,6 +699,9 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
     evalDocsComment(files, totalChangedLines),
     evalCiInfra(files, totalChangedLines),
     evalTestOnly(files, totalChangedLines),
+    // LAST on purpose (B1): the widest class only ever picks up what the narrower,
+    // longer-proven classes refused — existing resolutions stay byte-identical.
+    evalCodeFix(files, totalChangedLines, safePathGlobs),
   ];
 
   const fullMatch = candidates.find((c) => c.shapeOk && c.lineCapOk);
@@ -741,6 +883,64 @@ export function isRollupClean(
   }
 
   return true;
+}
+
+/**
+ * ops#190 B1 (doc §4.1 move 4): the code-fix class's NAMED-CHECKS leg — on top of
+ * the ordinary isRollupClean leg, the caller names the specific checks that must
+ * each have run to conclusion SUCCESS on the head commit. This is what stops a
+ * repo whose CI is merely "not failing" (nothing ran, everything skipped) from
+ * reading as green for an actual code change: `SKIPPED ≠ green` here even when the
+ * name is on the sanctioned skip allowlist, and NEUTRAL is not SUCCESS either —
+ * strictly stricter than isItemClean, on purpose.
+ *
+ * Fail-closed construction mirrors the class's allowlist-primary design: an
+ * EMPTY/absent requiredNames list does NOT vacuously pass — it fails with an
+ * "inert" reason, exactly like empty safe_path_globs makes classification inert.
+ * A caller must declare what "the build proved it" means for its repo before the
+ * squasher may merge executable code there.
+ *
+ * Supersession semantics are the same as isRollupClean's (grouped by name, any
+ * in-flight entry blocks, latest terminal wins, ties must ALL be SUCCESS).
+ */
+export function requiredChecksSatisfied(
+  rollup: RollupItem[],
+  requiredNames: string[],
+): { ok: boolean; reasons: string[] } {
+  const names = requiredNames.map((n) => n.trim()).filter((n) => n.length > 0);
+  if (names.length === 0) {
+    return {
+      ok: false,
+      reasons: ["code-fix: no required_checks declared — named-checks leg inert (fail-closed)"],
+    };
+  }
+
+  const reasons: string[] = [];
+  for (const name of names) {
+    const entries = rollup.filter((item) => (item.name ?? item.context) === name);
+    if (entries.length === 0) {
+      reasons.push(`required check '${name}' never reported on this commit`);
+      continue;
+    }
+    if (entries.some((item) => !isTerminal(item))) {
+      reasons.push(`required check '${name}' still in flight`);
+      continue;
+    }
+    const newest = Math.max(...entries.map(rollupTime));
+    const winners = entries.filter((item) => rollupTime(item) === newest);
+    const isStrictSuccess = (item: RollupItem): boolean => {
+      if (item.state !== undefined) return item.state === "SUCCESS";
+      if (item.status !== undefined) return item.status === "COMPLETED" && item.conclusion === "SUCCESS";
+      return false;
+    };
+    const bad = winners.filter((item) => !isStrictSuccess(item));
+    if (bad.length > 0) {
+      const describe = (item: RollupItem) => item.state ?? item.conclusion ?? item.status ?? "unrecognized";
+      reasons.push(`required check '${name}' latest result is not SUCCESS (${bad.map(describe).join(", ")})`);
+    }
+  }
+
+  return { ok: reasons.length === 0, reasons };
 }
 
 export interface MergeReadinessInput {

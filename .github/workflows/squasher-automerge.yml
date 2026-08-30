@@ -21,6 +21,14 @@ name: Squasher auto-merge gate (reusable)
 # callers whose branch-protection gates aren't independently verifiable from
 # `statusCheckRollup` — any matching path is excluded from classification entirely.
 #
+# ops#190 B1 (2026-08-29) adds the `code-fix` class + two inputs that exist ONLY for
+# it: `safe_path_globs` (allowlist-primary — every changed file must match one; the
+# EMPTY default makes the class INERT even when enabled, fail-closed) and
+# `required_checks` (named checks that must be strictly SUCCESS on the head commit;
+# EMPTY default = the named-checks leg fails closed). Both default "" so B1 merging
+# changes NOTHING for any existing caller — enabling code-fix is a deliberate
+# three-input per-repo opt-in (B3 ladder), never a side effect of this file.
+#
 # Pinning note: this workflow checks out studio-b-ai/ops-pipeline at `main` (NOT the
 # repo's `@v1` tag convention used by sync.yml/drift-check.yml) — this is a brand-new,
 # single-repo Rule #169 canary, not yet part of the vetted `@v1` fleet. Graduating it
@@ -52,7 +60,7 @@ on:
         required: true
         type: string
       enabled_classes:
-        description: "Comma-separated diff classes this caller opts into (docs-comment,ci-infra,test-only). Default: docs-comment only — the original #279 gate's scope, unchanged for callers that don't set this."
+        description: "Comma-separated diff classes this caller opts into (docs-comment,ci-infra,test-only,code-fix). Default: docs-comment only — the original #279 gate's scope, unchanged for callers that don't set this. code-fix additionally requires safe_path_globs + required_checks below (empty ⇒ the class is inert, fail-closed)."
         required: false
         type: string
         default: "docs-comment"
@@ -61,8 +69,18 @@ on:
         required: false
         type: string
         default: ""
+      safe_path_globs:
+        description: "ops#190 B1, code-fix class ONLY: comma-separated path globs (tiny grammar — ** any depth, * within a segment, ? one char) forming the caller's ALLOWLIST. Every changed file must match at least one glob or the PR is not code-fix. Default empty = the code-fix class is INERT even when enabled (allowlist-primary, fail-closed). The built-in denylist (migrations, SQL, auth/middleware, pricing, Customization/**, .github/**, package manifests) beats this allowlist and is not configurable."
+        required: false
+        type: string
+        default: ""
+      required_checks:
+        description: "ops#190 B1, code-fix class ONLY: comma-separated check names that must each be strictly SUCCESS on the head commit (SKIPPED/NEUTRAL/PENDING all fail — stricter than the ci-rollup leg's allowlist). Default empty = the named-checks leg fails closed, so code-fix can never merge."
+        required: false
+        type: string
+        default: ""
       train_ready:
-        description: "ops#190 rung A2: when true, evaluate the A-side `train:ready` label-authority gate (evaluateTrainReady — human-labeled PRs, GraphQL-attributed authority) instead of the B-side squasher diff-classification gate. The squasher inputs above (enabled_classes / sensitive_path_patterns) are IGNORED in this mode — the run step passes only --train-ready. Default false: every existing caller keeps exactly its current squasher behavior."
+        description: "ops#190 rung A2: when true, evaluate the A-side `train:ready` label-authority gate (evaluateTrainReady — human-labeled PRs, GraphQL-attributed authority) instead of the B-side squasher diff-classification gate. The squasher inputs above (enabled_classes / sensitive_path_patterns / safe_path_globs / required_checks) are IGNORED in this mode — the run step passes only --train-ready. Default false: every existing caller keeps exactly its current squasher behavior."
         required: false
         type: boolean
         default: false
@@ -102,6 +120,8 @@ jobs:
           GATE_PR_NUMBER: ${{ inputs.pr_number }}
           GATE_ENABLED_CLASSES: ${{ inputs.enabled_classes }}
           GATE_SENSITIVE_PATH_PATTERNS: ${{ inputs.sensitive_path_patterns }}
+          GATE_SAFE_PATH_GLOBS: ${{ inputs.safe_path_globs }}
+          GATE_REQUIRED_CHECKS: ${{ inputs.required_checks }}
           GATE_TRAIN_READY: ${{ inputs.train_ready }}
         run: |
           set -euo pipefail
@@ -131,6 +151,24 @@ jobs:
                 # independent of the script.
                 trimmed="$(echo -n "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
                 [ -n "$trimmed" ] && args+=(--sensitive-path "$trimmed")
+              done
+            fi
+            # ops#190 B1: same comma-split + trim plumbing as sensitive_path_patterns
+            # above (same whitespace hazard, same defense-in-depth — parseArgs trims
+            # too). Both inputs default "" so these loops are no-ops for every caller
+            # that hasn't opted into the code-fix class.
+            if [ -n "$GATE_SAFE_PATH_GLOBS" ]; then
+              IFS=',' read -ra globs <<< "$GATE_SAFE_PATH_GLOBS"
+              for g in "${globs[@]}"; do
+                trimmed="$(echo -n "$g" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                [ -n "$trimmed" ] && args+=(--safe-path-glob "$trimmed")
+              done
+            fi
+            if [ -n "$GATE_REQUIRED_CHECKS" ]; then
+              IFS=',' read -ra checks <<< "$GATE_REQUIRED_CHECKS"
+              for c in "${checks[@]}"; do
+                trimmed="$(echo -n "$c" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                [ -n "$trimmed" ] && args+=(--required-check "$trimmed")
               done
             fi
           fi

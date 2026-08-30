@@ -2,15 +2,19 @@ import { describe, expect, it } from "vitest";
 import {
   classifyDiffFile,
   classifyPrDiffClass,
+  compileSafePathGlob,
   evaluateMergeReadiness,
   gateDecision,
   gateDecisionForClass,
   isRollupClean,
   reconcileFileClasses,
+  repoClassFor,
+  requiredChecksSatisfied,
   type GateFile,
   type GateInput,
   type GateInputV2,
   type ParsedDiffFile,
+  type RollupItem,
 } from "../automerge-classify.js";
 
 // A baseline "all legs pass" input, so each negative-control test flips exactly one
@@ -809,5 +813,306 @@ describe("evaluateMergeReadiness (ci-rollup leg — Rule #471 both-directions co
 
   it("declines a non-CLEAN mergeStateStatus (BLOCKED)", () => {
     expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "BLOCKED" }).ready).toBe(false);
+  });
+});
+
+describe("compileSafePathGlob (ops#190 B1 — the tiny allowlist grammar)", () => {
+  // ───── Negative controls first (Rule #322) ─────
+
+  it("returns null for an empty source (a null glob matches NOTHING — never everything)", () => {
+    expect(compileSafePathGlob("")).toBeNull();
+  });
+
+  it("returns null for a whitespace-only source (trailing-comma caller typo)", () => {
+    expect(compileSafePathGlob("   ")).toBeNull();
+  });
+
+  it("anchors both ends — 'src/*.ts' matches neither a prefixed nor a suffixed path", () => {
+    const re = compileSafePathGlob("src/*.ts")!;
+    expect(re.test("notsrc/a.ts")).toBe(false);
+    expect(re.test("src/a.ts.bak")).toBe(false);
+  });
+
+  it("'*' does NOT cross a path separator", () => {
+    const re = compileSafePathGlob("src/*.ts")!;
+    expect(re.test("src/a.ts")).toBe(true);
+    expect(re.test("src/a/b.ts")).toBe(false);
+  });
+
+  it("escapes regex specials — '.' is literal, so 'src/*.ts' rejects 'src/axts'", () => {
+    expect(compileSafePathGlob("src/*.ts")!.test("src/axts")).toBe(false);
+  });
+
+  it("'?' matches exactly one non-separator character", () => {
+    const re = compileSafePathGlob("v?.txt")!;
+    expect(re.test("v1.txt")).toBe(true);
+    expect(re.test("v12.txt")).toBe(false);
+    expect(re.test("v/.txt")).toBe(false);
+  });
+
+  // ───── Known-good direction ─────
+
+  it("'**' crosses separators to any depth", () => {
+    const re = compileSafePathGlob("src/**")!;
+    expect(re.test("src/a.ts")).toBe(true);
+    expect(re.test("src/a/b/c.ts")).toBe(true);
+    expect(re.test("scripts/a.ts")).toBe(false);
+  });
+
+  it("compiles a literal path with regex specials without throwing", () => {
+    const re = compileSafePathGlob("src/(v1)/[x]/file+name.ts")!;
+    expect(re.test("src/(v1)/[x]/file+name.ts")).toBe(true);
+  });
+});
+
+describe("repoClassFor (ops#190 B1 — the train-repo partition)", () => {
+  it("classifies studiob as train (deploys restart shared machinery — squasher never merges there)", () => {
+    expect(repoClassFor("studio-b-ai/studiob")).toBe("train");
+  });
+
+  it("classifies client-asthetik as train (publishes restart the Heritage app pool, Rule #11)", () => {
+    expect(repoClassFor("studio-b-ai/client-asthetik")).toBe("train");
+  });
+
+  it("classifies a non-train repo as standard", () => {
+    expect(repoClassFor("studio-b-ai/bolt-wms")).toBe("standard");
+  });
+});
+
+describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
+  function files(paths: string[], fileClass: GateFile["fileClass"] = "code"): GateFile[] {
+    return paths.map((path) => ({ path, fileClass }));
+  }
+
+  // A qualifying baseline: one runtime code file inside the caller's allowlist,
+  // small diff. Each negative control below flips exactly one leg (Rule #322).
+  const GOOD = {
+    files: files(["src/lib/order-notes.ts"]),
+    totalChangedLines: 3,
+    safePathGlobs: ["src/**"],
+  };
+
+  // ───── Negative controls first (Rule #322) ─────
+
+  it("is INERT with no safe_path_globs — a code file resolves null even at 3 lines (§5 plant: empty globs)", () => {
+    const result = classifyPrDiffClass({ files: GOOD.files, totalChangedLines: 3 });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("class-match");
+    expect(result.reasons.some((r) => r.includes("class inert"))).toBe(true);
+  });
+
+  it("is INERT when every supplied glob is empty/whitespace (compiles to zero globs)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, safePathGlobs: ["", "   "] });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("class inert"))).toBe(true);
+  });
+
+  it("rejects a file OUTSIDE the safe_path_globs allowlist (§5 plant: outside-globs)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, files: files(["scripts/deploy.ts"]) });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("class-match");
+    expect(result.reasons.some((r) => r.includes("outside safe_path_globs") && r.includes("scripts/deploy.ts"))).toBe(true);
+  });
+
+  it("denylist beats allowlist — a migration path inside '**' still refuses (§5 plant: denylist)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, safePathGlobs: ["**"], files: files(["src/migrations/0042_add_col.ts"]) });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("denylist") && r.includes("migration"))).toBe(true);
+  });
+
+  it("denylist: .sql files", () => {
+    const result = classifyPrDiffClass({ ...GOOD, safePathGlobs: ["**"], files: files(["src/queries/report.sql"]) });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("denylist") && r.includes("sql"))).toBe(true);
+  });
+
+  it("denylist: auth/middleware paths", () => {
+    const result = classifyPrDiffClass({ ...GOOD, safePathGlobs: ["**"], files: files(["src/entra-middleware.ts"]) });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("auth/middleware"))).toBe(true);
+  });
+
+  it("denylist: pricing paths (permanently outside the autonomous class)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, safePathGlobs: ["**"], files: files(["src/lib/pricing-engine.ts"]) });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("pricing-write"))).toBe(true);
+  });
+
+  it("denylist: Customization/** (permanently outside the autonomous class)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, safePathGlobs: ["**"], files: files(["Customization/BoltWMS/project.xml"]) });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("Customization/**"))).toBe(true);
+  });
+
+  it("denylist: executable code under .github/actions/** (not ci-infra shape, and code-fix refuses it too)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, safePathGlobs: ["**"], files: files([".github/actions/setup/index.js"]) });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes(".github/actions/**"))).toBe(true);
+  });
+
+  it("denylist: .github/workflows/** stays refused by code-fix even in a mixed diff where ci-infra's shape already failed", () => {
+    const result = classifyPrDiffClass({
+      ...GOOD,
+      safePathGlobs: ["**"],
+      files: files([".github/workflows/deploy.yml", "src/lib/order-notes.ts"]),
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes(".github/workflows/**"))).toBe(true);
+  });
+
+  it("denylist: package manifests/lockfiles (dependency changes are Rule #289's class, never a 'small code fix')", () => {
+    const result = classifyPrDiffClass({ ...GOOD, safePathGlobs: ["**"], files: files(["package.json"]) });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("package manifest/lockfile"))).toBe(true);
+  });
+
+  it("refuses at 151 lines (§5 plant: the cap) with failureLeg line-cap", () => {
+    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 151 });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("line-cap");
+    expect(result.reasons.some((r) => r.includes("code-fix") && r.includes("151 > 150"))).toBe(true);
+  });
+
+  it("sensitivePathPatterns still beat the code-fix class entirely", () => {
+    const result = classifyPrDiffClass({ ...GOOD, sensitivePathPatterns: ["^src/lib/"] });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("sensitive path"))).toBe(true);
+  });
+
+  // ───── Known-good direction (the §5 GOOD plant's classification half, Rule #471) ─────
+
+  it("known-GOOD: a small runtime fix inside the globs resolves code-fix", () => {
+    const result = classifyPrDiffClass(GOOD);
+    expect(result.prClass).toBe("code-fix");
+    expect(result.failureLeg).toBeNull();
+  });
+
+  it("resolves code-fix at exactly 150 lines (boundary)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 150 });
+    expect(result.prClass).toBe("code-fix");
+  });
+
+  // ───── Precedence: code-fix resolves LAST, existing classes stay byte-identical ─────
+
+  it("docs-comment still wins over code-fix for a comment-only diff even with '**' globs", () => {
+    const result = classifyPrDiffClass({
+      files: files(["src/lib/order-notes.ts"], "comment-only"),
+      totalChangedLines: 2,
+      safePathGlobs: ["**"],
+    });
+    expect(result.prClass).toBe("docs-comment");
+  });
+
+  it("ci-infra still wins over code-fix for a workflow-yaml diff even with '**' globs", () => {
+    const result = classifyPrDiffClass({
+      files: files([".github/workflows/ci.yml"]),
+      totalChangedLines: 20,
+      safePathGlobs: ["**"],
+    });
+    expect(result.prClass).toBe("ci-infra");
+  });
+
+  it("test-only still wins over code-fix for a test-file diff even with '**' globs", () => {
+    const result = classifyPrDiffClass({
+      files: files(["scripts/lib/__tests__/foo.test.ts"]),
+      totalChangedLines: 20,
+      safePathGlobs: ["**"],
+    });
+    expect(result.prClass).toBe("test-only");
+  });
+
+  it("picks up what a narrower class refused: a 12-line comment-only diff (docs cap is 10) resolves code-fix when globbed", () => {
+    const result = classifyPrDiffClass({
+      files: files(["src/lib/order-notes.ts"], "comment-only"),
+      totalChangedLines: 12,
+      safePathGlobs: ["src/**"],
+    });
+    expect(result.prClass).toBe("code-fix");
+  });
+});
+
+describe("requiredChecksSatisfied (ops#190 B1 — the named-checks leg)", () => {
+  const T0 = "2026-08-29T10:00:00Z";
+  const T1 = "2026-08-29T10:05:00Z";
+  // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+  const pass = (name: string, completedAt = T1): RollupItem => ({ name, status: "COMPLETED", conclusion: "SUCCESS", completedAt });
+
+  // ───── Negative controls first (Rule #322) ─────
+
+  it("fails closed on an EMPTY required list — no vacuous pass (§5: the leg is inert until declared)", () => {
+    const r = requiredChecksSatisfied([pass("build")], []);
+    expect(r.ok).toBe(false);
+    expect(r.reasons.some((s) => s.includes("no required_checks declared"))).toBe(true);
+  });
+
+  it("fails closed when every supplied name is whitespace", () => {
+    expect(requiredChecksSatisfied([pass("build")], ["  ", ""]).ok).toBe(false);
+  });
+
+  it("fails when a named check never reported on the commit", () => {
+    const r = requiredChecksSatisfied([pass("build")], ["build", "tests"]);
+    expect(r.ok).toBe(false);
+    expect(r.reasons.some((s) => s.includes("'tests'") && s.includes("never reported"))).toBe(true);
+  });
+
+  it("fails while a named check is still in flight — even when an older run of it succeeded", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    const rollup: RollupItem[] = [pass("build", T0), { name: "build", status: "IN_PROGRESS", startedAt: T1 }];
+    const r = requiredChecksSatisfied(rollup, ["build"]);
+    expect(r.ok).toBe(false);
+    expect(r.reasons.some((s) => s.includes("still in flight"))).toBe(true);
+  });
+
+  it("SKIPPED is not green here (§5 plant: named check SKIPPED) — stricter than the ci-rollup leg's sanctioned skips", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    const rollup: RollupItem[] = [{ name: "build", status: "COMPLETED", conclusion: "SKIPPED", completedAt: T1 }];
+    const r = requiredChecksSatisfied(rollup, ["build"]);
+    expect(r.ok).toBe(false);
+    expect(r.reasons.some((s) => s.includes("not SUCCESS") && s.includes("SKIPPED"))).toBe(true);
+  });
+
+  it("NEUTRAL is not SUCCESS here (isRollupClean accepts it; this leg deliberately does not)", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    const rollup: RollupItem[] = [{ name: "build", status: "COMPLETED", conclusion: "NEUTRAL", completedAt: T1 }];
+    expect(requiredChecksSatisfied(rollup, ["build"]).ok).toBe(false);
+  });
+
+  it("supersession cuts both ways: an old SUCCESS superseded by a newer FAILURE fails", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    const rollup: RollupItem[] = [pass("build", T0), { name: "build", status: "COMPLETED", conclusion: "FAILURE", completedAt: T1 }];
+    expect(requiredChecksSatisfied(rollup, ["build"]).ok).toBe(false);
+  });
+
+  it("a timestamp TIE with one non-SUCCESS entry fails (no nondeterministic tie-break, Rule #318)", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+    const rollup: RollupItem[] = [pass("build", T1), { name: "build", status: "COMPLETED", conclusion: "FAILURE", completedAt: T1 }];
+    expect(requiredChecksSatisfied(rollup, ["build"]).ok).toBe(false);
+  });
+
+  // ───── Known-good direction (Rule #471) ─────
+
+  it("known-GOOD: every named check strictly SUCCESS passes with zero reasons", () => {
+    const r = requiredChecksSatisfied([pass("build"), pass("tests")], ["build", "tests"]);
+    expect(r.ok).toBe(true);
+    expect(r.reasons).toEqual([]);
+  });
+
+  it("a CANCELLED run superseded by a newer SUCCESS of the same check passes (the bolt#1463 shape)", () => {
+    const rollup: RollupItem[] = [
+      // pg-enum-drift-exempt: GitHub Actions check-run status field, not a Postgres enum
+      { name: "build", status: "COMPLETED", conclusion: "CANCELLED", completedAt: T0 },
+      pass("build", T1),
+    ];
+    expect(requiredChecksSatisfied(rollup, ["build"]).ok).toBe(true);
+  });
+
+  it("accepts a legacy commit-status SUCCESS (keyed by context)", () => {
+    const rollup: RollupItem[] = [{ context: "build", state: "SUCCESS", createdAt: T1 }];
+    expect(requiredChecksSatisfied(rollup, ["build"]).ok).toBe(true);
+  });
+
+  it("rejects a legacy commit-status shape whose state is not SUCCESS", () => {
+    const rollup: RollupItem[] = [{ context: "build", state: "ERROR", createdAt: T1 }];
+    expect(requiredChecksSatisfied(rollup, ["build"]).ok).toBe(false);
   });
 });

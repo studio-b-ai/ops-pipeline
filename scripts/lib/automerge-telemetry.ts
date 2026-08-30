@@ -25,7 +25,13 @@
 
 import type { PrDiffClass } from "./automerge-classify.js";
 
-export type GateReceiptVerdict = "qualified" | "missed";
+/**
+ * "candidate" (ops#190 B1): a code-fix in a TRAIN-class repo passed EVERY gate leg
+ * but the squasher never merges there — it applied `train:candidate` and handed the
+ * merge decision to the human `train:ready` authority. Neither a qualified merge
+ * nor a miss; monitors treat it as a healthy terminal outcome.
+ */
+export type GateReceiptVerdict = "qualified" | "missed" | "candidate";
 
 /**
  * Which leg failed FIRST. Ordered here as the gate evaluates them:
@@ -38,6 +44,9 @@ export type GateReceiptVerdict = "qualified" | "missed";
  * - `line-cap`     a class's shape matched but the diff exceeded that class's cap.
  * - `eligibility`  the PR is not in the squasher's lane at all — wrong author, or the
  *                  `bugsquasher` label is absent.
+ * - `named-checks` (code-fix only, ops#190 B1) the caller's required_checks list is
+ *                  empty (leg inert, fail-closed) or a named check is missing /
+ *                  in-flight / not strictly SUCCESS on the head commit.
  * - `review`       the independent review returned anything other than exactly CLEAN
  *                  (including any API error — fail-closed).
  * - `other`        UNFORESEEN ONLY. The gate threw. Investigate.
@@ -48,6 +57,7 @@ export type GateReceiptLeg =
   | "class-match"
   | "line-cap"
   | "eligibility"
+  | "named-checks"
   | "review"
   | "other";
 

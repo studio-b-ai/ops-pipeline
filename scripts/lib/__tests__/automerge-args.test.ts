@@ -135,4 +135,86 @@ describe("parseArgs", () => {
     expect(() => parseArgs(["--train-ready", "--pr", "9"])).toThrow(/--repo/);
     expect(() => parseArgs(["--train-ready", "--repo", "studio-b-ai/ops-pipeline"])).toThrow(/--pr/);
   });
+
+  // ───── --safe-path-glob / --required-check (ops#190 B1) ─────
+
+  it("defaults safePathGlobs and requiredChecks to [] when the flags are omitted (every existing caller's shape — code-fix stays inert)", () => {
+    const args = parseArgs(["--repo", "studio-b-ai/bolt-wms", "--pr", "7"]);
+    expect(args.safePathGlobs).toEqual([]);
+    expect(args.requiredChecks).toEqual([]);
+  });
+
+  it("collects multiple --safe-path-glob flags into an array, in order", () => {
+    const args = parseArgs([
+      "--repo",
+      "studio-b-ai/bolt-wms",
+      "--pr",
+      "7",
+      "--safe-path-glob",
+      "src/**",
+      "--safe-path-glob",
+      "scripts/lib/*.ts",
+    ]);
+    expect(args.safePathGlobs).toEqual(["src/**", "scripts/lib/*.ts"]);
+  });
+
+  it("trims whitespace off each --safe-path-glob value and drops whitespace-only entries (same comma-split workflow plumbing as --sensitive-path)", () => {
+    const args = parseArgs([
+      "--repo",
+      "studio-b-ai/bolt-wms",
+      "--pr",
+      "7",
+      "--safe-path-glob",
+      " src/** ",
+      "--safe-path-glob",
+      "   ",
+    ]);
+    expect(args.safePathGlobs).toEqual(["src/**"]);
+  });
+
+  it("collects multiple --required-check flags into an array, in order", () => {
+    const args = parseArgs([
+      "--repo",
+      "studio-b-ai/bolt-wms",
+      "--pr",
+      "7",
+      "--required-check",
+      "build",
+      "--required-check",
+      "tests",
+    ]);
+    expect(args.requiredChecks).toEqual(["build", "tests"]);
+  });
+
+  it("trims whitespace off each --required-check value and drops whitespace-only entries", () => {
+    const args = parseArgs([
+      "--repo",
+      "studio-b-ai/bolt-wms",
+      "--pr",
+      "7",
+      "--required-check",
+      " build ",
+      "--required-check",
+      "",
+    ]);
+    expect(args.requiredChecks).toEqual(["build"]);
+  });
+
+  it("throws when --train-ready is combined with --safe-path-glob (widened mutual exclusion, fail-loud)", () => {
+    expect(() =>
+      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--safe-path-glob", "src/**"]),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("throws when --train-ready is combined with --required-check (widened mutual exclusion, fail-loud)", () => {
+    expect(() =>
+      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--required-check", "build", "--train-ready"]),
+    ).toThrow(/mutually exclusive/);
+  });
+
+  it("throws even when the combined --safe-path-glob value is whitespace-only — exclusion keys on flag PRESENCE (same contract as --sensitive-path)", () => {
+    expect(() =>
+      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--safe-path-glob", "  "]),
+    ).toThrow(/mutually exclusive/);
+  });
 });
