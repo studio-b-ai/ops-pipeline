@@ -104,9 +104,13 @@ jobs:
             exit 1
           fi
           if [ -n "${ONLY_PR:-}" ]; then
-            case "$ONLY_PR" in
-              ''|*[!0-9]*) echo "::error::pr_number must be a single positive integer, got '$ONLY_PR'."; exit 1 ;;
-            esac
+            # Same pattern as automerge-sweep.yml (codex P2: a bare [!0-9] case
+            # accepts "0"/"00", which silently enumerates nothing instead of
+            # failing the invalid dispatch).
+            if ! printf '%s' "$ONLY_PR" | grep -qE '^[1-9][0-9]*$'; then
+              echo "::error::pr_number must be a single positive integer, got '$ONLY_PR'."
+              exit 1
+            fi
           fi
           if [ -n "${ONLY_REPO:-}" ]; then
             if ! jq -e --arg r "$ONLY_REPO" '.repos[] | select(.repo == $r)' "$CONFIG" >/dev/null; then
