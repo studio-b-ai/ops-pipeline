@@ -117,6 +117,26 @@ the fleet sweep deliberately excludes (one repo, one sweep). It passes the two n
 the same PR; its merges thereby also become App-token merges (side benefit: un-suppressed events on
 ops-pipeline train merges).
 
+**Health leg (build-time discovery, 2026-08-31):** 5 of the 6 caller repos (all but webhook-router)
+also carry a `squasher-health.yml` — the Project 2 monitor, watching the retiring caller's runs by
+hardcoded filename (`squasher-health.ts` `SWEEP_WORKFLOW`). Two consequences, both handled:
+
+1. **Retirement PRs delete `squasher-health.yml` alongside the caller** (#366 — retire ALL legs).
+   Left behind, the monitor either errors on the deleted workflow or opens a false dead-sweep
+   machinery issue within ~6h of cutover, in 5 repos at once.
+2. **The monitor moves with the merges**: `squasher-health.ts` gains `HEALTH_WORKFLOW` (env,
+   default preserved), the reusable gains a `workflow` input, and a new ops-pipeline caller
+   `squasher-fleet-health.yml` (cron `53 */2 * * *`, off :11/:41) watches
+   `squasher-fleet-sweep.yml`. Watching the reusable's own filename would list zero runs forever —
+   reusable-workflow runs attribute to the CALLING workflow (#465 blind-instrument shape). The
+   classifier needs no change: it keys on job conclusions and `[gate-receipt]` log lines, never job
+   names. Machinery issues open in ops-pipeline (#165 — fleet-sweep failures are ops-pipeline
+   machinery). The `sla_hours` planted-control seam carries over unchanged (#471).
+
+`verify-squash-merge.yml` (bolt-wms/studiob/webhook-router) is unrelated — it is the
+acuops-pipeline squash-completeness monitor on push-to-main, and is a **beneficiary** of this
+redesign: App-token merges will start triggering it where GITHUB_TOKEN merges suppressed it.
+
 ### 2.5 Tripwire revert leg (same D3 wall, settled here)
 
 The tripwire caller still executes in the target repo, which can never mint under D3. Fix in the same

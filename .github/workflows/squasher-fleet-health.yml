@@ -1,0 +1,53 @@
+name: Squasher fleet health
+
+# ops#250 — the health leg that moved WITH the merges. The six retired per-repo
+# squasher callers each carried a squasher-health.yml watching their own sweep
+# runs; those die with the callers (leaving them would false-alarm dead-sweep
+# within ~6h of retirement, Rule #366 — retire ALL legs). Merge execution now
+# lives in THIS repo's squasher-fleet-sweep.yml, so its monitor lives here too:
+# same reusable, `workflow:` pointed at the fleet sweep (reusable-workflow runs
+# attribute to the CALLING workflow — watching squasher-automerge.yml here
+# would list zero runs forever, a permanent dead-sweep false alarm).
+#
+# Machinery issues open in ops-pipeline under `squasher-health` (auto-
+# reconciled, open = condition active) — fleet-sweep failures are ops-pipeline
+# machinery (#165). A dead fleet sweep fails SAFE fleet-wide (qualified PRs
+# wait for humans — the pre-gate status quo), so 2h cadence / 4h window /
+# ~6h worst-case detection stays proportionate (#448: cadence < SLA).
+#
+# The `sla_hours` dispatch input is the #471 planted-control seam: a
+# sub-minute value makes dead-sweep fire against real data, opening a real
+# issue the next normal run auto-closes — both reconcile directions provable
+# live at any time.
+
+on:
+  schedule:
+    # Off the :00/:30 storm peaks (Rule #298), off the fleet sweep's :11 and
+    # the train self-sweep's :41.
+    - cron: "53 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      sla_hours:
+        description: "Dead-sweep window in hours (default 4). Sub-minute values are the planted control."
+        required: false
+        type: string
+        default: "4"
+      dry_run:
+        description: "Real reads, no issue mutations"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+jobs:
+  health:
+    name: "Squasher fleet health"
+    uses: ./.github/workflows/squasher-health.yml
+    with:
+      sla_hours: ${{ inputs.sla_hours || '4' }}
+      dry_run: ${{ inputs.dry_run || false }}
+      workflow: squasher-fleet-sweep.yml
