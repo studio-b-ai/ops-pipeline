@@ -1,0 +1,183 @@
+name: Squasher fleet auto-merge sweep
+
+# ops#250 — the ops-pipeline-resident replacement for the six retired per-repo
+# squasher caller workflows (design: docs/plans/2026-08-31-ops250-squasher-fleet-sweep.md).
+#
+# WHY CENTRAL: the reusable gate used to merge with the caller job's github.token,
+# and GitHub suppresses workflow triggers for GITHUB_TOKEN-caused events (Rule #38)
+# — so every autonomous merge silently disarmed the target repo's post-merge
+# tripwire and push-to-main workflows (wr#806, 2026-08-31 01:49Z = the known-bad
+# baseline: zero tripwire runs, while every hand merge that night produced one in
+# seconds). The fix requires minting a studiob-fleet-bot App installation token,
+# and under locked D3 the App PEM lives ONLY in ops-pipeline repo secrets — a
+# reusable workflow executes in its CALLER's secrets context, so no per-repo caller
+# can ever mint. Merge execution therefore moves here, to where the PEM lives.
+# This supersedes automerge-sweep.yml's "one repo, one sweep shape" doctrine for
+# the squasher fleet; that workflow remains ops-pipeline's own self-sweep.
+#
+# Fleet registry: scripts/squasher-fleet.json — per-repo gate inputs migrated
+# verbatim from the retired callers. Enumeration covers `bugsquasher` PRs for every
+# fleet repo and `train:ready` PRs for repos whose retired caller had a train leg.
+# Gate semantics are UNCHANGED (the gate script is zero-diff — every read/write
+# already flows through its gh() helper and takes --repo explicitly); only the cron
+# residence and the merging token change. Authority is unchanged too: train merges
+# still require a human's GraphQL-attributed `train:ready` label, and squasher
+# merges still pass every classification leg.
+#
+# TRIGGER SHAPE mirrors automerge-sweep.yml (ops#23 lessons): scheduled sweep at
+# :11 — off the :00/:30 peaks (#298) and off the train self-sweep's :41 — plus
+# workflow_dispatch (repo + pr_number) for "evaluate NOW", which replaces the
+# retired callers' dispatch affordance. Dispatch cannot force-evaluate an unlabeled
+# PR: the PR filter rides the label enumeration, and the gate re-derives everything
+# per cycle anyway.
+#
+# A PR carrying BOTH labels yields two entries; the reusable gate's per-(repo,PR)
+# concurrency group serializes them and the second evaluation finds the PR already
+# merged (or refuses) — idempotent by construction.
+
+on:
+  schedule:
+    - cron: "11 * * * *"
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "Optional: sweep ONLY this org/repo (must be listed in scripts/squasher-fleet.json)."
+        required: false
+        type: string
+      pr_number:
+        description: "Optional (requires repo): evaluate ONLY this PR number. The PR must carry `bugsquasher` or `train:ready` — the label filter is the enumeration."
+        required: false
+        type: string
+
+# github.token is only used for the own-repo checkout below; all cross-repo work
+# (enumeration here, evaluation + merge in the reusable gate) runs on the minted
+# App token.
+permissions:
+  contents: read
+
+concurrency:
+  group: squasher-fleet-sweep
+  cancel-in-progress: false
+
+jobs:
+  determine-prs:
+    name: "Enumerate labeled PRs across the fleet"
+    runs-on: ubuntu-latest
+    outputs:
+      entries: ${{ steps.list.outputs.entries }}
+    steps:
+      - name: Checkout (fleet registry lives here)
+        uses: actions/checkout@v5
+
+      # Tokens are never passed between jobs (GitHub masks secrets in outputs) —
+      # this job and the reusable gate each mint their own.
+      - name: Mint fleet App installation token
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: Fail loud if the mint returned nothing
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::Fleet App token mint returned an empty token — refusing to sweep (ops#250; a github.token fallback would re-arm the Rule #38 event suppression)."
+          exit 1
+
+      - name: List target (repo, PR, mode) entries
+        id: list
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          ONLY_REPO: ${{ inputs.repo }}
+          ONLY_PR: ${{ inputs.pr_number }}
+          MAX_FANOUT: "20"
+        run: |
+          set -euo pipefail
+          CONFIG=scripts/squasher-fleet.json
+
+          # Validate dispatch inputs before any interpolation (the automerge-sweep
+          # codex-P3 pattern): pr_number must be exactly one positive integer and
+          # requires repo; repo must be a registered fleet member.
+          if [ -n "${ONLY_PR:-}" ] && [ -z "${ONLY_REPO:-}" ]; then
+            echo "::error::pr_number requires repo."
+            exit 1
+          fi
+          if [ -n "${ONLY_PR:-}" ]; then
+            case "$ONLY_PR" in
+              ''|*[!0-9]*) echo "::error::pr_number must be a single positive integer, got '$ONLY_PR'."; exit 1 ;;
+            esac
+          fi
+          if [ -n "${ONLY_REPO:-}" ]; then
+            if ! jq -e --arg r "$ONLY_REPO" '.repos[] | select(.repo == $r)' "$CONFIG" >/dev/null; then
+              echo "::error::repo '$ONLY_REPO' is not registered in $CONFIG."
+              exit 1
+            fi
+          fi
+
+          entries='[]'
+          while IFS= read -r repo_json; do
+            repo=$(jq -r '.repo' <<<"$repo_json")
+            if [ -n "${ONLY_REPO:-}" ] && [ "$repo" != "$ONLY_REPO" ]; then continue; fi
+
+            sq=$(gh pr list --repo "$repo" --label bugsquasher --state open --json number --limit 100 --jq '[.[].number]')
+            tr='[]'
+            if [ "$(jq -r '.train' <<<"$repo_json")" = "true" ]; then
+              tr=$(gh pr list --repo "$repo" --label 'train:ready' --state open --json number --limit 100 --jq '[.[].number]')
+            fi
+            if [ -n "${ONLY_PR:-}" ]; then
+              sq=$(jq -c --argjson p "$ONLY_PR" '[.[] | select(. == $p)]' <<<"$sq")
+              tr=$(jq -c --argjson p "$ONLY_PR" '[.[] | select(. == $p)]' <<<"$tr")
+            fi
+
+            # Per-repo counts on every cycle (#465): an all-zero sweep must be
+            # distinguishable from a blind instrument — these lines ARE the
+            # enumeration receipt.
+            echo "$repo: bugsquasher=$(jq length <<<"$sq") train:ready=$(jq length <<<"$tr")"
+
+            # Train entries pass ONLY train_ready — the squasher inputs are blanked
+            # deliberately (the reusable ignores them in train mode; forwarding
+            # enabled_classes would trip the script's mutual-exclusion fail-loud).
+            entries=$(jq -c --argjson cfg "$repo_json" --argjson sq "$sq" --argjson tr "$tr" '
+              . + ($sq | map({repo: $cfg.repo, pr_number: (. | tostring), train_ready: false,
+                              enabled_classes: $cfg.enabled_classes,
+                              sensitive_path_patterns: $cfg.sensitive_path_patterns,
+                              safe_path_globs: $cfg.safe_path_globs,
+                              required_checks: $cfg.required_checks}))
+                + ($tr | map({repo: $cfg.repo, pr_number: (. | tostring), train_ready: true,
+                              enabled_classes: "", sensitive_path_patterns: "",
+                              safe_path_globs: "", required_checks: ""}))' <<<"$entries")
+          done < <(jq -c '.repos[]' "$CONFIG")
+
+          count=$(jq length <<<"$entries")
+          if [ "$count" -eq 0 ]; then
+            echo "No open labeled PRs anywhere in the fleet this cycle (per-repo counts above are the receipt)."
+          fi
+          if [ "$count" -gt "$MAX_FANOUT" ]; then
+            echo "::warning::Fanout cap hit: $count labeled PRs found, evaluating only the first $MAX_FANOUT this cycle (#331 — no silent caps; the hourly cron catches the rest)."
+            entries=$(jq -c ".[0:${MAX_FANOUT}]" <<<"$entries")
+          fi
+          echo "entries=$entries" >> "$GITHUB_OUTPUT"
+
+  gate:
+    name: "Gate ${{ matrix.repo }}#${{ matrix.pr_number }}"
+    needs: determine-prs
+    if: ${{ !cancelled() && needs.determine-prs.result == 'success' && needs.determine-prs.outputs.entries != '[]' }}
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include: ${{ fromJson(needs.determine-prs.outputs.entries) }}
+    uses: ./.github/workflows/squasher-automerge.yml
+    with:
+      repo: ${{ matrix.repo }}
+      pr_number: ${{ matrix.pr_number }}
+      enabled_classes: ${{ matrix.enabled_classes }}
+      sensitive_path_patterns: ${{ matrix.sensitive_path_patterns }}
+      safe_path_globs: ${{ matrix.safe_path_globs }}
+      required_checks: ${{ matrix.required_checks }}
+      train_ready: ${{ matrix.train_ready }}
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      FLEET_APP_ID: ${{ secrets.FLEET_APP_ID }}
+      FLEET_APP_PRIVATE_KEY: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
