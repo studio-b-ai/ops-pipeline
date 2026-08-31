@@ -41,12 +41,20 @@ name: Squasher auto-merge gate (reusable)
 # move is needed for this rollout; see the PR body for the exact activation order.
 #
 # Secrets:
-#   ANTHROPIC_API_KEY   the independent-review leg (Claude Sonnet 5). Forwarded
-#                       explicitly by the caller — provisioned by the controller
-#                       AFTER this PR merges (Rule #363: chips never touch secrets).
-#   (gh CLI auth = the job's own GITHUB_TOKEN via GH_TOKEN below — scoped to the
-#   CALLER's repo with whatever permissions the caller's job grants; no separate
-#   secret needed for merge/comment.)
+#   ANTHROPIC_API_KEY        the independent-review leg (Claude Sonnet 5).
+#   FLEET_APP_ID /           ops#250: the studiob-fleet-bot App mint. The gate now
+#   FLEET_APP_PRIVATE_KEY    runs on an App INSTALLATION token, not github.token —
+#                            GitHub suppresses workflow triggers for GITHUB_TOKEN-
+#                            caused events (Rule #38), so every autonomous merge
+#                            silently disarmed the target repo's post-merge tripwire
+#                            and push-to-main workflows (wr#806, 2026-08-31 = the
+#                            known-bad baseline). App-token merges trigger normally.
+#                            REQUIRED, no fallback — an optional-with-fallback shape
+#                            would let the suppression silently return (#412/#464),
+#                            and it fail-closes any un-retired legacy per-repo caller
+#                            loudly (callers can never hold the PEM under D3; the
+#                            fleet sweep in THIS repo is the only sanctioned caller).
+#                            Design: docs/plans/2026-08-31-ops250-squasher-fleet-sweep.md
 
 on:
   workflow_call:
@@ -87,6 +95,10 @@ on:
     secrets:
       ANTHROPIC_API_KEY:
         required: true
+      FLEET_APP_ID:
+        required: true
+      FLEET_APP_PRIVATE_KEY:
+        required: true
 
 concurrency:
   group: squasher-automerge-${{ inputs.repo }}-${{ inputs.pr_number }}
@@ -111,10 +123,30 @@ jobs:
         working-directory: scripts
         run: npm ci || npm install
 
+      # ops#250: mint the studiob-fleet-bot installation token (heritage-restart-
+      # train sibling pattern). The WHOLE gate run uses it — cross-repo reads
+      # (statusCheckRollup incl. checkSuite.workflowRun, GraphQL label attribution)
+      # need it anyway, and App-token-caused merge events trigger the target repo's
+      # post-merge tripwire + push-to-main workflows, which github.token merges
+      # silently suppressed (Rule #38; wr#806 baseline).
+      - name: Mint fleet App installation token
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: Fail loud if the mint returned nothing
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::Fleet App token mint returned an empty token — refusing to evaluate (a github.token fallback would re-arm the Rule #38 event suppression this design exists to kill; see ops#250)."
+          exit 1
+
       - name: Run pr-automerge-gate
         working-directory: scripts
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GATE_REPO: ${{ inputs.repo }}
           GATE_PR_NUMBER: ${{ inputs.pr_number }}
