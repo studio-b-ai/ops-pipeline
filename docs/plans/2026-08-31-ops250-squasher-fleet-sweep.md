@@ -1,6 +1,7 @@
 # ops#250 — Squasher fleet sweep: relocate autonomous merges to where the PEM lives
 
-**Status:** design (codex consult pending, #179) · **Owner:** Mechanic seat · **Date:** 2026-08-31
+**Status:** design — codex-reviewed 2026-08-31 02:2xZ, **zero P1**; the four P2 + three P3 findings are
+folded in below (marked ⟨codex⟩) · **Owner:** Mechanic seat · **Date:** 2026-08-31
 **Supersedes:** the "mint in the reusable gate" fix filed on ops#250 (premise falsified — see §1), and
 `automerge-sweep.yml`'s header doctrine "the squasher fleet rollout is a separate, per-repo decision.
 One repo, one sweep shape." Per-repo callers are structurally incapable of un-suppressed merges under
@@ -92,6 +93,16 @@ cannot ride the comma-split `required_checks` input — unchanged pre-existing l
 by the full-rollup leg. (Follow-up, not this PR: teach the gate script to read this config file
 directly and retire the comma-split inputs.)
 
+⟨codex P2⟩ **`required_checks` applies to squasher invocations only.** Train mode deliberately does
+not forward it (reusable gate lines ~129-136; `automerge-args.ts` rejects `--train-ready` combined
+with required-check flags; named-check enforcement in train mode is a standing TODO at
+`pr-automerge-gate.ts:854`). The sweep passes `required_checks` only on `bugsquasher` entries;
+`train:ready` entries pass only `train_ready: true` — exact status quo.
+
+⟨codex P3⟩ This config file is **enumeration + gate inputs only** — it is NOT class policy.
+`repoClassFor()` (`automerge-classify.ts:519`) stays the hardcoded source of truth for
+train-class/code-fix partitioning; the fleet config never overrides it.
+
 ### 2.4 Per-repo caller retirement (6 PRs)
 
 Delete `.github/workflows/squasher-automerge.yml` in each caller repo. This retires both the squasher
@@ -115,6 +126,14 @@ ops-pipeline PR:
   Consequence: the revert PR gets no CI runs (GITHUB_TOKEN-created) — acceptable because revert PRs
   are **human-merged by standing law** anyway; the human triggers CI with a close/reopen (#303's
   human-token pattern), documented in the revert PR body template.
+  ⟨codex P2⟩ That documentation does not exist yet: the current body template
+  (`post-merge-tripwire.ts:279-288`) says only "never auto-merged", and the CI-less warning lives
+  only in workflow logs (`post-merge-tripwire.yml:154-168`). So the tripwire **script** takes a small
+  edit — add the close/reopen-for-CI instruction to the revert PR body. (The GATE script stays
+  zero-diff; the zero-diff claim was always gate-scoped.)
+  ⟨codex P3⟩ Attribution mismatch handled in the same edit: `post-merge-tripwire.ts:73-74` hardcodes
+  the revert commit author as `studiob-fleet-bot` while the actor will now be `github-actions[bot]` —
+  align the commit identity with the actual actor.
 - webhook-router caller PR: drop the two dead `FLEET_APP_*` secret mappings (they resolve empty
   today).
 - Noted alternative if revert-CI friction proves real: an ops-pipeline-resident revert executor
@@ -132,9 +151,14 @@ ops-pipeline PR:
 
 ## 3. Cutover sequence (fail-closed at every step)
 
-1. **Merge the 6 caller-retirement PRs first.** Autonomous merges + train evaluation pause fleet-wide
-   (fail-closed; queued `bugsquasher` PRs lose only latency, #462). This also stops the racing hourly
-   crons from merging the #471 proving vehicle via the old suppressed path.
+0. ⟨codex P2⟩ **Instant fleet pause first:** `gh workflow disable squasher-automerge.yml` on all six
+   caller repos in one pass (reversible, fail-closed). Six independent retirement PRs cannot land
+   atomically — until each lands, that repo's hourly cron could still merge via the old suppressed
+   path; the disable closes that window in seconds. Verify no caller run is queued/in-progress after
+   the disable.
+1. **Merge the 6 caller-retirement PRs.** Autonomous merges + train evaluation pause fleet-wide
+   (fail-closed; queued `bugsquasher` PRs lose only latency, #462), preserving the #471 proving
+   vehicle.
 2. **Merge the ops-pipeline PR** (sweep + reusable + fleet config + automerge-sweep secrets + tripwire
    revert-leg change). If order inverts by accident, legacy callers red-fail loudly on the now-required
    secrets — noisy, but no unsafe merge can occur.
@@ -153,7 +177,10 @@ manual tripwire throughout.
 - **Known-good (the non-default verdict, #471):** the vehicle's autonomous merge must show
   `mergedBy = studiob-fleet-bot[bot]` **and** a tripwire-caller run **CREATED** in webhook-router for
   the merged PR (running its health leg, not merely skipped), green. wr#806 = banked known-bad
-  baseline (zero runs).
+  baseline (zero runs). ⟨codex P2⟩ Also assert at least one **push-triggered** workflow run exists on
+  the merge commit in the target repo (§1 names push-to-main suppression as part of the defect; the
+  tripwire alone doesn't prove that half). If the target repo has no push-to-main workflows, say so
+  and narrow the criterion explicitly rather than silently.
 - **Known-bad still refused:** a fleet-sweep evaluation of a PR that fails the gate (red CI or
   unlisted skip) must refuse exactly as before — the gate script is zero-diff, but one observed
   refusal through the new path guards the token swap.
