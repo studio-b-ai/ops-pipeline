@@ -70,8 +70,14 @@ const METRICS_SETTLE_MS = 30_000;
 /** GitHub's commits API caps `files[]` at 300 entries — at/over it the list may be truncated. */
 const COMMIT_FILES_API_CAP = 300;
 
-const BOT_NAME = "studiob-fleet-bot";
-const BOT_EMAIL = "studiob-fleet-bot[bot]@users.noreply.github.com";
+// ops#250: the tripwire always runs on the caller job's github.token (the App
+// mint here was inert-since-birth — under locked D3 the fleet App PEM lives ONLY
+// in ops-pipeline repo secrets, and a reusable workflow executes in its CALLER's
+// secrets context, so no target-repo caller could ever supply the pair). The
+// commit author matches the actual actor; the revert PR body carries the
+// close/reopen instruction (#303) instead of pretending CI will fire.
+const BOT_NAME = "github-actions[bot]";
+const BOT_EMAIL = "41898282+github-actions[bot]@users.noreply.github.com";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -283,6 +289,11 @@ function openRevertPr(args: TripwireArgs, detail: string): RevertResult {
       `Reverts squash commit \`${args.mergeSha}\` from #${args.pr}.`,
       ``,
       detail,
+      ``,
+      `> ⚠️ **No CI has run on this PR.** It was created with \`GITHUB_TOKEN\`, and GitHub`,
+      `> suppresses workflow triggers for GITHUB_TOKEN-caused events (Rule #38/#303).`,
+      `> Before merging: **close and immediately reopen this PR** — that human action`,
+      `> fires the normal \`pull_request\` checks. Do not merge on a blank checks tab.`,
       ``,
       `🤖 Generated with [Claude Code](https://claude.com/claude-code)`,
     ].join("\n");
