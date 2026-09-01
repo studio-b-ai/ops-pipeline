@@ -117,3 +117,9 @@ jobs:
       train_ready: true
     secrets:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # ops#250: the reusable gate now REQUIRES the fleet App pair — it merges on
+      # a studiob-fleet-bot installation token so merge events trigger the target
+      # repo's tripwire/push-to-main workflows (github.token merges are
+      # Rule #38-suppressed; wr#806 = the known-bad baseline).
+      FLEET_APP_ID: ${{ secrets.FLEET_APP_ID }}
+      FLEET_APP_PRIVATE_KEY: ${{ secrets.FLEET_APP_PRIVATE_KEY }}

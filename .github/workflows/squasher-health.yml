@@ -25,6 +25,11 @@ on:
         required: false
         type: string
         default: "4"
+      workflow:
+        description: "Workflow FILENAME whose runs this check watches (ops#250: the fleet-health caller passes squasher-fleet-sweep.yml; the default preserves the retired per-repo callers' shape)."
+        required: false
+        type: string
+        default: "squasher-automerge.yml"
       dry_run:
         description: "Real reads, no issue mutations"
         required: false
@@ -65,4 +70,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           HEALTH_REPO: ${{ github.repository }}
           HEALTH_SLA_HOURS: ${{ inputs.sla_hours }}
+          HEALTH_WORKFLOW: ${{ inputs.workflow }}
         run: npx tsx squasher-health.ts ${{ inputs.dry_run && '--dry-run' || '' }}

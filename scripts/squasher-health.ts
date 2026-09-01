@@ -36,7 +36,12 @@ import { reconcileCondition } from "./lib/gateway-token-reconcile.js";
 import { ensureLabel, listIssuesByLabel, openIssue, closeIssue } from "./lib/github-issues.js";
 
 const LABEL = "squasher-health";
-const SWEEP_WORKFLOW = "squasher-automerge.yml";
+// ops#250: parametrized — the per-repo callers watched their own retired
+// squasher-automerge.yml; ops-pipeline's fleet-health caller watches
+// squasher-fleet-sweep.yml (reusable-workflow runs attribute to the CALLING
+// workflow, so watching the reusable's own filename would list zero runs
+// forever — a permanent dead-sweep false alarm, #465 blind-instrument shape).
+const SWEEP_WORKFLOW = process.env.HEALTH_WORKFLOW?.trim() || "squasher-automerge.yml";
 const RUN_LOOKBACK = 12; // runs listed for SLA/conclusion checks
 const LOG_LOOKBACK = 6; // completed runs whose logs are scanned for receipts (logs are the expensive read)
 const ALL_KEYS: HealthCondition["key"][] = [
@@ -137,7 +142,7 @@ async function main(): Promise<void> {
           "",
           `Sweep workflow: \`${SWEEP_WORKFLOW}\` · SLA window: ${slaHours}h · runs inspected: ${runs.length} (logs read: ${completed.length}).`,
           "",
-          "Fire a sweep NOW to re-test (Rule #447): `gh workflow run squasher-automerge.yml --repo " + repo + "` — then re-run this health check the same way.",
+          "Fire a sweep NOW to re-test (Rule #447): `gh workflow run " + SWEEP_WORKFLOW + " --repo " + repo + "` — then re-run this health check the same way.",
           "",
           "This issue auto-closes when the condition clears (open = condition active).",
         ].join("\n"),
