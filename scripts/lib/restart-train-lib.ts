@@ -286,6 +286,47 @@ export function isBusinessHoursBlockedET(iso: string): boolean {
 }
 
 /**
+ * The RULED Wednesday-noon departure band for `acumatica-prod` (ops-pipeline#261; Kevin's
+ * amendment C, 2026-08-30 — brain `library/departures/windows.yaml` row `acumatica-prod`:
+ * band "Wed 12:00 ET", status RULED, build_lead_min 16; the pipeline gate's literal carve-out
+ * is acuops-pipeline#167: a run that STARTS Wed 11:45-12:59 ET with the caller opted in
+ * (client-asthetik#355) passes the hours gate; one that reaches the gate after 12:59 is
+ * blocked fail-closed).
+ *
+ * MERGE-time vs PUBLISH-time: the train decides at merge time; the deploy run's hours gate
+ * fires ~ACUMATICA_BUILD_LEAD_MIN later (windows.yaml: "the gate evaluates the window at
+ * EXPECTED PUBLISH TIME … never merge time"). So a merge instant is inside the band only
+ * when BOTH it and (it + lead) fall inside [11:45, 13:00) ET — i.e. the last clear merge
+ * minute is 12:43 ET; a 12:50 ET merge must NOT clear (it would reach the gate at 13:06
+ * and be refused there, wasting the week's window). Whole-minute comparison, matching
+ * `isBusinessHoursBlockedET`'s and the bash gate's `date +%H/%M` truncation.
+ *
+ * The opt-in is the REPO CLASS: `client-asthetik` is the only member of its class and its
+ * caller opted in (ca#355) — a runtime read of the caller's `with:` would be a network
+ * round-trip for a fact that only changes by PR. If the windows.yaml band or lead changes,
+ * these constants change in the SAME PR (#235) — cited above so the drift is greppable.
+ */
+export const ACUMATICA_BUILD_LEAD_MIN = 16;
+export const WED_NOON_BAND_ET = { isoWeekday: 3, startMinuteOfDay: 11 * 60 + 45, endMinuteOfDayExclusive: 13 * 60 } as const;
+
+export function isWedNoonDepartureClearET(iso: string, leadMin: number = ACUMATICA_BUILD_LEAD_MIN): boolean {
+  const p = getZonedParts(iso, ET_ZONE);
+  if (p.weekday !== WED_NOON_BAND_ET.isoWeekday) return false;
+  const minutesOfDay = p.hour * 60 + p.minute;
+  const inBand = minutesOfDay >= WED_NOON_BAND_ET.startMinuteOfDay && minutesOfDay < WED_NOON_BAND_ET.endMinuteOfDayExclusive;
+  const publishInBand = minutesOfDay + leadMin < WED_NOON_BAND_ET.endMinuteOfDayExclusive;
+  return inBand && publishInBand;
+}
+
+/**
+ * The client-asthetik ET clause as the train applies it: the after-hours gate, EXCEPT inside
+ * the ruled Wed-noon departure band. Every other hour keeps the original law verbatim.
+ */
+export function isClientAsthetikEtBlocked(iso: string): boolean {
+  return isBusinessHoursBlockedET(iso) && !isWedNoonDepartureClearET(iso);
+}
+
+/**
  * The 05:45-08:15Z "batch blackout" — design §1.2 step 2 / tracker #172. NOT mirrored from any
  * existing code (confirmed via repo-wide grep — there is no prior codified constant for this
  * window anywhere in ops-pipeline, unlike the ET gate above); implemented fresh from the design
@@ -307,6 +348,13 @@ function nextBatchBlackoutExitUtcMs(ms: number): number {
 
 function nextEtBusinessHoursExitMs(ms: number): number {
   const p = getZonedPartsFromMs(ms, ET_ZONE);
+  // ops-pipeline#261: on a Wednesday BEFORE the ruled noon band, the next clear instant is
+  // the band's start (11:45 ET), not 18:00 — the fixed-point loop re-checks every clause
+  // from there. Blocked on a Wednesday at/after the band's last clear minute (12:44+),
+  // or on any other weekday, the exit stays 18:00 ET as before.
+  if (p.weekday === WED_NOON_BAND_ET.isoWeekday && p.hour * 60 + p.minute < WED_NOON_BAND_ET.startMinuteOfDay) {
+    return zonedWallClockToUtcMs(p.year, p.month, p.day, 11, 45, 0, ET_ZONE);
+  }
   return zonedWallClockToUtcMs(p.year, p.month, p.day, 18, 0, 0, ET_ZONE);
 }
 
@@ -317,8 +365,8 @@ function describeBlockAt(nowMs: number, anchorMs: number, repoClass: RepoClass):
     return `spacing: now is <30min after anchor (${toIsoSeconds(anchorMs)})`;
   }
   if (isBatchBlackoutUtc(nowIso)) return "batch-blackout: 05:45-08:15Z";
-  if (repoClass === "client-asthetik" && isBusinessHoursBlockedET(nowIso)) {
-    return "business-hours: America/New_York Mon-Fri 06:00-18:00";
+  if (repoClass === "client-asthetik" && isClientAsthetikEtBlocked(nowIso)) {
+    return "business-hours: America/New_York Mon-Fri 06:00-18:00 (except the RULED Wed 11:45-12:43 ET departure band — windows.yaml acumatica-prod, ops#261)";
   }
   return "clear";
 }
@@ -355,7 +403,7 @@ export function windowState(nowIso: string, repoClass: RepoClass, anchorIso: str
       candidateMs = nextBatchBlackoutExitUtcMs(candidateMs);
       continue;
     }
-    if (repoClass === "client-asthetik" && isBusinessHoursBlockedET(candidateIso)) {
+    if (repoClass === "client-asthetik" && isClientAsthetikEtBlocked(candidateIso)) {
       candidateMs = nextEtBusinessHoursExitMs(candidateMs);
       continue;
     }
