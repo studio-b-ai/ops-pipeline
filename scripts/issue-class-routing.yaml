@@ -40,9 +40,12 @@ default:
   restate: true
 
 # any of these present → never dispatch (Kevin's decisions, never an agent's)
+# `awaiting-approval` is deliberately NOT a veto: webhook-router#837 (wr#829 leg 2,
+# Kevin: "I don't even want to do the thumbs up in zoom anymore") retired the Zoom 👍
+# gate and removed the label from VETO_LABELS — keeping it here would re-strand the
+# 10 live enhancement issues that still carry it behind a door nobody opens (#6/#235).
 vetoes:
   - needs-human
-  - awaiting-approval
   - wontfix
   - needs-triage
 
