@@ -1,0 +1,51 @@
+# Issue class → worker routing — ops-pipeline#260 leg 2 (Kevin 9/02, RULED:
+# "label issues however you want, but I want them picked up and worked by agents").
+#
+# CONTRACT: this file is the ONE place the front door decides which worker an
+# open issue goes to. webhook-router's dispatcher (wr#829 / eligibility.ts)
+# reads it from the ops-pipeline main checkout; the two routine prompts mirror
+# its semantics (Squasher's "if the issue does not carry a `bug` label" step).
+# Labels stay free-form otherwise — routing keys off the ones named here and
+# ignores the rest.
+#
+# Evaluation order (routeIssue in scripts/lib/issue-class-routing.ts):
+#   1. any veto label present            → NEVER dispatch (a human owns it)
+#   2. any label with a never-prefix     → NEVER dispatch (a seat's own backlog)
+#   3. first matching class route        → that worker
+#   4. no class label at all             → the default worker, restate=true
+#      ("restate the ask in one sentence; abort to needs-human if it is not a
+#      code change") — unlabeled work is still worked, never silently skipped.
+#
+# Adding a class = one route line here + the worker's routine prompt. Adding a
+# veto = one line here. No code change in either repo.
+
+version: 1
+
+workers:
+  squasher:
+    routine: trig_01EHMVrXLW1xg2aixEc1MXNJ      # Bug Squasher (claude.ai routine)
+  enhancement-worker:
+    routine: trig_01E64JV6mRtDsyJzXAbvE8jK      # Enhancement Worker (claude.ai routine)
+
+# first match wins, top to bottom
+routes:
+  - label: bug
+    worker: squasher
+  - label: enhancement
+    worker: enhancement-worker
+
+# unlabeled / other-labeled issues: worked by the Squasher with the restate step
+default:
+  worker: squasher
+  restate: true
+
+# any of these present → never dispatch (Kevin's decisions, never an agent's)
+vetoes:
+  - needs-human
+  - awaiting-approval
+  - wontfix
+  - needs-triage
+
+# a seat's own backlog item → never dispatch (lane:mechanic, lane:engineer, …)
+never_prefixes:
+  - "lane:"
