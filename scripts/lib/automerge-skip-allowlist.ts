@@ -42,7 +42,8 @@ const KNOWN_TOP_LEVEL_KEYS = new Set(["repos", "train_repos"]);
 
 /** Shared strict validator for one top-level section (`repos` or `train_repos`) —
  *  same shape rules for both: missing ⇒ empty map; anything else must be a
- *  mapping of org/repo → non-empty list of strings. */
+ *  mapping of org/repo → a list whose entries are all non-empty strings (the
+ *  list itself may be empty — that mirrors the pre-`train_repos` behavior). */
 function parseRepoSection(section: unknown, sectionKey: string): SkipAllowlist {
   if (section === null || section === undefined) return new Map();
   if (typeof section !== "object" || Array.isArray(section)) {

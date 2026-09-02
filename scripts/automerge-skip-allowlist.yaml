@@ -75,7 +75,10 @@ repos:
 
 # RULING 2026-09-02 (amends the ops#235 ruling above; incident: the restart
 # train's 22:18Z first after-hours tick refused studio-b-ai/client-asthetik#359
-# citing these same 6 by-design PR-event skips): `train_repos:` is a SECOND,
+# citing these same 5 by-design PR-event skips — "Auto-qualifier (shadow)" is
+# excluded from this list on purpose: it is ALREADY sanctioned under `repos:`
+# above, for both the squasher and the train via the union, so restating it
+# here would be redundant, not additive): `train_repos:` is a SECOND,
 # NARROWER sanction set consumed ONLY by the restart train's
 # `loadTrainSanctionedSkips()` (never `loadSanctionedSkips()`, never the
 # squasher). The train's merge authority is Kevin's label + the window law
@@ -86,7 +89,7 @@ repos:
 # build / Validate on Staging and build / 24h Dispatch Cap: the caller pins
 # dry_run=true on every pull_request event; build / build-bin: content-gated
 # on detect-code-change.code_changed, which this repo's Customization-only
-# diffs never trip). A name listed here is STILL forbidden under `repos:`
+# diffs never trip). Every name listed here IS still forbidden under `repos:`
 # above — the squasher ban is untouched.
 train_repos:
   studio-b-ai/client-asthetik:
@@ -95,4 +98,3 @@ train_repos:
     - "build / Validate on Staging"
     - "build / build-bin"
     - "build / 24h Dispatch Cap"
-    - "Auto-qualifier (shadow)"
