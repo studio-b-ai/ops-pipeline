@@ -25,6 +25,10 @@ import {
   planStateKey,
   windowState,
   zonedWallClockToUtcMs,
+  isWedNoonDepartureClearET,
+  isClientAsthetikEtBlocked,
+  ACUMATICA_BUILD_LEAD_MIN,
+  WED_NOON_BAND_ET,
   type AnchorCandidate,
   type AnchorResult,
   type QueueEntry,
@@ -169,12 +173,20 @@ describe("windowState", () => {
     }
   });
 
-  it("client-asthetik: spacing resolves INTO the ET gate, chains to that gate's 18:00 ET exit", () => {
-    // anchor+30min lands at 10:20Z = 06:20 EDT — inside the ET-blocked window, so the walk must
-    // hop again to 18:00 EDT (22:00Z) the same day.
+  it("client-asthetik: spacing resolves INTO the ET gate, chains to the next exit — a WEDNESDAY exits into the 11:45 ET band (ops#261)", () => {
+    // anchor+30min lands at 10:20Z = 06:20 EDT — inside the ET-blocked window. 2026-08-19 is a
+    // Wednesday, so under the RULED Wed-noon band the next clear instant is the band's START
+    // (11:45 EDT = 15:45Z), not 18:00. (Before ops#261 this asserted 22:00Z — the old law.)
     const r = windowState("2026-08-19T09:55:00Z", "client-asthetik", "2026-08-19T09:50:00Z");
     expect(r.clear).toBe(false);
-    if (!r.clear) expect(r.nextClearIso).toBe("2026-08-19T22:00:00Z");
+    if (!r.clear) expect(r.nextClearIso).toBe("2026-08-19T15:45:00Z");
+  });
+
+  it("client-asthetik: the same chain on a THURSDAY still exits at 18:00 ET (the band is Wednesday only)", () => {
+    // 2026-08-20 is a Thursday: anchor+30min = 06:20 EDT → blocked → 18:00 EDT (22:00Z).
+    const r = windowState("2026-08-20T09:55:00Z", "client-asthetik", "2026-08-20T09:50:00Z");
+    expect(r.clear).toBe(false);
+    if (!r.clear) expect(r.nextClearIso).toBe("2026-08-20T22:00:00Z");
   });
 
   it("studiob: the SAME anchor/now is NOT subject to the ET gate — clears at anchor+30min", () => {
@@ -204,6 +216,101 @@ describe("windowState", () => {
   });
   it("throws on an unparsable anchor", () => {
     expect(() => windowState("2026-08-19T20:00:00Z", "studiob", "not-a-date")).toThrow();
+  });
+});
+
+// ───────────────────────────── Wed-noon departure band (ops-pipeline#261) ─────────────────────────────
+
+describe("isWedNoonDepartureClearET — the RULED acumatica-prod band at MERGE time (publish = +16 min)", () => {
+  // 2026-09-09 is a Wednesday; EDT (UTC-4). 2026-01-14 is a Wednesday; EST (UTC-5).
+  it("mirrors windows.yaml: lead 16 min, band Wed 11:45-13:00 ET exclusive", () => {
+    expect(ACUMATICA_BUILD_LEAD_MIN).toBe(16);
+    expect(WED_NOON_BAND_ET).toEqual({ isoWeekday: 3, startMinuteOfDay: 705, endMinuteOfDayExclusive: 780 });
+  });
+  it("Wed 11:50 ET clears (EDT)", () => {
+    expect(isWedNoonDepartureClearET("2026-09-09T15:50:00Z")).toBe(true);
+  });
+  it("Wed 11:50 ET clears (EST — the DST branch)", () => {
+    expect(isWedNoonDepartureClearET("2026-01-14T16:50:00Z")).toBe(true);
+  });
+  it("Wed 11:45:00 ET is the first clear minute; 11:44:59 is not", () => {
+    expect(isWedNoonDepartureClearET("2026-09-09T15:45:00Z")).toBe(true);
+    expect(isWedNoonDepartureClearET("2026-09-09T15:44:59Z")).toBe(false);
+  });
+  it("Wed 12:43 ET is the LAST clear merge minute (12:43 + 16 = 12:59 < 13:00); 12:44 is not (reaches the gate at 13:00)", () => {
+    expect(isWedNoonDepartureClearET("2026-09-09T16:43:59Z")).toBe(true);
+    expect(isWedNoonDepartureClearET("2026-09-09T16:44:00Z")).toBe(false);
+  });
+  it("Wed 12:50 ET does NOT clear — the ops#261 acceptance case (publish would land at 13:06)", () => {
+    expect(isWedNoonDepartureClearET("2026-09-09T16:50:00Z")).toBe(false);
+  });
+  it("Tue 11:50 ET does not clear (wrong day)", () => {
+    expect(isWedNoonDepartureClearET("2026-09-08T15:50:00Z")).toBe(false);
+  });
+  it("a zero lead clears through 12:59 ET (the pipeline gate's own literal band)", () => {
+    expect(isWedNoonDepartureClearET("2026-09-09T16:59:00Z", 0)).toBe(true);
+    expect(isWedNoonDepartureClearET("2026-09-09T17:00:00Z", 0)).toBe(false);
+  });
+});
+
+describe("isClientAsthetikEtBlocked — after-hours law EXCEPT the band (both verdicts, #471)", () => {
+  it("Wed 11:50 ET: inside business hours, inside the band → NOT blocked", () => {
+    expect(isBusinessHoursBlockedET("2026-09-09T15:50:00Z")).toBe(true); // the raw law still says blocked
+    expect(isClientAsthetikEtBlocked("2026-09-09T15:50:00Z")).toBe(false); // the train's clause carves it out
+  });
+  it("Wed 10:00 ET: business hours, before the band → blocked", () => {
+    expect(isClientAsthetikEtBlocked("2026-09-09T14:00:00Z")).toBe(true);
+  });
+  it("Wed 12:50 ET: business hours, past the last clear merge minute → blocked", () => {
+    expect(isClientAsthetikEtBlocked("2026-09-09T16:50:00Z")).toBe(true);
+  });
+  it("Tue 11:50 ET → blocked (the band is Wednesday only)", () => {
+    expect(isClientAsthetikEtBlocked("2026-09-08T15:50:00Z")).toBe(true);
+  });
+  it("Saturday → never blocked (unchanged)", () => {
+    expect(isClientAsthetikEtBlocked("2026-09-12T15:50:00Z")).toBe(false);
+  });
+});
+
+describe("windowState — the band through the whole clause chain (ops-pipeline#261)", () => {
+  it("client-asthetik at Wed 11:50 ET with a 2h-old anchor is CLEAR", () => {
+    expect(windowState("2026-09-09T15:50:00Z", "client-asthetik", "2026-09-09T13:50:00Z")).toEqual({ clear: true });
+  });
+  it("client-asthetik at Wed 12:50 ET is NOT clear and walks to 18:00 ET (22:00Z) — the band is gone for the week", () => {
+    const r = windowState("2026-09-09T16:50:00Z", "client-asthetik", "2026-09-09T13:50:00Z");
+    expect(r.clear).toBe(false);
+    if (!r.clear) {
+      expect(r.nextClearIso).toBe("2026-09-09T22:00:00Z");
+      expect(r.reason).toMatch(/business-hours/);
+      expect(r.reason).toMatch(/Wed 11:45-12:43 ET/);
+    }
+  });
+  it("client-asthetik at Wed 10:00 ET walks forward to the band's START (11:45 ET = 15:45Z), not to 18:00", () => {
+    const r = windowState("2026-09-09T14:00:00Z", "client-asthetik", "2026-09-09T12:00:00Z");
+    expect(r.clear).toBe(false);
+    if (!r.clear) expect(r.nextClearIso).toBe("2026-09-09T15:45:00Z");
+  });
+  it("client-asthetik at Wed 11:44:59 ET walks one second to 11:45:00 ET", () => {
+    const r = windowState("2026-09-09T15:44:59Z", "client-asthetik", "2026-09-09T12:00:00Z");
+    expect(r.clear).toBe(false);
+    if (!r.clear) expect(r.nextClearIso).toBe("2026-09-09T15:45:00Z");
+  });
+  it("client-asthetik at Tue 11:50 ET is NOT clear and walks to Tue 18:00 ET — never into Wednesday's band", () => {
+    const r = windowState("2026-09-08T15:50:00Z", "client-asthetik", "2026-09-08T13:50:00Z");
+    expect(r.clear).toBe(false);
+    if (!r.clear) expect(r.nextClearIso).toBe("2026-09-08T22:00:00Z");
+  });
+  it("studiob at Wed 11:50 ET is clear for its own reason (never ET-gated) — pair isolation", () => {
+    expect(windowState("2026-09-09T15:50:00Z", "studiob", "2026-09-09T13:50:00Z")).toEqual({ clear: true });
+  });
+  it("spacing resolving INTO the band lands at anchor+30 (inside the band) and clears there", () => {
+    // anchor 11:25 ET → anchor+30 = 11:55 ET, inside the band → that is the clear instant.
+    const r = windowState("2026-09-09T15:30:00Z", "client-asthetik", "2026-09-09T15:25:00Z");
+    expect(r.clear).toBe(false);
+    if (!r.clear) {
+      expect(r.nextClearIso).toBe("2026-09-09T15:55:00Z");
+      expect(r.reason).toMatch(/spacing/);
+    }
   });
 });
 
