@@ -188,7 +188,7 @@ import {
   type WorkflowRunLike,
 } from "./lib/restart-train-fire.js";
 import { isRollupClean, evaluateMergeReadiness, type RollupItem } from "./lib/automerge-classify.js";
-import { loadSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
+import { loadTrainSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
 import { parseArgs, parseTarget, CALENDAR_REPO, CALENDAR_ISSUE, type Flags } from "./lib/restart-train-args.js";
 
 const TICKET_REPOS = ["studio-b-ai/studiob", "studio-b-ai/client-asthetik"] as const;
@@ -787,7 +787,11 @@ async function maybePage(
   const readiness = evaluateMergeReadiness({
     state: prJson.state,
     isDraft: prJson.isDraft,
-    ciClean: isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(ticket.repo)),
+    // Train-scoped sanction (ops#235 amendment, 2026-09-02 22:18Z first-firing
+    // incident): the train's merge authority is Kevin's label + the window
+    // law (ops#265), not CI alone, so `train_repos:` by-design PR-event
+    // skips count as clean here without loosening the squasher's gate.
+    ciClean: isRollupClean(prJson.statusCheckRollup, loadTrainSanctionedSkips(ticket.repo)),
     mergeStateStatus: prJson.mergeStateStatus,
   });
 
