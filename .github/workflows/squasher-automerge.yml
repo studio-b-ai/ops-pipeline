@@ -99,6 +99,12 @@ on:
         required: true
       FLEET_APP_PRIVATE_KEY:
         required: true
+      # ops#260 leg 3: the enroll door's bearer (webhook-router SEAT_INBOX_TOKEN —
+      # a second store of the same value, #99). Optional so a caller without it
+      # still gates; the gate then prints [enroll-skipped] on every refusal rather
+      # than silently dropping the decision line (#464).
+      SEAT_INBOX_TOKEN:
+        required: false
 
 concurrency:
   group: squasher-automerge-${{ inputs.repo }}-${{ inputs.pr_number }}
@@ -155,6 +161,10 @@ jobs:
           GATE_SAFE_PATH_GLOBS: ${{ inputs.safe_path_globs }}
           GATE_REQUIRED_CHECKS: ${{ inputs.required_checks }}
           GATE_TRAIN_READY: ${{ inputs.train_ready }}
+          # ops#260 leg 3 — refusal → Kevin's decision block via webhook-router's
+          # enroll door. `vars.` resolves in the CALLER's repo (ops-pipeline).
+          WEBHOOK_ROUTER_URL: ${{ vars.WEBHOOK_ROUTER_URL }}
+          SEAT_INBOX_TOKEN: ${{ secrets.SEAT_INBOX_TOKEN }}
         run: |
           set -euo pipefail
           args=(--repo "$GATE_REPO" --pr "$GATE_PR_NUMBER")

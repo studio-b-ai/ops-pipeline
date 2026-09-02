@@ -102,6 +102,7 @@ import { loadSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
 import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
+import { enrollGateRefusal, resolveGateRefusals } from "./lib/gate-enroll.js";
 import {
   resolveAuthorityLogins,
   evaluateLabelAuthority,
@@ -344,6 +345,9 @@ async function evaluate(
     console.log(
       formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg, reasons: classification.reasons }),
     );
+    // ops#260 leg 3: line-cap / class-match refusals are Kevin's decisions — one line
+    // in the block; the helper itself skips wait-class legs and never throws.
+    await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg, reasons: classification.reasons, additions: prJson.additions, deletions: prJson.deletions });
     return;
   }
   const prClass = classification.prClass;
@@ -354,6 +358,7 @@ async function evaluate(
     console.log(
       formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "class-match", reasons: [reason] }),
     );
+    await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "class-match", reasons: [reason], additions: prJson.additions, deletions: prJson.deletions });
     return;
   }
 
@@ -406,6 +411,7 @@ async function evaluate(
           namedChecks.reasons.join("; "),
       );
       console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "named-checks", reasons: namedChecks.reasons }));
+      await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "named-checks", reasons: namedChecks.reasons, additions: prJson.additions, deletions: prJson.deletions });
       return;
     }
   }
@@ -427,6 +433,7 @@ async function evaluate(
         finalCheck.reasons.join("; ") + ` | review detail: ${review.detail}`,
     );
     console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "review", reasons: finalCheck.reasons }));
+    await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "review", reasons: [...finalCheck.reasons, `review detail: ${review.detail}`], additions: prJson.additions, deletions: prJson.deletions });
     return;
   }
 
@@ -592,6 +599,9 @@ async function evaluate(
   commentOnPr(repo, pr, receipt);
   console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "qualified" }));
   console.log(`[merged] pr-automerge-gate ${repo}#${pr}: all legs passed, squash-merged at ${prJson.headRefOid}.`);
+  // ops#260 leg 3: a PR refused at an earlier head and merged now must not leave a
+  // stale line in Kevin's block — resolve every key with this PR's prefix.
+  await resolveGateRefusals(repo, pr);
 }
 
 // ───────────────────────────── train:ready gate (A1) ─────────────────────────────

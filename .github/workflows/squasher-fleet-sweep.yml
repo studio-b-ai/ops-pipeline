@@ -185,3 +185,4 @@ jobs:
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
       FLEET_APP_ID: ${{ secrets.FLEET_APP_ID }}
       FLEET_APP_PRIVATE_KEY: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+      SEAT_INBOX_TOKEN: ${{ secrets.SEAT_INBOX_TOKEN }}
