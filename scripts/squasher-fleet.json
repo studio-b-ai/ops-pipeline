@@ -48,6 +48,14 @@
       "safe_path_globs": "src/**,tests/**",
       "required_checks": "Build & Check,Cross-System QA / API Tests (Vitest)",
       "train": true
+    },
+    {
+      "repo": "studio-b-ai/ops-pipeline",
+      "enabled_classes": "docs-comment",
+      "sensitive_path_patterns": "",
+      "safe_path_globs": "",
+      "required_checks": "",
+      "train": false
     }
   ]
 }
