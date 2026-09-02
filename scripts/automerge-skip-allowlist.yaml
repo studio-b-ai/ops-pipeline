@@ -31,6 +31,10 @@
 # isRollupClean(rollup, sanctionedSkips) in scripts/lib/automerge-classify.ts.
 # Editing this file is a normal PR to ops-pipeline (Mechanic-owned); callers
 # pick it up on their next sweep via the reusable workflow's @main checkout.
+#
+# Two independent top-level maps: `repos:` (squasher + train, the original
+# fail-closed set) and `train_repos:` (ADDITIVE, restart-train ONLY — see the
+# 2026-09-02 ruling below `client-asthetik` in `repos:`).
 
 repos:
   studio-b-ai/bolt-wms:
@@ -60,11 +64,35 @@ repos:
     #   build / 24h Dispatch Cap          (pipeline: same gate)
     # — are deliberately NOT sanctioned here, even though each was verified
     # event-gated from its origin/main if: condition. The committed-data-file
-    # test's Rule #320 ban on deploy/build-prefixed names is load-bearing:
-    # it keeps the unattended paths (squasher, restart-train) from ever
+    # test's Rule #320 ban on deploy/build-prefixed names is load-bearing for
+    # the SQUASHER's unattended code merges: it keeps that path from ever
     # green-lighting a Customization merge, which fires a Heritage app-pool
-    # restart (Rule #11). Customization merges are always Kevin-worded and
-    # interactive — use the per-merge `# CHECKS-GATE-EXEMPT: <reason>` form
-    # there. "build / build-bin" is additionally content-conditional
-    # (detect-code-change.code_changed) — the exact transitive-skip state
-    # the gate exists to catch.
+    # restart (Rule #11). Customization merges via the squasher are always
+    # Kevin-worded and interactive — use the per-merge
+    # `# CHECKS-GATE-EXEMPT: <reason>` form there. "build / build-bin" is
+    # additionally content-conditional (detect-code-change.code_changed) —
+    # the exact transitive-skip state the gate exists to catch.
+
+# RULING 2026-09-02 (amends the ops#235 ruling above; incident: the restart
+# train's 22:18Z first after-hours tick refused studio-b-ai/client-asthetik#359
+# citing these same 6 by-design PR-event skips): `train_repos:` is a SECOND,
+# NARROWER sanction set consumed ONLY by the restart train's
+# `loadTrainSanctionedSkips()` (never `loadSanctionedSkips()`, never the
+# squasher). The train's merge authority is Kevin's label + the window law
+# (ops#265) — CI is advisory there, not the sole gate the ops#235 ruling was
+# protecting against. Every name below was independently re-verified
+# event-gated from client-asthetik's origin/main `if:` conditions (deploy:
+# event_name != 'pull_request'; build / Pre-Deploy Qualification and
+# build / Validate on Staging and build / 24h Dispatch Cap: the caller pins
+# dry_run=true on every pull_request event; build / build-bin: content-gated
+# on detect-code-change.code_changed, which this repo's Customization-only
+# diffs never trip). A name listed here is STILL forbidden under `repos:`
+# above — the squasher ban is untouched.
+train_repos:
+  studio-b-ai/client-asthetik:
+    - "deploy"
+    - "build / Pre-Deploy Qualification"
+    - "build / Validate on Staging"
+    - "build / build-bin"
+    - "build / 24h Dispatch Cap"
+    - "Auto-qualifier (shadow)"
