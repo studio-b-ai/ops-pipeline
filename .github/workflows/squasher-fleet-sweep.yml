@@ -17,11 +17,11 @@ name: Squasher fleet auto-merge sweep
 #
 # Fleet registry: scripts/squasher-fleet.json — per-repo gate inputs migrated
 # verbatim from the retired callers. Enumeration covers `bugsquasher` PRs for every
-# fleet repo and `train:ready` PRs for repos whose retired caller had a train leg.
+# fleet repo and `queued` PRs for repos whose retired caller had a train leg.
 # Gate semantics are UNCHANGED (the gate script is zero-diff — every read/write
 # already flows through its gh() helper and takes --repo explicitly); only the cron
 # residence and the merging token change. Authority is unchanged too: train merges
-# still require a human's GraphQL-attributed `train:ready` label, and squasher
+# still require a human's GraphQL-attributed `queued` label, and squasher
 # merges still pass every classification leg.
 #
 # TRIGGER SHAPE mirrors automerge-sweep.yml (ops#23 lessons): scheduled sweep at
