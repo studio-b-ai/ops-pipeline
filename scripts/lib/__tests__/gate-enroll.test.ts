@@ -46,7 +46,7 @@ describe("buildEnrollment — the exact body the door receives", () => {
       group_label: "merge escalations",
       member_label: "wr#811",
       detail:
-        "https://github.com/studio-b-ai/webhook-router/pull/811 · line-cap: code-fix: totalChangedLines 186 > 150 · +171/−15 · reply `queued` to merge; `hold` to park",
+        "https://github.com/studio-b-ai/webhook-router/pull/811 · line-cap: code-fix: totalChangedLines 186 > 150 · +171/−15 · label `queued` to merge; `hold` to park",
       originator: "pr-automerge-gate",
     });
   });
@@ -147,6 +147,13 @@ describe("resolveGateRefusals — on merge, every head's line for the PR goes", 
     expect(url).toBe("https://wr.example/internal/cos/decisions/resolve");
     expect(JSON.parse(init.body)).toEqual({ key_prefix: "gate-refusal:studio-b-ai/webhook-router#811@", resolution: "merged" });
     expect(init.headers.Authorization).toBe("Bearer tok-123");
+  });
+
+  it("a hold resolves the same prefix as 'held' — the block stops asking once Kevin parked it", async () => {
+    const f = fetchSpy(200, { ok: true, resolved: 1 });
+    await resolveGateRefusals("o/r", 7, { env: ENV, fetchImpl: f, log: () => {}, resolution: "held" });
+    const [, init] = f.mock.calls[0] as [string, Init];
+    expect(JSON.parse(init.body)).toEqual({ key_prefix: "gate-refusal:o/r#7@", resolution: "held" });
   });
 
   it("no door → skipped loudly; door error → failed loudly; never throws", async () => {

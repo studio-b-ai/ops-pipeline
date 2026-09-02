@@ -111,6 +111,9 @@ import {
   postAuthorityReceipt,
   formatStaleLabelRemovalReceipt,
   hasAuthoritySnapshotDrifted,
+  QUEUED_LABEL,
+  HOLD_LABEL,
+  QUEUED_LABEL_PAIR,
   type AuthorityTimelineItem,
   type AuthoritySnapshot,
   type StaleLabelAuthorityVerdict,
@@ -325,6 +328,29 @@ async function evaluate(
     // "the gate threw" so squasher-health monitoring can tell the two apart.
     console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "truncation", reasons: [detail] }));
     return;
+  }
+
+  // ── Legs "held" / "queued" (ops-pipeline#260 leg 4): Kevin's word on a decision line. ──
+  // The machinery legs above (OPEN, not draft, mergeStateStatus CLEAN, CI rollup clean,
+  // complete file list) are the floor his word never lowers. Below them, `hold` parks
+  // the PR — nothing else runs, and its open decision line(s) resolve as held so the
+  // block stops asking. `queued`, when it is HIS sha-pinned, GraphQL-attributed label
+  // (the same predicate the restart train uses: roster human, not a bot, no commit
+  // after the label), overrides the DECISION-class legs (class-match / line-cap /
+  // named-checks / review) and merges sha-pinned. A stale `queued` (a push after his
+  // word) is stripped with a receipt and the PR falls through to the normal legs,
+  // which re-refuse and re-ask on the NEW head.
+  if (labels.includes(HOLD_LABEL)) {
+    const detail = `${HOLD_LABEL} is present — parked by Kevin's word; nothing merges while it stays`;
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}.`);
+    console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "held", reasons: [detail] }));
+    await resolveGateRefusals(repo, pr, { resolution: "held" });
+    return;
+  }
+  if (labels.includes(QUEUED_LABEL)) {
+    const outcome = await evaluateQueuedOverride(repo, pr, prJson, labels);
+    if (outcome !== "fall-through") return;
+    // fall-through: `queued` was present but not authorizing — the normal legs decide.
   }
 
   // ── Diff fetch + per-file classification (unchanged mechanics) — BEFORE any API spend ──
@@ -689,6 +715,135 @@ export interface TrainReadyOptions {
    *  intersected with MERGE_AUTHORITY_LOGINS via resolveAuthorityLogins (never wider
    *  than that ceiling). Omit for the default full roster (doc §3.2). */
   callerLogins?: readonly string[];
+}
+
+/**
+ * ops-pipeline#260 leg 4 — Kevin's `queued` as merge authority on a squasher-class PR.
+ *
+ * Runs ONLY after the machinery legs passed and ONLY when `queued` is present. Mirrors
+ * `evaluateTrainReadyInner` leg-for-leg where the legs are the same (authority →
+ * stale-strip with a fresh re-check → revalidate snapshot + authority → sha-pinned
+ * merge → write-only receipt), and deliberately SKIPS the train's independent-review
+ * leg: the decision line already told Kevin the refusal reason (a review FLAG
+ * included), and `queued` IS his answer to it. Returns:
+ *   - "merged"        all legs passed, merged at the evaluated sha, refusal lines resolved.
+ *   - "abort-cycle"   `queued` authorized but the cycle could not complete (revalidate
+ *                     drift, authority lost mid-cycle, or the merge call failed) — a
+ *                     `[gate-receipt] … leg=queued` line, NOT retried this run
+ *                     (Rules #109/#161); the next sweep re-evaluates from scratch.
+ *   - "fall-through"  `queued` present but not authorizing (stale → stripped with a
+ *                     receipt; bot / off-roster / truncated / no event → logged) —
+ *                     the caller continues into the normal decision legs.
+ * Never throws: any unexpected error resolves to "fall-through" with a loud line, so a
+ * GraphQL hiccup can never turn Kevin's word into a merge OR block the normal path.
+ */
+async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, labels: string[]): Promise<"merged" | "abort-cycle" | "fall-through"> {
+  try {
+    const authorityLogins = resolveAuthorityLogins();
+    const timelineFetch = fetchAuthorityTimeline(repo, pr);
+    const verdict = evaluateLabelAuthority({
+      currentLabels: labels,
+      timeline: timelineFetch.timeline,
+      authorityLogins,
+      truncated: timelineFetch.truncated,
+      labels: QUEUED_LABEL_PAIR,
+    });
+
+    if (!verdict.authorized) {
+      if (verdict.reason === "stale-label") {
+        // Same fresh re-check before removal as the train path (labels first, then
+        // timeline — see evaluateTrainReadyInner for why that order).
+        const recheckPr = fetchPr(repo, pr);
+        const recheckTimeline = fetchAuthorityTimeline(repo, pr);
+        const recheck = evaluateLabelAuthority({
+          currentLabels: recheckPr.labels.map((l) => l.name),
+          timeline: recheckTimeline.timeline,
+          authorityLogins,
+          truncated: recheckTimeline.truncated,
+          labels: QUEUED_LABEL_PAIR,
+        });
+        if (!recheck.authorized && recheck.reason === "stale-label") {
+          removeStaleReadyLabel(repo, pr, QUEUED_LABEL);
+          postAuthorityReceipt(repo, pr, formatStaleLabelRemovalReceipt(recheck as StaleLabelAuthorityVerdict, prJson.headRefOid, QUEUED_LABEL));
+          console.log(`[queued] pr-automerge-gate ${repo}#${pr}: stale ${QUEUED_LABEL} removed — ${recheck.detail}`);
+        } else {
+          console.log(`[queued] pr-automerge-gate ${repo}#${pr}: stale on first read but not on the fresh re-check (${recheck.authorized ? "now authorized" : recheck.reason}) — nothing removed this cycle`);
+        }
+        return "fall-through";
+      }
+      console.log(`[queued] pr-automerge-gate ${repo}#${pr}: ${QUEUED_LABEL} present but not authorizing (${verdict.reason}: ${verdict.detail}) — normal legs decide`);
+      return "fall-through";
+    }
+
+    // ── Revalidate (train shape): snapshot drift, then a fresh authority re-evaluation ──
+    const before: AuthoritySnapshot = { labels, headRefOid: prJson.headRefOid, state: prJson.state, mergeStateStatus: prJson.mergeStateStatus };
+    const revalidatePr = fetchPr(repo, pr);
+    const after: AuthoritySnapshot = {
+      labels: revalidatePr.labels.map((l) => l.name),
+      headRefOid: revalidatePr.headRefOid,
+      state: revalidatePr.state,
+      mergeStateStatus: revalidatePr.mergeStateStatus,
+    };
+    if (hasAuthoritySnapshotDrifted(before, after)) {
+      const detail = `queued: PR state changed between evaluation and merge (before: ${JSON.stringify(before)}, after: ${JSON.stringify(after)}) — aborting this cycle, not retrying`;
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "queued", reasons: [detail] }));
+      return "abort-cycle";
+    }
+    const revalidateTimeline = fetchAuthorityTimeline(repo, pr);
+    const revalidateVerdict = evaluateLabelAuthority({
+      currentLabels: [...after.labels],
+      timeline: revalidateTimeline.timeline,
+      authorityLogins,
+      truncated: revalidateTimeline.truncated,
+      labels: QUEUED_LABEL_PAIR,
+    });
+    if (!revalidateVerdict.authorized) {
+      const detail = `queued: fresh authority re-evaluation no longer authorizes (${revalidateVerdict.reason}: ${revalidateVerdict.detail}) — aborting this cycle, not retrying`;
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "queued", reasons: [detail] }));
+      return "abort-cycle";
+    }
+
+    // ── SHA-pinned merge (same TOCTOU contract as every other merge in this file) ──
+    try {
+      mergePr(repo, pr, prJson.headRefOid);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const detail = `queued: every leg passed but the merge call failed (TOCTOU race the SHA pin rejected, or a branch-protection block) — NOT retried this run: ${message}`;
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "queued", reasons: [detail] }));
+      return "abort-cycle";
+    }
+
+    const actor = revalidateVerdict.authorizingEvent.actorLogin;
+    commentOnPr(
+      repo,
+      pr,
+      [
+        "**`queued` — MERGED on Kevin's word** (ops-pipeline#260 leg 4)",
+        "",
+        "| Leg | Result |",
+        "|---|---|",
+        "| machinery: OPEN, not draft, mergeStateStatus CLEAN, CI rollup clean, complete file list | ✅ |",
+        `| authority (\`queued\` by \`${actor}\`, timeline position ${revalidateVerdict.authorizingEvent.position}, no commit after it) | ✅ |`,
+        "| decision legs (class-match / line-cap / named-checks / review) | ⏭ overridden by the label — the decision line carried the refusal reason |",
+        "| revalidate: PR snapshot + authority timeline | ✅ no drift |",
+        "",
+        `Evaluated sha: \`${prJson.headRefOid}\` (merge was SHA-pinned via \`--match-head-commit\`).`,
+        "",
+        "This comment is a write-only receipt — no automation reads it back.",
+      ].join("\n"),
+    );
+    console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "qualified" }));
+    console.log(`[merged] pr-automerge-gate ${repo}#${pr}: queued by ${actor}, squash-merged at ${prJson.headRefOid}.`);
+    await resolveGateRefusals(repo, pr);
+    return "merged";
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.log(`[queued] pr-automerge-gate ${repo}#${pr}: unexpected error while evaluating ${QUEUED_LABEL} (${message}) — normal legs decide this cycle`);
+    return "fall-through";
+  }
 }
 
 function logTrainGateLine(repo: string, pr: number, outcome: TrainReadyOutcome, detail: string): void {

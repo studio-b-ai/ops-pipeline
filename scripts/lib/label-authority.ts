@@ -49,6 +49,24 @@ import { execFileSync } from "node:child_process";
 export const TRAIN_READY_LABEL = "train:ready";
 export const TRAIN_HOLD_LABEL = "train:hold";
 
+/**
+ * ops-pipeline#260 leg 4 — the squasher-class twin of the train pair. Kevin's
+ * `queued` on a PR the gate REFUSED (line cap, sensitive path, review finding,
+ * named check) is his word on the decision line: the sweep merges it, sha-pinned
+ * to the head he labeled, through the SAME predicate below (roster human, not a
+ * bot, no commit after the label). `hold` parks it — hold wins, always.
+ */
+export const QUEUED_LABEL = "queued";
+export const HOLD_LABEL = "hold";
+
+/** The (ready, hold) label pair the predicate evaluates. Defaults = the train pair. */
+export interface AuthorityLabelPair {
+  ready: string;
+  hold: string;
+}
+export const TRAIN_LABEL_PAIR: AuthorityLabelPair = { ready: TRAIN_READY_LABEL, hold: TRAIN_HOLD_LABEL };
+export const QUEUED_LABEL_PAIR: AuthorityLabelPair = { ready: QUEUED_LABEL, hold: HOLD_LABEL };
+
 // ───────────────────────────── authority roster (doc §3.2) ─────────────────────────────
 
 /**
@@ -127,6 +145,10 @@ export interface AuthorityInput {
    *  window (an earlier commit, an earlier relabel) could invalidate any conclusion
    *  drawn from inside it. */
   truncated: boolean;
+  /** Which (ready, hold) pair to evaluate. Omitted = the train pair — every
+   *  pre-existing caller and test is unchanged. The squasher gate passes
+   *  `QUEUED_LABEL_PAIR` (ops-pipeline#260 leg 4). */
+  labels?: AuthorityLabelPair;
 }
 
 // ───────────────────────────── verdict ─────────────────────────────
@@ -191,16 +213,18 @@ export interface StaleLabelAuthorityVerdict {
  */
 export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict {
   const { currentLabels, timeline, authorityLogins, truncated } = input;
+  const READY = input.labels?.ready ?? TRAIN_READY_LABEL;
+  const HOLD = input.labels?.hold ?? TRAIN_HOLD_LABEL;
 
   // ── Step 1: label state, read DIRECTLY from currentLabels (no timeline dependency
   // at all) — checked first because it's the cheapest possible check and because
   // "hold wins, always" must win the REPORTED REASON too, not just the boolean
-  // outcome, even in a (should-never-happen) state where train:ready is also absent.
-  if (currentLabels.includes(TRAIN_HOLD_LABEL)) {
-    return { authorized: false, reason: "hold-present", detail: `${TRAIN_HOLD_LABEL} is present on the PR — hold wins, always, regardless of any other leg.` };
+  // outcome, even in a (should-never-happen) state where the ready label is also absent.
+  if (currentLabels.includes(HOLD)) {
+    return { authorized: false, reason: "hold-present", detail: `${HOLD} is present on the PR — hold wins, always, regardless of any other leg.` };
   }
-  if (!currentLabels.includes(TRAIN_READY_LABEL)) {
-    return { authorized: false, reason: "no-ready-label", detail: `${TRAIN_READY_LABEL} is not present in the PR's current labels.` };
+  if (!currentLabels.includes(READY)) {
+    return { authorized: false, reason: "no-ready-label", detail: `${READY} is not present in the PR's current labels.` };
   }
 
   // ── Timeline data-integrity gate, BEFORE any reasoning about its contents (Rule
@@ -222,7 +246,7 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
     return {
       authorized: false,
       reason: "no-authorizing-event",
-      detail: `${TRAIN_READY_LABEL} is present on the PR but the timeline returned zero LABELED/UNLABELED/commit/force-push events to attribute it to.`,
+      detail: `${READY} is present on the PR but the timeline returned zero LABELED/UNLABELED/commit/force-push events to attribute it to.`,
     };
   }
 
@@ -232,7 +256,7 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
   // an earlier one; an intervening unlabel-then-relabel is exactly "last event wins".
   let currentApplier: AuthorityTimelineItem | null = null;
   for (const item of timeline) {
-    if (item.label !== TRAIN_READY_LABEL) continue;
+    if (item.label !== READY) continue;
     if (item.type === "LABELED") {
       currentApplier = item;
     } else if (item.type === "UNLABELED") {
@@ -249,7 +273,7 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
     return {
       authorized: false,
       reason: "no-authorizing-event",
-      detail: `${TRAIN_READY_LABEL} is present on the PR but no LabeledEvent for it survives to the end of the timeline walk (every LabeledEvent found was superseded by a later UnlabeledEvent).`,
+      detail: `${READY} is present on the PR but no LabeledEvent for it survives to the end of the timeline walk (every LabeledEvent found was superseded by a later UnlabeledEvent).`,
     };
   }
 
@@ -263,7 +287,7 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
     return {
       authorized: false,
       reason: "bot-actor",
-      detail: `the authorizing ${TRAIN_READY_LABEL} LabeledEvent (position ${currentApplier.position}) was applied by "${actorLogin}", a bot actor — bots are refused categorically, roster membership is irrelevant.`,
+      detail: `the authorizing ${READY} LabeledEvent (position ${currentApplier.position}) was applied by "${actorLogin}", a bot actor — bots are refused categorically, roster membership is irrelevant.`,
     };
   }
 
@@ -271,7 +295,7 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
     return {
       authorized: false,
       reason: "unauthorized-actor",
-      detail: `the authorizing ${TRAIN_READY_LABEL} LabeledEvent (position ${currentApplier.position}) was applied by "${actorLogin}", which is not in the effective authority roster [${authorityLogins.join(", ")}].`,
+      detail: `the authorizing ${READY} LabeledEvent (position ${currentApplier.position}) was applied by "${actorLogin}", which is not in the effective authority roster [${authorityLogins.join(", ")}].`,
     };
   }
 
@@ -289,7 +313,7 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
     return {
       authorized: false,
       reason: "stale-label",
-      detail: `a ${staleItem.type} event at position ${staleItem.position} sits AFTER the authorizing ${TRAIN_READY_LABEL} LabeledEvent at position ${currentApplier.position} (applied by "${actorLogin}") — the code changed after authorization was granted.`,
+      detail: `a ${staleItem.type} event at position ${staleItem.position} sits AFTER the authorizing ${READY} LabeledEvent at position ${currentApplier.position} (applied by "${actorLogin}") — the code changed after authorization was granted.`,
     };
   }
 
@@ -582,8 +606,8 @@ export function fetchAuthorityTimeline(repo: string, prNumber: number): { timeli
  * leg). Called by `evaluateTrainReady` when `evaluateLabelAuthority` returns
  * `reason: "stale-label"` — never merges, never touches any other label.
  */
-export function removeStaleReadyLabel(repo: string, prNumber: number): void {
-  gh(["pr", "edit", String(prNumber), "--repo", repo, "--remove-label", TRAIN_READY_LABEL]);
+export function removeStaleReadyLabel(repo: string, prNumber: number, label: string = TRAIN_READY_LABEL): void {
+  gh(["pr", "edit", String(prNumber), "--repo", repo, "--remove-label", label]);
 }
 
 /**
@@ -603,14 +627,14 @@ export function postAuthorityReceipt(repo: string, prNumber: number, body: strin
  * Pure (no I/O) — `evaluateTrainReady` calls this to build the body, then passes the
  * result to `postAuthorityReceipt`.
  */
-export function formatStaleLabelRemovalReceipt(verdict: StaleLabelAuthorityVerdict, headRefOid: string): string {
+export function formatStaleLabelRemovalReceipt(verdict: StaleLabelAuthorityVerdict, headRefOid: string, label: string = TRAIN_READY_LABEL): string {
   return [
-    "**`train:ready` removed — stale label** (label-authority v2, ops#190 rung A1)",
+    `**\`${label}\` removed — stale label** (label-authority v2, ops#190 rung A1)`,
     "",
     verdict.detail,
     "",
     `Evaluated sha: \`${headRefOid}\`.`,
     "",
-    "This comment is a write-only receipt — no automation reads it back. Re-apply `train:ready` after reviewing the new head to requeue.",
+    `This comment is a write-only receipt — no automation reads it back. Re-apply \`${label}\` after reviewing the new head to requeue.`,
   ].join("\n");
 }
