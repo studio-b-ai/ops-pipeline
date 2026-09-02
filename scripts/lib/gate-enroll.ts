@@ -98,9 +98,13 @@ export function buildEnrollment(r: GateRefusal): EnrollmentBody {
     group_key: MERGE_ESCALATIONS_GROUP_KEY,
     group_label: MERGE_ESCALATIONS_GROUP_LABEL,
     member_label: `${shortRepo(r.repo)}#${r.pr}`,
+    // The verb names what WORKS today: the `queued` / `hold` LABEL on the PR is the
+    // authority the gate reads (leg 4). "reply `queued`" arrives when the envelope's
+    // reply→label path lands (Dispatcher seat) — until then that wording would be
+    // prose broader than its signal (#412).
     detail:
       `https://github.com/${r.repo}/pull/${r.pr} · ${r.leg}: ${reason} · +${r.additions}/−${r.deletions}` +
-      " · reply `queued` to merge; `hold` to park",
+      " · label `queued` to merge; `hold` to park",
     originator: GATE_ORIGINATOR,
   };
 }
@@ -183,16 +187,21 @@ export type ResolveOutcome = { outcome: "resolved"; count: number } | { outcome:
  * On merge: resolve EVERY refusal line this PR ever enrolled (any head sha) so
  * nothing stale survives in Kevin's block. Never throws; loud on failure.
  */
-export async function resolveGateRefusals(repo: string, pr: number, opts: Opts = {}): Promise<ResolveOutcome> {
+export async function resolveGateRefusals(
+  repo: string,
+  pr: number,
+  opts: Opts & { resolution?: "merged" | "held" } = {},
+): Promise<ResolveOutcome> {
   const log = opts.log ?? ((l: string) => console.log(l));
   const door = doorEnvFrom(opts.env);
   const prefix = enrollmentKeyPrefixFor(repo, pr);
+  const resolution = opts.resolution ?? "merged";
   if (!door) {
     log(`[enroll-resolve-skipped] ${repo}#${pr}: no enroll door configured — any open decision line stays until resolved by hand`);
     return { outcome: "skipped", reason: "door not configured" };
   }
   try {
-    const res = await postToDoor(door, "/internal/cos/decisions/resolve", { key_prefix: prefix, resolution: "merged" }, opts.fetchImpl ?? defaultFetch());
+    const res = await postToDoor(door, "/internal/cos/decisions/resolve", { key_prefix: prefix, resolution }, opts.fetchImpl ?? defaultFetch());
     if (res.httpStatus !== 200) {
       const text = (await res.text()).slice(0, 200);
       log(`[enroll-resolve-failed] ${repo}#${pr}: door HTTP ${res.httpStatus} ${text}`);
@@ -204,7 +213,7 @@ export async function resolveGateRefusals(repo: string, pr: number, opts: Opts =
     } catch {
       /* accepted */
     }
-    log(`[enroll-resolve] ${repo}#${pr}: resolved ${count} decision line(s) with prefix ${prefix}`);
+    log(`[enroll-resolve] ${repo}#${pr}: resolved ${count} decision line(s) with prefix ${prefix} as ${resolution}`);
     return { outcome: "resolved", count };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

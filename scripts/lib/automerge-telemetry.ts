@@ -49,6 +49,12 @@ export type GateReceiptVerdict = "qualified" | "missed" | "candidate";
  *                  in-flight / not strictly SUCCESS on the head commit.
  * - `review`       the independent review returned anything other than exactly CLEAN
  *                  (including any API error — fail-closed).
+ * - `held`         (ops-pipeline#260 leg 4) Kevin's `hold` label is present — parked
+ *                  by his word; nothing merges while it stays. Not a decision ask.
+ * - `queued`       (ops-pipeline#260 leg 4) Kevin's `queued` label was present and
+ *                  authorizing, but the cycle aborted before/at the merge (revalidate
+ *                  drift, or the sha-pinned merge call itself failed). Never retried
+ *                  same-cycle; the next sweep re-evaluates.
  * - `other`        UNFORESEEN ONLY. The gate threw. Investigate.
  */
 export type GateReceiptLeg =
@@ -59,6 +65,8 @@ export type GateReceiptLeg =
   | "eligibility"
   | "named-checks"
   | "review"
+  | "held"
+  | "queued"
   | "other";
 
 export interface GateReceiptInput {

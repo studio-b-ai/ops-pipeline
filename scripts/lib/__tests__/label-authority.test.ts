@@ -6,6 +6,9 @@ import {
   resolveAuthorityLogins,
   TRAIN_HOLD_LABEL,
   TRAIN_READY_LABEL,
+  QUEUED_LABEL,
+  HOLD_LABEL,
+  QUEUED_LABEL_PAIR,
   evaluateLabelAuthority,
   type AuthorityInput,
   type AuthorityTimelineItem,
@@ -173,6 +176,64 @@ describe("evaluateLabelAuthority", () => {
       baseAuthorityInput({ timeline: [commitAt(0), commitAt(1), forcePushAt(2), labeledBy("kbibelhausen", 3)] }),
     );
     expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 3 } });
+  });
+});
+
+// ───────────────────────────── QUEUED_LABEL_PAIR (ops-pipeline#260 leg 4) ─────────────────────────────
+
+describe("evaluateLabelAuthority — the queued/hold pair (ops-pipeline#260 leg 4)", () => {
+  const queuedInput = (overrides: Partial<AuthorityInput> = {}): AuthorityInput =>
+    baseAuthorityInput({
+      currentLabels: [QUEUED_LABEL],
+      timeline: [commitAt(0), labeledBy("kbibelhausen", 1, QUEUED_LABEL)],
+      labels: QUEUED_LABEL_PAIR,
+      ...overrides,
+    });
+
+  it("authorizes Kevin's `queued` with no later commit — the same predicate, a different pair", () => {
+    expect(evaluateLabelAuthority(queuedInput())).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1 } });
+  });
+
+  it("`hold` wins over `queued`, always, and wins the REASON", () => {
+    const verdict = evaluateLabelAuthority(queuedInput({ currentLabels: [QUEUED_LABEL, HOLD_LABEL] }));
+    expect(verdict).toMatchObject({ authorized: false, reason: "hold-present" });
+    expect((verdict as { detail: string }).detail).toContain(HOLD_LABEL);
+  });
+
+  it("a push after Kevin's `queued` is stale — the code changed after his word", () => {
+    const verdict = evaluateLabelAuthority(queuedInput({ timeline: [labeledBy("kbibelhausen", 0, QUEUED_LABEL), commitAt(1)] }));
+    expect(verdict).toMatchObject({ authorized: false, reason: "stale-label" });
+  });
+
+  it("a bot's `queued` never authorizes, roster or not", () => {
+    const verdict = evaluateLabelAuthority(queuedInput({ timeline: [labeledBy("studiob-fleet-bot[bot]", 0, QUEUED_LABEL)] }));
+    expect(verdict).toMatchObject({ authorized: false, reason: "bot-actor" });
+  });
+
+  it("the pairs are isolated: a `queued` event is invisible to the TRAIN evaluation and vice-versa", () => {
+    // Train pair: `queued` events are noise — the train:ready authorization stands.
+    const train = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: [TRAIN_READY_LABEL, QUEUED_LABEL],
+        timeline: [commitAt(0), labeledBy("kbibelhausen", 1), labeledBy("studiob-fleet-bot[bot]", 2, QUEUED_LABEL)],
+      }),
+    );
+    expect(train).toMatchObject({ authorized: true, authorizingEvent: { position: 1 } });
+    // Queued pair: train:ready present but `queued` absent → no-ready-label for THIS pair.
+    const queued = evaluateLabelAuthority(queuedInput({ currentLabels: [TRAIN_READY_LABEL] }));
+    expect(queued).toMatchObject({ authorized: false, reason: "no-ready-label" });
+    expect((queued as { detail: string }).detail).toContain(QUEUED_LABEL);
+  });
+
+  it("the omitted pair is the train pair — every pre-existing caller is unchanged", () => {
+    expect(evaluateLabelAuthority(baseAuthorityInput())).toEqual(evaluateLabelAuthority(baseAuthorityInput({ labels: { ready: TRAIN_READY_LABEL, hold: TRAIN_HOLD_LABEL } })));
+  });
+
+  it("formatStaleLabelRemovalReceipt names the label it removed", () => {
+    const verdict: StaleLabelAuthorityVerdict = { authorized: false, reason: "stale-label", detail: "d" };
+    expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL)).toContain("**`queued` removed — stale label**");
+    expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL)).toContain("Re-apply `queued`");
+    expect(formatStaleLabelRemovalReceipt(verdict, "abc")).toContain("**`train:ready` removed — stale label**");
   });
 });
 
