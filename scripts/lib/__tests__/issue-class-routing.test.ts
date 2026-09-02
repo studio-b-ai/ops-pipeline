@@ -122,8 +122,14 @@ describe("committed scripts/issue-class-routing.yaml", () => {
   });
 
   it("carries exactly the ruled veto set and the lane: prefix", () => {
-    expect([...committed.vetoes].sort()).toEqual(["awaiting-approval", "needs-human", "needs-triage", "wontfix"]);
+    expect([...committed.vetoes].sort()).toEqual(["needs-human", "needs-triage", "wontfix"]);
     expect(committed.neverPrefixes).toEqual(["lane:"]);
+  });
+
+  it("`awaiting-approval` is NOT a veto in the committed table — the Zoom 👍 gate is retired (wr#837), those issues dispatch", () => {
+    // Both verdicts (#471): the retired label dispatches; a real veto beside it still wins.
+    expect(routeIssue(["enhancement", "awaiting-approval"], committed)).toMatchObject({ decision: "dispatch", worker: "enhancement-worker" });
+    expect(routeIssue(["enhancement", "awaiting-approval", "needs-human"], committed)).toMatchObject({ decision: "never" });
   });
 
   it("routes the four ruled shapes as ruled", () => {
