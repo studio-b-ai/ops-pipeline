@@ -45,7 +45,7 @@
       "repo": "studio-b-ai/webhook-router",
       "enabled_classes": "docs-comment,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/,(^|/)(auth|credential|secret|token)",
-      "safe_path_globs": "src/**",
+      "safe_path_globs": "src/**,tests/**",
       "required_checks": "Build & Check,Cross-System QA / API Tests (Vitest)",
       "train": true
     }
