@@ -182,6 +182,7 @@ import {
   pickLatestRun,
   TRAIN_IN_FLIGHT_LABEL,
   TRAIN_READY_LABEL,
+  TRAIN_HOLD_LABEL,
   type CaRunClassification,
   type StudiobDeployClassification,
   type WorkflowJobLike,
@@ -204,7 +205,8 @@ const MACHINERY_REPO = "studio-b-ai/ops-pipeline";
 const MACHINERY_LABEL = "restart-train";
 /**
  * Exact canonical GitHub label metadata (Kevin's 2026-08-29 label consolidation — "if my only
- * label is train:ready then I want it to be that way in github"). `ensureLabel` is
+ * label is train:ready then I want it to be that way in github" — the label has since been
+ * RENAMED to `queued` by his 2026-09-02 one-vocabulary ruling; the principle stands). `ensureLabel` is
  * `gh label create --force`, which OVERWRITES description/color on every call — these strings
  * must match what lives on GitHub or every tick flip-flops the label metadata. Both fit under
  * GITHUB_LABEL_DESCRIPTION_MAX (100) — `assertLabelDescription` throws at build otherwise.
@@ -248,8 +250,8 @@ async function checkHold(target: { repo: string; number: number }): Promise<{ he
     throw classifyReadError(err, "issues:read (hold-label check)");
   }
   const { labels } = JSON.parse(labelsJson) as { labels: Array<{ name: string }> };
-  const holdLabeled = labels.some((l) => l.name === "train:hold");
-  if (holdLabeled) return { held: true, reason: "train:hold label on --target" };
+  const holdLabeled = labels.some((l) => l.name === TRAIN_HOLD_LABEL);
+  if (holdLabeled) return { held: true, reason: `${TRAIN_HOLD_LABEL} label on --target` };
   // Rung 3: any open restart-train machinery issue = the train is locked pending a human
   // diagnosis (#161/#165 — closing the issue releases it). The probe fails CLOSED: an unknown
   // lock state must never fire a merge.
@@ -402,7 +404,7 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
         "--repo",
         repo,
         "--label",
-        "train:ready",
+        TRAIN_READY_LABEL,
         "--state",
         "open",
         "--json",
@@ -411,7 +413,7 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
         "50",
       ]);
     } catch (err) {
-      throw classifyReadError(err, `pull_requests:read (${repo} train:ready list)`);
+      throw classifyReadError(err, `pull_requests:read (${repo} ${TRAIN_READY_LABEL} list)`);
     }
     const prs = JSON.parse(prsJson) as Array<{
       number: number;
@@ -450,11 +452,11 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
             removeStaleReadyLabel(repo, pr.number);
             postAuthorityReceipt(repo, pr.number, formatStaleLabelRemovalReceipt(staleVerdict, pr.headRefOid));
             console.log(
-              `[restart-train] ${repo}#${pr.number}: stale train:ready removed + receipt posted — ${verdict.detail}`,
+              `[restart-train] ${repo}#${pr.number}: stale ${TRAIN_READY_LABEL} removed + receipt posted — ${verdict.detail}`,
             );
           } else {
             console.log(
-              `[restart-train] ${repo}#${pr.number}: stale train:ready (--post not set, not removing/posting) — ${verdict.detail}`,
+              `[restart-train] ${repo}#${pr.number}: stale ${TRAIN_READY_LABEL} (--post not set, not removing/posting) — ${verdict.detail}`,
             );
           }
         } else {
@@ -1525,7 +1527,7 @@ async function main(): Promise<void> {
   if (tickets.length !== rawTickets.length) {
     console.log(`[restart-train] clamp: dropped ${rawTickets.length - tickets.length} ticket(s) labeled after now=${flags.now}`);
   }
-  console.log(`[restart-train] ${tickets.length} train:ready ticket(s) with valid label authority`);
+  console.log(`[restart-train] ${tickets.length} ${TRAIN_READY_LABEL} ticket(s) with valid label authority`);
 
   const queue = orderQueue(tickets);
   for (const entry of queue) {

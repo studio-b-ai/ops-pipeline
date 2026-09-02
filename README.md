@@ -296,7 +296,7 @@ the real watermark has already swept everything genuinely new.
 
 Rung 0 of a multi-rung build (Rule #279's second, label-gated exception; Kevin LOCKED
 option A 2026-08-19). A 5-minute cron computes the fleet's restart clearance anchor,
-the window law, and the FIFO `train:ready` queue across `studiob` + `client-asthetik`,
+the window law, and the FIFO `queued` queue across `studiob` + `client-asthetik`,
 then posts `PLAN (dry-run)` lines to `--target` (default `ops-pipeline#172`). This rung
 fires, merges, and labels **nothing** — `--fire` throws by design, and the job itself is
 gated `if: vars.HERITAGE_TRAIN_ENABLED == 'true'`, a repo variable that does not exist

@@ -43,7 +43,7 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "Optional: evaluate ONLY this PR number instead of sweeping every open train:ready PR."
+        description: "Optional: evaluate ONLY this PR number instead of sweeping every open `queued` PR (the train label — one vocabulary, 9/02)."
         required: false
         type: string
 
@@ -91,17 +91,18 @@ jobs:
           # them here would just hide refusal receipts). Re-list at evaluation time
           # (Rule #182); --limit 100 because gh pr list defaults to 30 and
           # truncates silently (Rule #331).
-          ALL=$(gh pr list --repo "$REPO" --state open --label "train:ready" --limit 100 --json number --jq '[.[].number]')
+          # Label = `queued` (Kevin's 2026-09-02 one-vocabulary rename of train:ready; scripts/lib/label-authority.ts).
+          ALL=$(gh pr list --repo "$REPO" --state open --label "queued" --limit 100 --json number --jq '[.[].number]')
           N=$(printf '%s' "$ALL" | jq 'length')
-          echo "Sweep found ${N} open train:ready PR(s)."
+          echo "Sweep found ${N} open queued PR(s)."
           if [ "$N" -gt "$MAX_FANOUT" ]; then
-            echo "::warning::train:ready sweep capped at ${MAX_FANOUT} of ${N} open labeled PRs; $((N - MAX_FANOUT)) NOT evaluated this cycle (re-listed next sweep)."
+            echo "::warning::queued sweep capped at ${MAX_FANOUT} of ${N} open labeled PRs; $((N - MAX_FANOUT)) NOT evaluated this cycle (re-listed next sweep)."
             ALL=$(printf '%s' "$ALL" | jq -c ".[:${MAX_FANOUT}]")
           fi
           echo "prs=$(printf '%s' "$ALL" | jq -c .)" >> "$GITHUB_OUTPUT"
 
   evaluate:
-    name: "Evaluate train:ready gate"
+    name: "Evaluate queued (train) gate"
     needs: determine-prs
     # Implicit success() is the wanted semantic (#320 considered): a failed
     # listing must not fall through into evaluation.

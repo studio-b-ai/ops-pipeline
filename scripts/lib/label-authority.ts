@@ -46,15 +46,25 @@ import { execFileSync } from "node:child_process";
 
 // ───────────────────────────── label constants ─────────────────────────────
 
-export const TRAIN_READY_LABEL = "train:ready";
-export const TRAIN_HOLD_LABEL = "train:hold";
+/**
+ * ONE operator vocabulary (Kevin's ruled rename, 2026-09-02 ~04:0xZ "go", recorded in the 8/19
+ * restart-train canon; live-evidenced the same day when he labeled studiob#631 `reviewed`, removed
+ * it 35s later and applied `queued` — "do I need to be applying reviewed or queued? let's get the
+ * language correct"): `queued` = merge-and-deploy it · `hold` = park it · `candidate` (was
+ * train:candidate) · `underway` (was train:in-flight). The TRAIN pair and the squasher gate's
+ * pair are therefore the SAME labels — a `queued` on a client-asthetik ticket is read by the
+ * restart train (window law at MERGE); a `queued` on a squasher PR in a fleet repo is read by
+ * the squasher gate (window law at DEPLOY for studiob, #480). The constant NAMES stay so every
+ * call site reads as before; only the values moved.
+ */
+export const TRAIN_READY_LABEL = "queued";
+export const TRAIN_HOLD_LABEL = "hold";
 
 /**
- * ops-pipeline#260 leg 4 — the squasher-class twin of the train pair. Kevin's
- * `queued` on a PR the gate REFUSED (line cap, sensitive path, review finding,
- * named check) is his word on the decision line: the sweep merges it, sha-pinned
- * to the head he labeled, through the SAME predicate below (roster human, not a
- * bot, no commit after the label). `hold` parks it — hold wins, always.
+ * ops-pipeline#260 leg 4 — the squasher-class pair. Kevin's `queued` on a PR the gate REFUSED
+ * (line cap, sensitive path, review finding, named check) is his word on the decision line: the
+ * sweep merges it, sha-pinned to the head he labeled, through the SAME predicate below (roster
+ * human, not a bot, no commit after the label). `hold` parks it — hold wins, always.
  */
 export const QUEUED_LABEL = "queued";
 export const HOLD_LABEL = "hold";

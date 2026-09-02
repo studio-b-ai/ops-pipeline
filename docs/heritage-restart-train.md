@@ -17,9 +17,9 @@ A GHA cron (`.github/workflows/heritage-restart-train.yml`, every 5 minutes, plu
   on client-asthetik#280.
 - **Window law** — restarts must land ≥30 min apart · client-asthetik tickets only fire outside
   06:00–18:00 America/New_York Mon–Fri (mirrors the acuops-deploy.yml business-hours gate) ·
-  nothing 05:45–08:15Z (batch blackout) · one ticket in flight at a time · no hold (`train:hold`
+  nothing 05:45–08:15Z (batch blackout) · one ticket in flight at a time · no hold (`hold`
   label on `ops-pipeline#172`, or env `HERITAGE_TRAIN_HOLD=1`).
-- **FIFO queue** — `train:ready`-labeled PRs across `studiob` + `client-asthetik`, head-pinned at
+- **FIFO queue** — `queued`-labeled PRs across `studiob` + `client-asthetik`, head-pinned at
   label time (a push after labeling invalidates the pin); `train:after` reorders;
   `train:consolidate` rides with the ticket ahead of it.
 - Posts `PLAN (dry-run)` lines to `--target` (default `studio-b-ai/ops-pipeline#172` — **never**
@@ -27,16 +27,16 @@ A GHA cron (`.github/workflows/heritage-restart-train.yml`, every 5 minutes, plu
 
 ### Rung 1 Leg A — label authority (kills D1)
 
-`train:ready` authority no longer comes from parsing a comment's text/timestamp — it comes from
+`queued` authority no longer comes from parsing a comment's text/timestamp — it comes from
 GitHub-attributed GraphQL timeline events (`scripts/lib/label-authority.ts`, the `timelineItems`
 query), which the labeler cannot spoof by editing a comment body after the fact:
 
 - AUTHORIZED builds a `Ticket` whose `labeledAt` is the authorizing `LabeledEvent`'s server
   `createdAt`, and whose `pinnedHeadSha` is the head observed at this same fetch (AUTHORIZED
   already certifies no push landed after labeling).
-- STALE (a push landed after the label) strips the `train:ready` label and posts a write-only
+- STALE (a push landed after the label) strips the `queued` label and posts a write-only
   receipt comment **on the ticket's own PR** — never silently excluded like v1's D1 behavior.
-- Any other refusal (bot actor, unauthorized actor, `train:hold` present, no ready label,
+- Any other refusal (bot actor, unauthorized actor, `hold` present, no ready label,
   truncated/empty timeline, a timeline fetch error) excludes the PR for that tick with one log
   line — never fabricated, matching this worker's original fail-closed posture.
 
@@ -69,7 +69,7 @@ them — that capability doesn't exist until rung 3.
   rollup-not-green case — plus the `CLICK DUE` mirror) and, for Leg A's stale-label receipts and
   Leg B's `CLICK DUE`, additionally on the ticket's own PR — never `#280`. HELD lines are
   `--target`-only; they never land on a ticket's own PR.
-- ⚠️ Unlike rung 0 alone, this build DOES touch a PR's labels (strips a stale `train:ready`, Leg
+- ⚠️ Unlike rung 0 alone, this build DOES touch a PR's labels (strips a stale `queued`, Leg
   A) and DOES comment on PRs beyond `--target` (Leg A's stale-label receipts, Leg B's `CLICK
   DUE`) — both strictly narrower than a merge and both gated behind `--post`, same as every other
   write this worker makes.
@@ -88,7 +88,7 @@ them — that capability doesn't exist until rung 3.
 3. **Rung 3 — mode A live (Kevin-gated).** Sha-pinned squash-merge via the fleet App token at the
    computed slot; observes the real terminal state (Railway deployment terminal + `/health` 200
    for studiob; push-run `deploy` job conclusion for client-asthetik) before posting `END`.
-4. **Rung 4 — squasher amendment.** `pr-automerge-gate.ts` (or its successor) honors `train:hold`
+4. **Rung 4 — squasher amendment.** `pr-automerge-gate.ts` (or its successor) honors `hold`
    unconditionally; studiob deploy-path PRs may become train tickets instead of immediate
    squash-merges, pending a read of the Railway dashboard watch scope.
 5. **Rung 5 — retire human duty.** The hand-posted PLAN/START/END lines on client-asthetik#280
@@ -110,7 +110,7 @@ them — that capability doesn't exist until rung 3.
 | Name | Kind | Purpose |
 |---|---|---|
 | `HERITAGE_TRAIN_ENABLED` | repo variable | Job-level gate. Absent/false means the cron is inert. |
-| `HERITAGE_TRAIN_HOLD` | env (or `train:hold` label on `#172`) | Hold marker, checked before every tick. |
+| `HERITAGE_TRAIN_HOLD` | env (or `hold` label on `#172`) | Hold marker, checked before every tick. |
 | `FLEET_APP_ID` / `FLEET_APP_PRIVATE_KEY` | secrets | Mint the `studiob-fleet-bot` installation token used for reads and this build's writes (label strip, comments). |
 | `RAILWAY_API_TOKEN` | secret | Reads studiob-api deployment state on the `studiob-platform` project. |
 | `--target` (flag) | worker arg | Where PLAN/HELD/CLICK-DUE-mirror lines post. Default `studio-b-ai/ops-pipeline#172`. Refused if pointed at `client-asthetik#280` (read-only calendar). |
@@ -124,7 +124,7 @@ them — that capability doesn't exist until rung 3.
 `contents:write`, `checks:read`, `actions:write`, `workflows:write` (plus `issues:write`,
 `metadata:read`) on 2026-08-19 ~21:52Z (Rule #78 — Kevin's UI-only grant). Rung 0 alone only ever
 needed read scopes; this build is the first to actually spend the write scopes — Leg A's stale
-`train:ready` removal (`pull_requests:write`) and its receipt comment, plus Leg B's `CLICK
+`queued` removal (`pull_requests:write`) and its receipt comment, plus Leg B's `CLICK
 DUE`/HELD posts (`issues:write`) — both already covered by the 2026-08-19 grant, so this PR
 requests no new permission. `checks:read` backs Leg B's queue-head rollup check
 (`fetchQueueHeadRollup`). The worker still classifies any `READ_DENIED:<scope>` response

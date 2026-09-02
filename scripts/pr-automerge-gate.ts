@@ -129,7 +129,8 @@ const REVIEW_MAX_TOKENS = 512;
 // TRAIN-class repo instead of a merge — the human `train:ready` authority (rung A1)
 // owns the merge decision from there.
 const CODE_FIX_MERGE_LABEL = "automerge:code-fix";
-const TRAIN_CANDIDATE_LABEL = "train:candidate";
+// Kevin's 2026-09-02 one-vocabulary rename: train:candidate → candidate (label-authority.ts).
+const TRAIN_CANDIDATE_LABEL = "candidate";
 
 // ───────────────────────────── gh helpers ─────────────────────────────
 
@@ -394,7 +395,7 @@ async function evaluate(
   // review) so scheduled re-runs don't re-spend on a PR whose outcome can't change.
   if (prClass === "code-fix" && repoClassFor(repo) === "train" && labels.includes(TRAIN_CANDIDATE_LABEL)) {
     console.log(
-      `[no-op] pr-automerge-gate ${repo}#${pr}: already labeled '${TRAIN_CANDIDATE_LABEL}' — the train:ready ` +
+      `[no-op] pr-automerge-gate ${repo}#${pr}: already labeled '${TRAIN_CANDIDATE_LABEL}' — the \`${QUEUED_LABEL}\` ` +
         `authority owns the merge decision now; nothing to re-evaluate (no review spend).`,
     );
     console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "candidate" }));
@@ -488,7 +489,7 @@ async function evaluate(
         "",
         `Every gate leg passed (shape, line cap, safe_path_globs, built-in denylist, named checks, independent ` +
           `review CLEAN) — but this repo is TRAIN-class, where the squasher never merges. Applied ` +
-          `\`${TRAIN_CANDIDATE_LABEL}\`; a merge-authorized human decides \`train:ready\` (Rule #279).`,
+          `\`${TRAIN_CANDIDATE_LABEL}\`; a merge-authorized human decides \`${QUEUED_LABEL}\` (Rule #279).`,
         "",
         `Evaluated sha: \`${prJson.headRefOid}\`.`,
       ].join("\n"),
@@ -496,7 +497,7 @@ async function evaluate(
     console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "candidate" }));
     console.log(
       `[candidate] pr-automerge-gate ${repo}#${pr}: all legs passed; train-class repo — labeled ` +
-        `'${TRAIN_CANDIDATE_LABEL}', merge decision stays with the train:ready authority.`,
+        `'${TRAIN_CANDIDATE_LABEL}', merge decision stays with the \`${QUEUED_LABEL}\` authority.`,
     );
     return;
   }
@@ -659,7 +660,7 @@ async function evaluate(
 
 const TRAIN_READY_REVIEW_SYSTEM = [
   "You are the FINAL automated review gate for a pull request a human maintainer has",
-  "already reviewed and explicitly labeled ready-to-merge (`train:ready`). You do not",
+  "already reviewed and explicitly labeled ready-to-merge (`queued`). You do not",
   "merge anything yourself, and you do not re-litigate the human's judgment on ordinary",
   "code quality, style, or design choices — that decision has already been made by a",
   "human with merge authority. Your ONLY job is a narrow safety-net check for the",
@@ -1126,7 +1127,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   }
 
   const receipt = [
-    "**`train:ready` gate — MERGED** (label-authority v2, ops#190 rung A1)",
+    "**`queued` — MERGED by the restart train** (label-authority v2, ops#190 rung A1; one vocabulary 9/02)",
     "",
     "| Leg | Result |",
     "|---|---|",
