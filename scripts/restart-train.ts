@@ -176,6 +176,7 @@ import {
   formatObserveNote,
   formatStartLine,
   isRevertTitle,
+  mergeTouchesDeployPaths,
   observeStateKey,
   observeTimeoutVerdict,
   pickDeployJob,
@@ -1094,6 +1095,25 @@ async function runObservePass(
       await handleWindowBlocked(target, pr, run, classification.detail, anchorIso, flags);
       return { inFlight: true };
     }
+    // classification.kind === "waiting" from here down. `run === null` is the ONLY way
+    // classifyCaRun reaches "waiting" with no run in hand — and a merge whose changed files
+    // touch NO deploy-trigger path will NEVER produce one: GitHub simply never fires
+    // acuops-build.yml (its on.push.paths filter excludes the push entirely), so the ordinary
+    // wait-for-a-run branch below would wait out the full 60-min window and escalate over a
+    // build that structurally cannot appear (client-asthetik#362: a workflow-only PR stalled
+    // the whole train for ~2h before locking it behind a machinery issue). Resolve it as
+    // no-restart via the SAME successful-END routine (`completeObserve`) a real restart uses.
+    if (!run) {
+      const files = await fetchMergeCommitFiles(pr.repo, pr.mergeCommitOid);
+      if (files !== null && !mergeTouchesDeployPaths(pr.repo, files)) {
+        const preview = files.slice(0, 3).join(", ");
+        console.log(
+          `[restart-train] observe: no-restart — ${pr.repo}#${pr.number} merged ${pr.mergeCommitOid.slice(0, 7)} touched no deploy-trigger path; releasing`,
+        );
+        await completeObserve(target, pr, `no-restart: merge touched no deploy-trigger path (files: ${preview})`, flags);
+        return { inFlight: false };
+      }
+    }
     console.log(`[restart-train] observe: waiting — ${classification.detail}`);
     // Ladder base: the run's own created_at once one exists — a WINDOW_BLOCKED re-dispatch
     // resets the clock via its NEW run rather than counting from a merge that deliberately
@@ -1203,6 +1223,43 @@ async function observeCaLeg(mergeCommitOid: string): Promise<{ run: WorkflowRunL
     };
   }
   return { run, classification: classifyCaRun(run, pickDeployJob(JSON.parse(jobsJson) as WorkflowJobLike[])) };
+}
+
+/**
+ * Changed filenames on the merge commit — feeds `mergeTouchesDeployPaths` for the no-restart
+ * resolution (a merge with NO acuops-build run in hand, e.g. client-asthetik#362's
+ * workflow-only PR, which the push-paths filter excludes from ever firing the workflow at all).
+ * `--paginate` matters here: GitHub pages a commit's `files` array past ~300 entries, and each
+ * page's `--jq` filter emits its OWN JSON array on its OWN line rather than one merged document
+ * — parse per line and flatten, never a single `JSON.parse()` on the whole response. Any
+ * fetch/parse failure returns `null` (never `[]`, which would read as "confirmed no files") so
+ * the caller falls through to the ordinary waiting/timeout path instead of drawing a conclusion
+ * from a read that told us nothing (#401).
+ */
+async function fetchMergeCommitFiles(repo: string, sha: string): Promise<string[] | null> {
+  let raw: string;
+  try {
+    raw = gh(["api", `repos/${repo}/commits/${sha}`, "--paginate", "--jq", "[.files[].filename]"]);
+  } catch (err) {
+    console.log(
+      `[restart-train] observe: could not fetch changed files for ${repo}@${sha.slice(0, 7)} (falling through to the waiting/timeout path): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+  try {
+    const files: string[] = [];
+    for (const line of raw.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      files.push(...(JSON.parse(trimmed) as string[]));
+    }
+    return files;
+  } catch (err) {
+    console.log(
+      `[restart-train] observe: could not parse changed-files response for ${repo}@${sha.slice(0, 7)} (falling through to the waiting/timeout path): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
 }
 
 /**
