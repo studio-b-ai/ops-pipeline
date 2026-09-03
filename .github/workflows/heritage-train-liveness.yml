@@ -94,6 +94,11 @@ jobs:
         working-directory: scripts
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
+          # Repo variables are NOT readable through the fleet App token (HTTP 403 'Resource not
+          # accessible by integration' on actions/variables — first dry run 2026-09-03 03:10Z).
+          # The `vars` context needs no token at all; the worker prefers this value and only
+          # falls back to `gh variable get` when the env var is absent (local runs).
+          HERITAGE_TRAIN_ENABLED_VALUE: ${{ vars.HERITAGE_TRAIN_ENABLED }}
           # Scheduled runs are LIVE (no --dry-run, exactly as backlog-staleness.yml): the flag
           # is passed only on a workflow_dispatch whose own dry_run input is true.
           DRY_RUN_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}

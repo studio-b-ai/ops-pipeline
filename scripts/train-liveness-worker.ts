@@ -13,7 +13,9 @@
  * cadence must beat the 30-minute SLA it measures against, not merely match it).
  *
  * Per run (every 15 minutes, .github/workflows/heritage-train-liveness.yml):
- *   1. `HERITAGE_TRAIN_ENABLED` repo variable on studio-b-ai/ops-pipeline — `gh variable get`,
+ *   1. `HERITAGE_TRAIN_ENABLED` repo variable on studio-b-ai/ops-pipeline — in Actions it arrives
+ *      pre-read as `HERITAGE_TRAIN_ENABLED_VALUE` from the workflow's `vars` context (the fleet App
+ *      token cannot read repo variables: HTTP 403, 2026-09-03); `gh variable get` is the LOCAL fallback,
  *      classified via `parseTrainEnabled` (P1 codex fix, ops-pipeline#272): a genuinely-absent
  *      variable is `disabled` (expected, mirrors heritage-restart-train.yml's own job-level
  *      `if:` gate); any OTHER read failure (auth/scope/5xx) THROWS — a blind read must never be
@@ -180,6 +182,14 @@ function fetchQueuedTickets(): LivenessQueuedTicket[] {
  * never reconcile on an unconfirmed read).
  */
 function fetchTrainEnabled(): { enabled: boolean } | { error: string } {
+  // Workflow-injected value from the `vars` context (no token needed; the fleet App token 403s on
+  // actions/variables). An EMPTY string = the variable is not defined on the repo = disabled — the
+  // same reading heritage-restart-train.yml's own job-level `if:` applies. Local runs without the env
+  // var fall through to `gh variable get`.
+  const injected = process.env.HERITAGE_TRAIN_ENABLED_VALUE;
+  if (injected !== undefined) {
+    return parseTrainEnabled({ stdout: injected, stderr: "", exitCode: 0 });
+  }
   try {
     const stdout = gh(["variable", "get", HERITAGE_TRAIN_ENABLED_VAR, "--repo", SELF_REPO]);
     return parseTrainEnabled({ stdout, stderr: "", exitCode: 0 });
