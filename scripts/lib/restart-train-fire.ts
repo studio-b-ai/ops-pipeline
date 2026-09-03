@@ -51,6 +51,7 @@
 
 import type { DeploymentRecord } from "./railway-deployment-probes.js";
 import type { RepoClass } from "./restart-train-lib.js";
+import { pathMatchesAny } from "./timetable-gate.js";
 
 // ───────────────────────────── constants ─────────────────────────────
 
@@ -96,6 +97,66 @@ export const CA_HOURS_GATE_STEP = "Enforce after-hours gate for prod/staging pub
  */
 export function isRevertTitle(title: string): boolean {
   return /^\s*revert\b/i.test(title);
+}
+
+// ───────────────────────────── deploy-trigger-path law (no-restart resolution) ─────────────────────────────
+
+/**
+ * Per-repo deploy-trigger paths, sourced VERBATIM from each repo's own workflow (fetched
+ * 2026-09-03 via `gh api repos/<repo>/contents/<path> --jq .content | base64 -d`) — never
+ * guessed. A merge whose changed files match NONE of these can never produce a build/deploy
+ * run, so the client-asthetik observe leg (restart-train.ts) resolves it as `no-restart`
+ * instead of waiting out the full timeout ladder for a run that will never appear (the defect
+ * this fixes: client-asthetik#362, a workflow-only PR, stalled the whole train for ~2h before
+ * escalating).
+ *
+ * `studio-b-ai/client-asthetik` — acuops-build.yml `on.push.paths`:
+ *   on:
+ *     push:
+ *       branches: [main, staging]
+ *       paths:
+ *         - 'acumatica/Customization/**'
+ *         - 'acumatica/acuops.yaml'
+ *         - 'acumatica/instance-manifest.json'
+ *         - 'src/**'
+ *
+ * `studio-b-ai/studiob` — deploy-api.yml carries NO `push:` trigger at all:
+ *   on:
+ *     workflow_dispatch:
+ *     schedule:
+ *       - cron: '30 23 * * *'
+ *       - cron: '30 1 * * *'
+ *   The file's own header explains why: "the Railway GitHub-integration trigger for
+ *   studiob-api was deleted 2026-08-29 (studiob#552 resolution)... There is deliberately NO
+ *   push trigger" — merge is fully decoupled from deploy for this shared-resource-booting
+ *   service (Rule #480). So NO studiob merge ever fires a build off push, regardless of which
+ *   files changed. Modeled as `null` ("no `paths:` filter" — the degenerate case where every
+ *   push would be deploy-relevant) rather than `false`: this helper's job is to fail TOWARD
+ *   observing, never toward skipping (#4/#382). Nothing in THIS fix routes studiob through this
+ *   helper yet (the observe branch it's wired into is client-asthetik-only) — this entry exists
+ *   so a future studiob consumer inherits the safe default instead of a silent `undefined`.
+ */
+export const DEPLOY_TRIGGER_GLOBS: Record<string, readonly string[] | null> = {
+  "studio-b-ai/client-asthetik": ["acumatica/Customization/**", "acumatica/acuops.yaml", "acumatica/instance-manifest.json", "src/**"],
+  "studio-b-ai/studiob": null,
+};
+
+/**
+ * Would a push carrying exactly these changed files trigger the repo's deploy build?
+ *
+ * Biased toward `true` (keep observing) everywhere the answer is uncertain — never toward
+ * `false` (skip), matching this module's fail-toward-waiting stance (#4/#382): an unrecognized
+ * repo (`undefined` lookup), an empty file list (a read that came back empty told us nothing —
+ * it is not evidence of nothing, #401), and a repo with no `paths:` filter (`null`, see
+ * DEPLOY_TRIGGER_GLOBS) all return `true`. Only a repo WITH a declared glob list, whose files
+ * match NONE of it, returns `false`.
+ */
+export function mergeTouchesDeployPaths(repo: string, files: string[]): boolean {
+  if (files.length === 0) return true;
+  const globs = DEPLOY_TRIGGER_GLOBS[repo];
+  if (globs === undefined) return true;
+  if (globs === null) return true;
+  return files.some((f) => pathMatchesAny(f, globs));
 }
 
 // ───────────────────────────── studiob leg classification ─────────────────────────────

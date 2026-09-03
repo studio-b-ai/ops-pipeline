@@ -8,6 +8,7 @@ import {
   formatEndLine,
   formatStartLine,
   isRevertTitle,
+  mergeTouchesDeployPaths,
   observeStateKey,
   observeTimeoutVerdict,
   pickDeployJob,
@@ -200,5 +201,44 @@ describe("ledger line formats + observe state keys", () => {
     const a = observeStateKey("studio-b-ai/studiob", 620, "abc123", "end-success");
     expect(a).toBe("observe :: studio-b-ai/studiob#620 @ abc123 :: end-success");
     expect(observeStateKey("studio-b-ai/studiob", 620, "abc123", "end-failed")).not.toBe(a);
+  });
+});
+
+describe("mergeTouchesDeployPaths", () => {
+  const CA = "studio-b-ai/client-asthetik";
+
+  it("client-asthetik workflow-only change matches no deploy-trigger path (the client-asthetik#362 defect)", () => {
+    expect(mergeTouchesDeployPaths(CA, [".github/workflows/require-review-label.yml"])).toBe(false);
+    expect(mergeTouchesDeployPaths(CA, [".github/workflows/x.yml"])).toBe(false);
+  });
+
+  it("client-asthetik Customization change matches (recursive **)", () => {
+    expect(mergeTouchesDeployPaths(CA, ["acumatica/Customization/Bolt/Pages/SB/SB501010.aspx"])).toBe(true);
+  });
+
+  it("client-asthetik exact-file globs match", () => {
+    expect(mergeTouchesDeployPaths(CA, ["acumatica/acuops.yaml"])).toBe(true);
+    expect(mergeTouchesDeployPaths(CA, ["acumatica/instance-manifest.json"])).toBe(true);
+  });
+
+  it("client-asthetik src/** matches", () => {
+    expect(mergeTouchesDeployPaths(CA, ["src/Bolt/Graphs/X.cs"])).toBe(true);
+  });
+
+  it("a mixed file list matches if ANY file matches", () => {
+    expect(mergeTouchesDeployPaths(CA, [".github/workflows/x.yml", "src/Bolt/Graphs/X.cs", "README.md"])).toBe(true);
+  });
+
+  it("unknown repo fails toward observing (true), never toward skipping", () => {
+    expect(mergeTouchesDeployPaths("studio-b-ai/some-other-repo", ["README.md"])).toBe(true);
+  });
+
+  it("empty file list fails toward observing (true) — an empty read is not evidence of nothing (#401)", () => {
+    expect(mergeTouchesDeployPaths(CA, [])).toBe(true);
+  });
+
+  it("studiob has no paths: filter (deploy-api.yml carries no push trigger at all, Rule #480) — always true", () => {
+    expect(mergeTouchesDeployPaths("studio-b-ai/studiob", [".github/workflows/require-review-label.yml"])).toBe(true);
+    expect(mergeTouchesDeployPaths("studio-b-ai/studiob", ["src/index.ts"])).toBe(true);
   });
 });
