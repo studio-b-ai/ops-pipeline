@@ -56,6 +56,30 @@
       "safe_path_globs": "",
       "required_checks": "",
       "train": false
+    },
+    {
+      "repo": "studio-b-ai/acuops-pipeline",
+      "enabled_classes": "docs-comment",
+      "sensitive_path_patterns": "",
+      "safe_path_globs": "",
+      "required_checks": "",
+      "train": false
+    },
+    {
+      "repo": "studio-b-ai/acudev",
+      "enabled_classes": "docs-comment",
+      "sensitive_path_patterns": "",
+      "safe_path_globs": "",
+      "required_checks": "",
+      "train": false
+    },
+    {
+      "repo": "studio-b-ai/note-intelligence",
+      "enabled_classes": "docs-comment",
+      "sensitive_path_patterns": "",
+      "safe_path_globs": "",
+      "required_checks": "",
+      "train": false
     }
   ]
 }
