@@ -54,8 +54,13 @@ import type { RepoClass } from "./restart-train-lib.js";
 
 // ───────────────────────────── constants ─────────────────────────────
 
-export const TRAIN_READY_LABEL = "train:ready";
-export const TRAIN_IN_FLIGHT_LABEL = "train:in-flight";
+// Kevin's ruled rename (2026-09-02, ONE operator vocabulary — see label-authority.ts):
+// train:ready → queued · train:hold → hold · train:in-flight → underway · train:candidate →
+// candidate. Constant names unchanged; values moved. Must equal label-authority.ts's
+// TRAIN_READY_LABEL / TRAIN_HOLD_LABEL (asserted in the tests).
+export const TRAIN_READY_LABEL = "queued";
+export const TRAIN_HOLD_LABEL = "hold";
+export const TRAIN_IN_FLIGHT_LABEL = "underway";
 // NO train:failed label — Kevin's 2026-08-29 label consolidation ("if my only label is
 // train:ready then I want it to be that way in github"): a failed observe is recorded by the
 // END · FAILED ledger line + the machinery issue (which alone locks the train); a marker label

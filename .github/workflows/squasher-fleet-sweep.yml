@@ -17,11 +17,11 @@ name: Squasher fleet auto-merge sweep
 #
 # Fleet registry: scripts/squasher-fleet.json — per-repo gate inputs migrated
 # verbatim from the retired callers. Enumeration covers `bugsquasher` PRs for every
-# fleet repo and `train:ready` PRs for repos whose retired caller had a train leg.
+# fleet repo and `queued` PRs for repos whose retired caller had a train leg.
 # Gate semantics are UNCHANGED (the gate script is zero-diff — every read/write
 # already flows through its gh() helper and takes --repo explicitly); only the cron
 # residence and the merging token change. Authority is unchanged too: train merges
-# still require a human's GraphQL-attributed `train:ready` label, and squasher
+# still require a human's GraphQL-attributed `queued` label, and squasher
 # merges still pass every classification leg.
 #
 # TRIGGER SHAPE mirrors automerge-sweep.yml (ops#23 lessons): scheduled sweep at
@@ -45,7 +45,7 @@ on:
         required: false
         type: string
       pr_number:
-        description: "Optional (requires repo): evaluate ONLY this PR number. The PR must carry `bugsquasher` or `train:ready` — the label filter is the enumeration."
+        description: "Optional (requires repo): evaluate ONLY this PR number. The PR must carry `bugsquasher` or `queued` — the label filter is the enumeration."
         required: false
         type: string
 
@@ -127,7 +127,8 @@ jobs:
             sq=$(gh pr list --repo "$repo" --label bugsquasher --state open --json number --limit 100 --jq '[.[].number]')
             tr='[]'
             if [ "$(jq -r '.train' <<<"$repo_json")" = "true" ]; then
-              tr=$(gh pr list --repo "$repo" --label 'train:ready' --state open --json number --limit 100 --jq '[.[].number]')
+              # `queued` = Kevin's 2026-09-02 one-vocabulary rename of train:ready (scripts/lib/label-authority.ts).
+              tr=$(gh pr list --repo "$repo" --label 'queued' --state open --json number --limit 100 --jq '[.[].number]')
             fi
             if [ -n "${ONLY_PR:-}" ]; then
               sq=$(jq -c --argjson p "$ONLY_PR" '[.[] | select(. == $p)]' <<<"$sq")
@@ -137,7 +138,7 @@ jobs:
             # Per-repo counts on every cycle (#465): an all-zero sweep must be
             # distinguishable from a blind instrument — these lines ARE the
             # enumeration receipt.
-            echo "$repo: bugsquasher=$(jq length <<<"$sq") train:ready=$(jq length <<<"$tr")"
+            echo "$repo: bugsquasher=$(jq length <<<"$sq") queued(train)=$(jq length <<<"$tr")"
 
             # Train entries pass ONLY train_ready — the squasher inputs are blanked
             # deliberately (the reusable ignores them in train mode; forwarding

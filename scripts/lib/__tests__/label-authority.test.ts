@@ -210,30 +210,34 @@ describe("evaluateLabelAuthority — the queued/hold pair (ops-pipeline#260 leg 
     expect(verdict).toMatchObject({ authorized: false, reason: "bot-actor" });
   });
 
-  it("the pairs are isolated: a `queued` event is invisible to the TRAIN evaluation and vice-versa", () => {
-    // Train pair: `queued` events are noise — the train:ready authorization stands.
-    const train = evaluateLabelAuthority(
-      baseAuthorityInput({
-        currentLabels: [TRAIN_READY_LABEL, QUEUED_LABEL],
-        timeline: [commitAt(0), labeledBy("kbibelhausen", 1), labeledBy("studiob-fleet-bot[bot]", 2, QUEUED_LABEL)],
-      }),
+  it("ONE vocabulary (Kevin 2026-09-02): the train pair IS the queued/hold pair — same labels, one predicate", () => {
+    expect(TRAIN_READY_LABEL).toBe("queued");
+    expect(TRAIN_HOLD_LABEL).toBe("hold");
+    expect({ ready: TRAIN_READY_LABEL, hold: TRAIN_HOLD_LABEL }).toEqual(QUEUED_LABEL_PAIR);
+    // A stale `train:ready` (the OLD name) on a PR is invisible to the predicate — the cutover
+    // re-labels open PRs; anything missed simply never authorizes (fail-closed, never a merge).
+    const old = evaluateLabelAuthority(
+      baseAuthorityInput({ currentLabels: ["train:ready"], timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "train:ready")] }),
     );
-    expect(train).toMatchObject({ authorized: true, authorizingEvent: { position: 1 } });
-    // Queued pair: train:ready present but `queued` absent → no-ready-label for THIS pair.
-    const queued = evaluateLabelAuthority(queuedInput({ currentLabels: [TRAIN_READY_LABEL] }));
-    expect(queued).toMatchObject({ authorized: false, reason: "no-ready-label" });
-    expect((queued as { detail: string }).detail).toContain(QUEUED_LABEL);
+    expect(old).toMatchObject({ authorized: false, reason: "no-ready-label" });
   });
 
   it("the omitted pair is the train pair — every pre-existing caller is unchanged", () => {
     expect(evaluateLabelAuthority(baseAuthorityInput())).toEqual(evaluateLabelAuthority(baseAuthorityInput({ labels: { ready: TRAIN_READY_LABEL, hold: TRAIN_HOLD_LABEL } })));
   });
 
-  it("formatStaleLabelRemovalReceipt names the label it removed", () => {
+  it("formatStaleLabelRemovalReceipt names the label it removed (default = queued, the train's label)", () => {
     const verdict: StaleLabelAuthorityVerdict = { authorized: false, reason: "stale-label", detail: "d" };
     expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL)).toContain("**`queued` removed — stale label**");
     expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL)).toContain("Re-apply `queued`");
-    expect(formatStaleLabelRemovalReceipt(verdict, "abc")).toContain("**`train:ready` removed — stale label**");
+    expect(formatStaleLabelRemovalReceipt(verdict, "abc")).toContain("**`queued` removed — stale label**");
+  });
+
+  it("restart-train-fire's constants agree with label-authority's (two files, one vocabulary — #235)", async () => {
+    const fire = await import("../restart-train-fire.js");
+    expect(fire.TRAIN_READY_LABEL).toBe(TRAIN_READY_LABEL);
+    expect(fire.TRAIN_HOLD_LABEL).toBe(TRAIN_HOLD_LABEL);
+    expect(fire.TRAIN_IN_FLIGHT_LABEL).toBe("underway");
   });
 });
 

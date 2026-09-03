@@ -49,8 +49,8 @@
  *      not green here even when sanctioned, NEUTRAL is not SUCCESS, an empty
  *      required_checks list fails closed). Repo-class partition: in TRAIN-class
  *      repos (`repoClassFor` — studiob, client-asthetik) a code-fix that passes
- *      EVERY leg is never merged by the squasher — it gets `train:candidate` + a
- *      candidate comment, and the human `train:ready` authority (rung A1) owns the
+ *      EVERY leg is never merged by the squasher — it gets `candidate` + a
+ *      candidate comment, and the human `queued` authority (rung A1) owns the
  *      merge decision. In standard repos the `automerge:code-fix` label is applied
  *      BEFORE the merge (the B2 post-merge tripwire triggers on it, doc §4.2);
  *      label-apply failure ABORTS the merge.
@@ -72,7 +72,7 @@
  *
  * This script NEVER closes or edits a PR beyond: the merge itself, one machine-
  * readable receipt comment on successful merge, and (code-fix only, leg 7) the
- * `automerge:code-fix` / `train:candidate` labels + the candidate comment. It never
+ * `automerge:code-fix` / `candidate` labels + the candidate comment. It never
  * retries a failed merge attempt in the same run (composes #109/#161: undiagnosed
  * retries are how one failure becomes a compounded one).
  *
@@ -126,10 +126,11 @@ const REVIEW_MAX_TOKENS = 512;
 // BEFORE the merge in standard repos — it is the B2 post-merge tripwire's workflow
 // trigger FILTER (zero authority: the tripwire re-derives its own verdict against
 // server state). TRAIN_CANDIDATE_LABEL is what a fully-passing code-fix gets in a
-// TRAIN-class repo instead of a merge — the human `train:ready` authority (rung A1)
+// TRAIN-class repo instead of a merge — the human `queued` authority (rung A1)
 // owns the merge decision from there.
 const CODE_FIX_MERGE_LABEL = "automerge:code-fix";
-const TRAIN_CANDIDATE_LABEL = "train:candidate";
+// Kevin's 2026-09-02 one-vocabulary rename: train:candidate → candidate (label-authority.ts).
+const TRAIN_CANDIDATE_LABEL = "candidate";
 
 // ───────────────────────────── gh helpers ─────────────────────────────
 
@@ -209,7 +210,7 @@ function commentOnPr(repo: string, pr: number, body: string): void {
 }
 
 /** ops#190 B1: the gate's ONLY label writes — `automerge:code-fix` (standard repos,
- *  pre-merge, B2's trigger filter) and `train:candidate` (train-class repos, instead
+ *  pre-merge, B2's trigger filter) and `candidate` (train-class repos, instead
  *  of a merge). Throws on failure; both callers treat that as fail-closed. */
 function addLabel(repo: string, pr: number, label: string): void {
   gh(["pr", "edit", String(pr), "--repo", repo, "--add-label", label]);
@@ -388,13 +389,13 @@ async function evaluate(
     return;
   }
 
-  // ── code-fix already handed to the train (ops#190 B1): once `train:candidate` is
-  // on, the squasher's work here is DONE — the human train:ready authority owns the
+  // ── code-fix already handed to the train (ops#190 B1): once `candidate` is
+  // on, the squasher's work here is DONE — the human queued authority owns the
   // merge decision. Short-circuit BEFORE the remaining legs (and before the paid
   // review) so scheduled re-runs don't re-spend on a PR whose outcome can't change.
   if (prClass === "code-fix" && repoClassFor(repo) === "train" && labels.includes(TRAIN_CANDIDATE_LABEL)) {
     console.log(
-      `[no-op] pr-automerge-gate ${repo}#${pr}: already labeled '${TRAIN_CANDIDATE_LABEL}' — the train:ready ` +
+      `[no-op] pr-automerge-gate ${repo}#${pr}: already labeled '${TRAIN_CANDIDATE_LABEL}' — the \`${QUEUED_LABEL}\` ` +
         `authority owns the merge decision now; nothing to re-evaluate (no review spend).`,
     );
     console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "candidate" }));
@@ -465,7 +466,7 @@ async function evaluate(
 
   // ── code-fix repo-class partition (ops#190 B1, doc §4.1 move 5): in a TRAIN-class
   // repo the squasher NEVER merges — every merge to main rides the human
-  // `train:ready` authority (rung A1). A code-fix that passed EVERY leg (review
+  // `queued` authority (rung A1). A code-fix that passed EVERY leg (review
   // included) becomes a train CANDIDATE: label + comment, then done. Verdict
   // "candidate" is a healthy terminal outcome, not a miss.
   if (prClass === "code-fix" && repoClassFor(repo) === "train") {
@@ -488,7 +489,7 @@ async function evaluate(
         "",
         `Every gate leg passed (shape, line cap, safe_path_globs, built-in denylist, named checks, independent ` +
           `review CLEAN) — but this repo is TRAIN-class, where the squasher never merges. Applied ` +
-          `\`${TRAIN_CANDIDATE_LABEL}\`; a merge-authorized human decides \`train:ready\` (Rule #279).`,
+          `\`${TRAIN_CANDIDATE_LABEL}\`; a merge-authorized human decides \`${QUEUED_LABEL}\` (Rule #279).`,
         "",
         `Evaluated sha: \`${prJson.headRefOid}\`.`,
       ].join("\n"),
@@ -496,7 +497,7 @@ async function evaluate(
     console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "candidate" }));
     console.log(
       `[candidate] pr-automerge-gate ${repo}#${pr}: all legs passed; train-class repo — labeled ` +
-        `'${TRAIN_CANDIDATE_LABEL}', merge decision stays with the train:ready authority.`,
+        `'${TRAIN_CANDIDATE_LABEL}', merge decision stays with the \`${QUEUED_LABEL}\` authority.`,
     );
     return;
   }
@@ -630,7 +631,7 @@ async function evaluate(
   await resolveGateRefusals(repo, pr);
 }
 
-// ───────────────────────────── train:ready gate (A1) ─────────────────────────────
+// ───────────────────────────── queued (train) gate (A1) ─────────────────────────────
 //
 // docs/plans/2026-08-28-automerge-b-plus-a-v2.md §3.1-3.3 — the "automerge b+A v2"
 // A-side: label-gated merge for HUMAN PRs (unlike `evaluate()` above, which is the
@@ -659,7 +660,7 @@ async function evaluate(
 
 const TRAIN_READY_REVIEW_SYSTEM = [
   "You are the FINAL automated review gate for a pull request a human maintainer has",
-  "already reviewed and explicitly labeled ready-to-merge (`train:ready`). You do not",
+  "already reviewed and explicitly labeled ready-to-merge (`queued`). You do not",
   "merge anything yourself, and you do not re-litigate the human's judgment on ordinary",
   "code quality, style, or design choices — that decision has already been made by a",
   "human with merge authority. Your ONLY job is a narrow safety-net check for the",
@@ -873,7 +874,7 @@ function logTrainGateLine(repo: string, pr: number, outcome: TrainReadyOutcome, 
  *
  * Outcomes:
  *   - "stale-label-removed": doc §3.1 step 3 — a commit/force-push landed after the
- *     authorizing LabeledEvent. `train:ready` is stripped and a write-only receipt is
+ *     authorizing LabeledEvent. `queued` is stripped and a write-only receipt is
  *     posted (`removeStaleReadyLabel` + `postAuthorityReceipt`). Never merges.
  *   - "refused": any other fail-closed leg (not merge-ready — draft/closed/behind/CI
  *     rollup not clean — no label, hold present, bot/unauthorized actor,
@@ -910,7 +911,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   // ONLY these two facts short-circuit here. CI/mergeStateStatus deliberately do
   // NOT (codex P2, A2 pass 2): a label-then-push staleness typically leaves CI
   // pending/red on the NEW sha, and refusing on CI before the authority leg would
-  // leave the stale `train:ready` in place indefinitely — doc §3.1 step 3's
+  // leave the stale `queued` in place indefinitely — doc §3.1 step 3's
   // stale-label removal must run regardless of CI state, so the full readiness
   // check lives AFTER the authority leg below. A draft with a stale label defers
   // its strip until the PR leaves draft (a draft cannot merge; next cycle's full
@@ -940,7 +941,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
       // immediately before removing, rather than trusting the verdict computed at the
       // top of this function OR merely re-checking that the label name is still
       // present. A presence-only check is not enough: a human removing-then-
-      // reapplying `train:ready` in the gap leaves the label NAME present again, but
+      // reapplying `queued` in the gap leaves the label NAME present again, but
       // the event that now actually authorizes it may be a fresh, currently-valid
       // labeling — a presence check alone would still remove it, incorrectly
       // stripping a legitimate re-authorization. Re-running the whole predicate (the
@@ -954,7 +955,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
       // reverse. The two fetches are never perfectly atomic with each other, so
       // fetching timeline-then-labels can pair an OLDER timeline with a NEWER label
       // snapshot: a remove-then-reapply landing in the gap would then show
-      // `train:ready` present (from the newer labels read) while the older timeline
+      // `queued` present (from the newer labels read) while the older timeline
       // still ends at the ORIGINAL stale LabeledEvent, misattributing that presence
       // to the stale event and incorrectly removing a label a human just freshly
       // reauthorized. Labels-then-timeline avoids that specific misattribution: a
@@ -1010,7 +1011,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   // check. Placed AFTER the authority leg deliberately (codex P2, A2 pass 2): the
   // stale-label branch above must run regardless of CI state — a label-then-push
   // typically leaves CI pending/red on the new sha, and refusing on CI first would
-  // leave the stale `train:ready` in place indefinitely. Placed BEFORE the review
+  // leave the stale `queued` in place indefinitely. Placed BEFORE the review
   // leg so red/pending CI still refuses before the model spend. state/isDraft are
   // re-checked here (already true via the fast-path above) — harmless, and keeps
   // this call the single authoritative readiness predicate rather than a
@@ -1060,7 +1061,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   //       push, the PR going draft/closed, or mergeability changing.
   //   (b) a FRESH authority re-evaluation (full timeline re-fetch + re-run of
   //       `evaluateLabelAuthority`) — catches a non-authority actor removing and
-  //       re-adding `train:ready` during this running cycle: the label SET is
+  //       re-adding `queued` during this running cycle: the label SET is
   //       unchanged by a remove-then-reapply (so (a) alone sees no drift, since
   //       `hasAuthoritySnapshotDrifted` only ever compared a label-NAME set, never
   //       event identity), but the event actually authorizing the CURRENT state has
@@ -1126,7 +1127,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   }
 
   const receipt = [
-    "**`train:ready` gate — MERGED** (label-authority v2, ops#190 rung A1)",
+    "**`queued` — MERGED by the restart train** (label-authority v2, ops#190 rung A1; one vocabulary 9/02)",
     "",
     "| Leg | Result |",
     "|---|---|",
