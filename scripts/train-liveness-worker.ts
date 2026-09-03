@@ -13,7 +13,9 @@
  * cadence must beat the 30-minute SLA it measures against, not merely match it).
  *
  * Per run (every 15 minutes, .github/workflows/heritage-train-liveness.yml):
- *   1. `HERITAGE_TRAIN_ENABLED` repo variable on studio-b-ai/ops-pipeline — `gh variable get`,
+ *   1. `HERITAGE_TRAIN_ENABLED` repo variable on studio-b-ai/ops-pipeline — in Actions it arrives
+ *      pre-read as `HERITAGE_TRAIN_ENABLED_VALUE` from the workflow's `vars` context (the fleet App
+ *      token cannot read repo variables: HTTP 403, 2026-09-03); `gh variable get` is the LOCAL fallback,
  *      classified via `parseTrainEnabled` (P1 codex fix, ops-pipeline#272): a genuinely-absent
  *      variable is `disabled` (expected, mirrors heritage-restart-train.yml's own job-level
  *      `if:` gate); any OTHER read failure (auth/scope/5xx) THROWS — a blind read must never be
