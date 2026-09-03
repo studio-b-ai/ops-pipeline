@@ -224,8 +224,14 @@ export interface GhCommandResult {
 
 export type ParseTrainEnabledResult = { enabled: boolean } | { error: string };
 
-/** Matches `gh`'s stderr shape for a genuinely-absent repo variable — both the GraphQL "not found" phrasing and a bare HTTP 404. */
-const VARIABLE_NOT_FOUND_PATTERN = /not found|HTTP 404/i;
+/**
+ * Matches ONLY `gh`'s variable-specific not-found phrasings — `variable "X" was not found`
+ * (the REST shape, verified live 2026-09-03) and the GraphQL `Could not resolve to a Variable
+ * with the name 'X' … not found`. A bare `HTTP 404` / `Not Found` is deliberately EXCLUDED
+ * (codex pass 2 on ops-pipeline#272): GitHub answers 404 for authorization and repo-visibility
+ * failures too, and those must fail loud, never read as "disabled".
+ */
+const VARIABLE_NOT_FOUND_PATTERN = /variable[^\n]{0,160}not found/i;
 
 /**
  * Classifies a `gh variable get HERITAGE_TRAIN_ENABLED` invocation result (P1 codex fix on

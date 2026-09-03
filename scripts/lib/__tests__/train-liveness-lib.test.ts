@@ -338,9 +338,19 @@ describe("parseTrainEnabled", () => {
     expect(result).toEqual({ enabled: false });
   });
 
-  it("treats a bare HTTP 404 as enabled: false too", () => {
-    const result = parseTrainEnabled({ stdout: "", stderr: "gh: Not Found (HTTP 404)", exitCode: 1 });
+  it("treats gh's REST not-found phrasing (`variable \"X\" was not found`, verified live 9/03) as enabled: false", () => {
+    const result = parseTrainEnabled({
+      stdout: "",
+      stderr: 'variable "HERITAGE_TRAIN_ENABLED" was not found in studio-b-ai/ops-pipeline',
+      exitCode: 1,
+    });
     expect(result).toEqual({ enabled: false });
+  });
+
+  it("returns an error (never enabled: false) on a BARE HTTP 404 — GitHub 404s auth/visibility failures too (codex pass 2)", () => {
+    const result = parseTrainEnabled({ stdout: "", stderr: "gh: Not Found (HTTP 404)", exitCode: 1 });
+    expect("error" in result).toBe(true);
+    expect((result as { error: string }).error).toContain("HTTP 404");
   });
 
   it("returns an error (never enabled: false) on an auth failure — a blind read must never look like a confirmed 'disabled'", () => {
