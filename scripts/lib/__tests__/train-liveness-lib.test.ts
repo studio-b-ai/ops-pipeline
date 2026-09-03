@@ -3,10 +3,13 @@ import {
   evaluateTrainLiveness,
   formatLivenessIssueTitle,
   formatLivenessIssueBody,
+  pickLastScheduledRun,
+  parseTrainEnabled,
   TRAIN_LIVENESS_LABEL,
   TRAIN_LIVENESS_STALE_MINUTES,
   type EvaluateTrainLivenessInput,
   type LivenessQueuedTicket,
+  type RunLike,
 } from "../train-liveness-lib.js";
 
 // ───────────────────────────── fixtures (Rule #256 — every "now" pinned, never the real clock) ─────────────────────────────
@@ -215,5 +218,139 @@ describe("formatLivenessIssueBody", () => {
       windowMinutes: 30,
     });
     expect(body).toContain("unexpected on a `stale` verdict");
+  });
+
+  it("mentions a last manual tick informationally, distinct from the verdict-driving schedule run", () => {
+    const body = formatLivenessIssueBody({
+      nowIso: NOW,
+      silentMinutes: 45,
+      queuedTickets: TICKETS,
+      lastRunUrl: null,
+      windowMinutes: 30,
+      lastManualTick: { url: "https://github.com/studio-b-ai/ops-pipeline/actions/runs/99999", updatedAt: "2026-08-31T00:20:00Z" },
+    });
+    expect(body).toContain("Last manual tick");
+    expect(body).toContain("https://github.com/studio-b-ai/ops-pipeline/actions/runs/99999");
+    expect(body).toContain("does NOT feed this verdict");
+  });
+
+  it("omits the manual-tick line entirely when there is none", () => {
+    const body = formatLivenessIssueBody({
+      nowIso: NOW,
+      silentMinutes: 45,
+      queuedTickets: TICKETS,
+      lastRunUrl: null,
+      windowMinutes: 30,
+    });
+    expect(body).not.toContain("Last manual tick");
+  });
+});
+
+// ───────────────────────────── evaluateTrainLiveness — timestamp validation (P3, codex review ops-pipeline#272) ─────────────────────────────
+
+describe("evaluateTrainLiveness — timestamp validation", () => {
+  it("throws on a malformed nowIso rather than silently computing NaN", () => {
+    expect(() => evalWith({ nowIso: "not-a-timestamp" })).toThrow(/invalid ISO timestamp: not-a-timestamp/);
+  });
+
+  it("throws on a malformed lastCompletedRunIso rather than silently computing NaN", () => {
+    expect(() => evalWith({ lastCompletedRunIso: "definitely-not-iso" })).toThrow(/invalid ISO timestamp: definitely-not-iso/);
+  });
+
+  it("a null lastCompletedRunIso is still handled as never-ran, not as a malformed timestamp", () => {
+    const result = evalWith({ lastCompletedRunIso: null, queuedTickets: 1 });
+    expect(result.verdict).toBe("stale");
+    expect(result.silentMinutes).toBeNull();
+  });
+
+  it("never silently passes as ok with a NaN silentMinutes (the exact P3 failure shape)", () => {
+    let threw = false;
+    let result: ReturnType<typeof evaluateTrainLiveness> | undefined;
+    try {
+      result = evalWith({ lastCompletedRunIso: "garbage" });
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+    expect(result).toBeUndefined();
+  });
+});
+
+// ───────────────────────────── pickLastScheduledRun (P1, codex review ops-pipeline#272) ─────────────────────────────
+
+describe("pickLastScheduledRun", () => {
+  function run(overrides: Partial<RunLike> = {}): RunLike {
+    return {
+      event: "schedule",
+      updatedAt: NOW,
+      createdAt: NOW,
+      url: "https://github.com/studio-b-ai/ops-pipeline/actions/runs/1",
+      databaseId: 1,
+      ...overrides,
+    };
+  }
+
+  it("returns null for an empty list", () => {
+    expect(pickLastScheduledRun([])).toBeNull();
+  });
+
+  it("returns null for a dispatch-only list (no schedule-triggered run at all)", () => {
+    const runs = [
+      run({ databaseId: 1, event: "workflow_dispatch", updatedAt: minutesAgo(5) }),
+      run({ databaseId: 2, event: "workflow_dispatch", updatedAt: minutesAgo(10) }),
+    ];
+    expect(pickLastScheduledRun(runs)).toBeNull();
+  });
+
+  it("picks the newest schedule-triggered run out of a mixed list, ignoring dispatch runs entirely", () => {
+    const olderSchedule = run({ databaseId: 1, event: "schedule", updatedAt: minutesAgo(20) });
+    const newerDispatch = run({ databaseId: 2, event: "workflow_dispatch", updatedAt: minutesAgo(2) }); // newest overall, but NOT schedule
+    const newestSchedule = run({ databaseId: 3, event: "schedule", updatedAt: minutesAgo(5) });
+    const result = pickLastScheduledRun([olderSchedule, newerDispatch, newestSchedule]);
+    expect(result?.databaseId).toBe(3);
+  });
+
+  it("a single schedule run in an otherwise-empty list is returned as-is", () => {
+    const only = run({ databaseId: 42, event: "schedule" });
+    expect(pickLastScheduledRun([only])?.databaseId).toBe(42);
+  });
+});
+
+// ───────────────────────────── parseTrainEnabled (P1, codex review ops-pipeline#272) ─────────────────────────────
+
+describe("parseTrainEnabled", () => {
+  it("returns enabled: true on a clean 'true' read", () => {
+    const result = parseTrainEnabled({ stdout: "true\n", stderr: "", exitCode: 0 });
+    expect(result).toEqual({ enabled: true });
+  });
+
+  it("returns enabled: false on a clean 'false' read", () => {
+    const result = parseTrainEnabled({ stdout: "false\n", stderr: "", exitCode: 0 });
+    expect(result).toEqual({ enabled: false });
+  });
+
+  it("treats a genuinely-absent variable (gh's own 'not found' phrasing) as enabled: false", () => {
+    const result = parseTrainEnabled({
+      stdout: "",
+      stderr: "GraphQL: Could not resolve to a Variable with the name 'HERITAGE_TRAIN_ENABLED'. (repository.variable) not found",
+      exitCode: 1,
+    });
+    expect(result).toEqual({ enabled: false });
+  });
+
+  it("treats a bare HTTP 404 as enabled: false too", () => {
+    const result = parseTrainEnabled({ stdout: "", stderr: "gh: Not Found (HTTP 404)", exitCode: 1 });
+    expect(result).toEqual({ enabled: false });
+  });
+
+  it("returns an error (never enabled: false) on an auth failure — a blind read must never look like a confirmed 'disabled'", () => {
+    const result = parseTrainEnabled({ stdout: "", stderr: "HTTP 401: Bad credentials", exitCode: 1 });
+    expect("error" in result).toBe(true);
+    expect((result as { error: string }).error).toContain("HTTP 401");
+  });
+
+  it("returns an error on a transient 5xx too", () => {
+    const result = parseTrainEnabled({ stdout: "", stderr: "HTTP 503: couldn't respond to your request in time", exitCode: 1 });
+    expect("error" in result).toBe(true);
   });
 });

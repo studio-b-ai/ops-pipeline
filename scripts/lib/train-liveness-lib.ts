@@ -47,6 +47,23 @@
  * alert state). `evaluateTrainLiveness` is called once per tick and always returns the CURRENT
  * verdict; the worker decides open/close/leave-alone by comparing this verdict against
  * whether an issue is already open — never by comparing this tick's verdict to the last one.
+ *
+ * ── Codex review fixes (ops-pipeline#272) ──
+ *   - `pickLastScheduledRun` — the verdict is anchored on SCHEDULE-triggered runs only (P1: a
+ *     human `workflow_dispatch` tick can suppress/close the alert while the cron itself stays
+ *     dead — tonight's exact failure shape was a human fixing the queue by hand while the
+ *     every-5-minute cron never ran again). The worker's issue-body may still MENTION the
+ *     newest non-schedule run as an informational "last manual tick" — that never feeds the
+ *     verdict.
+ *   - `evaluateTrainLiveness` now validates BOTH `nowIso` and (when non-null)
+ *     `lastCompletedRunIso` and THROWS `TypeError('invalid ISO timestamp: <value>')` on a
+ *     malformed one (P3 — an unvalidated `NaN` diff previously fell through `rawMinutes >
+ *     windowMinutes` as `false` and returned a silently-passing `ok` with `silentMinutes=NaN`).
+ *     The worker catches this, logs loud, exits non-zero, and performs NO reconcile.
+ *   - `parseTrainEnabled` (P1) — classifies a `gh variable get` result so the worker can
+ *     distinguish "genuinely absent variable" (→ `disabled`, expected) from "gh call failed for
+ *     some OTHER reason" (auth/scope/5xx → the worker throws and never reconciles; a blind read
+ *     must never be allowed to CLOSE a live outage issue, Rule #322/#456).
  */
 
 // ───────────────────────────── constants ─────────────────────────────
@@ -88,17 +105,30 @@ export interface TrainLivenessResult {
   reason: string;
 }
 
-/** Raw (unfloored) minute difference `toIso - fromIso` — never itself reads the clock; both timestamps are caller-supplied. */
-function minutesBetweenRaw(fromIso: string, toIso: string): number {
-  const from = new Date(fromIso).getTime();
-  const to = new Date(toIso).getTime();
-  return (to - from) / 60_000;
+/**
+ * Parses an ISO 8601 timestamp to epoch milliseconds, THROWING (never returning `NaN`) on a
+ * malformed value — P3 codex fix: an unvalidated `new Date(bad).getTime()` is `NaN`, and
+ * `NaN > windowMinutes` is `false`, so a malformed timestamp used to fall through the staleness
+ * check as a silently-passing `ok` with `silentMinutes=NaN`. A watchdog that can be fooled into
+ * "healthy" by bad input is worse than one that has no input at all.
+ */
+function parseIsoStrict(value: string): number {
+  const ms = new Date(value).getTime();
+  if (Number.isNaN(ms)) throw new TypeError(`invalid ISO timestamp: ${value}`);
+  return ms;
 }
 
 export function evaluateTrainLiveness(input: EvaluateTrainLivenessInput): TrainLivenessResult {
   const { nowIso, lastCompletedRunIso, queuedTickets, trainEnabled, windowMinutes = TRAIN_LIVENESS_STALE_MINUTES } = input;
 
-  const rawMinutes = lastCompletedRunIso === null ? null : minutesBetweenRaw(lastCompletedRunIso, nowIso);
+  // Validate BOTH timestamps before any classification runs. `nowIso` is required and
+  // validated unconditionally — it anchors the whole evaluation even on the never-ran path.
+  // `lastCompletedRunIso` is validated only when present; `null` is a legitimate "never ran"
+  // value, not a malformed one, and must keep working exactly as before.
+  const nowMs = parseIsoStrict(nowIso);
+  const lastMs = lastCompletedRunIso === null ? null : parseIsoStrict(lastCompletedRunIso);
+
+  const rawMinutes = lastMs === null ? null : (nowMs - lastMs) / 60_000;
   const silentMinutes = rawMinutes === null ? null : Math.floor(rawMinutes);
 
   // 1. disabled — checked FIRST: a deliberately-off train (job-level `if:` gate in
@@ -152,6 +182,71 @@ export function evaluateTrainLiveness(input: EvaluateTrainLivenessInput): TrainL
   };
 }
 
+// ───────────────────────────── run selection (P1) ─────────────────────────────
+
+export interface RunLike {
+  /** GitHub's own trigger name — `'schedule'` for a cron tick, `'workflow_dispatch'` for a manual one, etc. */
+  event: string;
+  /** ISO 8601 completion timestamp. */
+  updatedAt: string;
+  createdAt: string;
+  url: string;
+  databaseId: number;
+}
+
+/**
+ * Selects the most recently updated run whose `event` is EXACTLY `'schedule'` — the cron
+ * actually ticking, never a manual `workflow_dispatch` (P1 codex fix on ops-pipeline#272: a
+ * human dispatch can suppress or auto-close the alert while the real every-5-minute cron stays
+ * dead — tonight's exact failure shape was a human fixing the queue by hand while the cron
+ * never ran again). Returns `null` when the input contains no schedule-triggered run at all
+ * (dispatch-only input, or an empty list).
+ *
+ * Pure and defensive: the worker's live `gh run list` call already passes `--event schedule`
+ * server-side, so in production this function usually just re-confirms a 0-or-1-element list —
+ * but keeping the filter+max-select HERE (rather than trusting the server-side flag alone)
+ * means the contract holds even given an unfiltered/mixed list, which is exactly what lets this
+ * be unit-tested without a live `gh` call.
+ */
+export function pickLastScheduledRun(runs: RunLike[]): RunLike | null {
+  const scheduled = runs.filter((r) => r.event === "schedule");
+  if (scheduled.length === 0) return null;
+  return scheduled.reduce((latest, r) => (new Date(r.updatedAt).getTime() > new Date(latest.updatedAt).getTime() ? r : latest));
+}
+
+// ───────────────────────────── enabled-read classification (P1) ─────────────────────────────
+
+export interface GhCommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+export type ParseTrainEnabledResult = { enabled: boolean } | { error: string };
+
+/** Matches `gh`'s stderr shape for a genuinely-absent repo variable — both the GraphQL "not found" phrasing and a bare HTTP 404. */
+const VARIABLE_NOT_FOUND_PATTERN = /not found|HTTP 404/i;
+
+/**
+ * Classifies a `gh variable get HERITAGE_TRAIN_ENABLED` invocation result (P1 codex fix on
+ * ops-pipeline#272). A genuinely-ABSENT variable means "disabled" — the train has never been
+ * turned on, mirroring heritage-restart-train.yml's own job-level `if:` gate, and silence is
+ * expected. But ANY OTHER failure (auth, scope, a transient 5xx) must never be silently read as
+ * `disabled` — that would let a blind/broken read CLOSE a genuinely live outage issue (Rule
+ * #322/#456: a watchdog that cannot confirm a signal must never act as if it confirmed the
+ * SAFE one). Only `exitCode === 0` with the literal string `'true'` is `enabled: true`; any
+ * other successful read (e.g. the variable is literally `'false'`) is `enabled: false`.
+ */
+export function parseTrainEnabled(result: GhCommandResult): ParseTrainEnabledResult {
+  if (result.exitCode === 0) {
+    return { enabled: result.stdout.trim() === "true" };
+  }
+  if (VARIABLE_NOT_FOUND_PATTERN.test(result.stderr)) {
+    return { enabled: false };
+  }
+  return { error: `gh variable get failed (exit ${result.exitCode}): ${result.stderr.trim()}` };
+}
+
 // ───────────────────────────── render ─────────────────────────────
 
 export interface LivenessQueuedTicket {
@@ -179,9 +274,15 @@ export interface FormatLivenessIssueBodyInput {
   nowIso: string;
   silentMinutes: number | null;
   queuedTickets: LivenessQueuedTicket[];
-  /** `html_url` of the last completed heritage-restart-train.yml run, or `null` if none exists. */
+  /** `html_url` of the last completed SCHEDULE-triggered run (the one the verdict is anchored on), or `null` if none exists. */
   lastRunUrl: string | null;
   windowMinutes: number;
+  /**
+   * P1 codex fix — informational ONLY, never feeds the verdict: the newest completed run whose
+   * event was NOT `'schedule'` (a human `workflow_dispatch`), when one exists and is worth
+   * mentioning ("someone dispatched the train by hand, but the cron itself may still be dead").
+   */
+  lastManualTick?: { url: string; updatedAt: string } | null;
   /** Rule #471 plant-ladder marker — see `formatLivenessIssueTitle`. */
   planted?: boolean;
 }
@@ -193,7 +294,7 @@ export interface FormatLivenessIssueBodyInput {
  * reading this file's source.
  */
 export function formatLivenessIssueBody(input: FormatLivenessIssueBodyInput): string {
-  const { nowIso, silentMinutes, queuedTickets, lastRunUrl, windowMinutes, planted = false } = input;
+  const { nowIso, silentMinutes, queuedTickets, lastRunUrl, windowMinutes, lastManualTick = null, planted = false } = input;
   const lines: string[] = [];
 
   if (planted) {
@@ -207,7 +308,12 @@ export function formatLivenessIssueBody(input: FormatLivenessIssueBodyInput): st
     "The Heritage restart train's `*/5 * * * *` cron (`.github/workflows/heritage-restart-train.yml`) has gone silent while ticket(s) sat queued in `train:ready`.",
   );
   lines.push("");
-  lines.push(`- Last completed run: ${lastRunUrl ?? "none recorded"}`);
+  lines.push(`- Last completed SCHEDULE-triggered run: ${lastRunUrl ?? "none recorded"}`);
+  if (lastManualTick) {
+    lines.push(
+      `- Last manual tick (informational only, does NOT feed this verdict): ${lastManualTick.url} (${lastManualTick.updatedAt}) — a human dispatch does not prove the cron itself is alive.`,
+    );
+  }
   lines.push(
     `- Silent for: ${silentMinutes === null ? "unknown (no completed run ever recorded)" : `${silentMinutes} min`} (threshold: ${windowMinutes} min)`,
   );
