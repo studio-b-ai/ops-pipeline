@@ -1,0 +1,112 @@
+name: Heritage Train Liveness
+
+# CRON-LIVENESS leg for the Heritage restart train (Rule #448: a monitor's check cadence must
+# beat the SLA it measures against, not merely match it -- the train's own 30-minute staleness
+# threshold needs a check tighter than 30 minutes, hence 15 here). Full design lives in
+# scripts/train-liveness-worker.ts's and scripts/lib/train-liveness-lib.ts's header comments;
+# this workflow only mints the fleet App token (backlog-staleness.yml / heritage-restart-train.yml's
+# pattern, copied verbatim) and runs the worker with it.
+#
+# Incident this leg answers: heritage-restart-train.yml's every-5-minute cron did not run
+# 23:55Z-00:30Z (2026-08-30/31 overnight) while a train:ready ticket sat queued, and nobody was
+# told until a human noticed and dispatched it by hand. This worker opens ONE auto-reconciled
+# GitHub issue (label train-liveness, Rule #165) when the train's cron has gone silent while
+# tickets are queued, and closes it (with a comment) the next time the train ticks again --
+# transition-only (Rule #292), never a per-run comment while the issue stays open.
+#
+# Fleet App token required for the same reason as backlog-staleness.yml / heritage-restart-train.yml:
+# this worker reads train:ready PRs across studio-b-ai/studiob AND studio-b-ai/client-asthetik
+# (a repo-scoped ambient GITHUB_TOKEN structurally cannot see another repo), plus Actions run
+# data and the HERITAGE_TRAIN_ENABLED variable on THIS repo, and posts/closes its own issue on
+# studio-b-ai/ops-pipeline. studiob-fleet-bot's existing issues:write + metadata:read (+ the
+# pull_requests:read / actions:read grants already present for the restart-train and
+# dead-cron legs) covers every read and write this worker performs.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *" # every 15 minutes -- GH Actions cron is UTC-only (Rule #94); 15 < the 30-min SLA it watches (Rule #448)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true (default) = safe no-mutate tick: real reads throughout, zero issue open/close. false = LIVE for this dispatch -- scheduled runs always run live."
+        required: false
+        type: boolean
+        default: true
+      force_stale_minutes:
+        description: "Rule #471 planted-control: fabricates the last-completed-run age as this many minutes, to prove the stale->open-issue path fires end to end. Overrides ONLY the last-run age (queued-ticket count + HERITAGE_TRAIN_ENABLED stay real reads) -- omit for a normal run."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: heritage-train-liveness
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: "Heritage train liveness -- cron-silence watchdog (fleet App token)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: "Install deps"
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted unconditionally -- including on a dry run: Rule #376, a dry run that reads
+      # nothing proves nothing, and every read this worker does (train:ready PR lists across
+      # two repos, the last completed run of heritage-restart-train.yml, the
+      # HERITAGE_TRAIN_ENABLED variable, the open-issue check on this repo) needs real
+      # cross-repo access the ambient GITHUB_TOKEN structurally cannot provide.
+      - name: "Mint fleet installation token"
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: "Fail loud if the fleet token did not mint"
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token -- check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
+          exit 1
+
+      # Untrusted workflow_dispatch string input (force_stale_minutes) travels through env:
+      # (real OS-level env var, never text-substituted into the run: script text) and is
+      # referenced quoted ("$FORCE_STALE_MINUTES_INPUT") -- copied verbatim from
+      # backlog-staleness.yml / heritage-restart-train.yml's codex-reviewed fix (a
+      # dispatcher-supplied value containing `$(...)`, backticks, or `;` must never execute as
+      # shell syntax with the just-minted fleet App token live in GH_TOKEN). `dry_run` stays a
+      # direct ${{ }} substitution ONLY inside the DRY_RUN_FLAG boolean expression below, never
+      # spliced into run: text -- GitHub Actions can only ever produce true/false from a
+      # boolean-typed input, so no attacker-controlled text flows through that comparison.
+      - name: "Run train-liveness worker"
+        id: run_worker
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          # Scheduled runs are LIVE (no --dry-run, exactly as backlog-staleness.yml): the flag
+          # is passed only on a workflow_dispatch whose own dry_run input is true.
+          DRY_RUN_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+          FORCE_STALE_MINUTES_INPUT: ${{ inputs.force_stale_minutes }}
+        run: |
+          args=()
+          if [ -n "$DRY_RUN_FLAG" ]; then args+=("--dry-run"); fi
+          if [ -n "$FORCE_STALE_MINUTES_INPUT" ]; then args+=(--force-stale-minutes "$FORCE_STALE_MINUTES_INPUT"); fi
+          npx tsx train-liveness-worker.ts "${args[@]}"
+
+      # Rule #356: a timeout kill reports "cancelled" SILENTLY unless a SEPARATE if: always()
+      # step names the terminal status explicitly.
+      - name: "Report terminal status"
+        if: always()
+        run: |
+          echo "heritage-train-liveness workflow terminal status: ${{ job.status }} (run_worker outcome: ${{ steps.run_worker.outcome }})"
