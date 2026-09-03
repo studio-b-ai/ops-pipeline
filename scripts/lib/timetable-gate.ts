@@ -53,10 +53,33 @@ export interface Hold {
   issue?: string;
 }
 
+/**
+ * The two ticket classes recognized by the class-aware band map (Kevin 2026-09-03,
+ * verbatim: "if it's a bug fix, I think those go afterhours any time. if they're
+ * enhancements, they go anytime to test but production is only wednesday at noon"
+ * — ops-pipeline#281). Any unrecognized value coerces to the fail-closed default
+ * (enhancement) inside the evaluator; the wider bugfix band is never granted by
+ * omission or by a garbage value.
+ */
+export type TicketClass = "bugfix" | "enhancement";
+export const TICKET_CLASSES: readonly TicketClass[] = ["bugfix", "enhancement"];
+export const DEFAULT_TICKET_CLASS: TicketClass = "enhancement";
+
 export interface WindowEntry {
   surface: string;
   repo?: string;
+  /**
+   * Legacy single-band field. Kept required for backward compatibility with every
+   * existing windows.yaml row; when `bands` is absent, the value here is treated
+   * as the enhancement default (Kevin ruling 2026-09-03 — ops-pipeline#281).
+   */
   band: string;
+  /**
+   * Optional per-class band map (Kevin 2026-09-03 — ops-pipeline#281). When a class
+   * is listed here its value wins; when the map is absent, enhancement falls back
+   * to `band` (above) and bugfix has no fallback — it fails closed on that surface.
+   */
+  bands?: Partial<Record<TicketClass, string>>;
   cadence?: string;
   // pg-enum-drift-exempt: windows.yaml registry field (YAML in the brain vault), not a Postgres column
   status: "RULED" | "RULED-GATED" | "PROPOSED";
@@ -123,6 +146,16 @@ export interface DepartureFacts {
    * outside TypeScript's union — truthiness alone would be fail-open).
    */
   invokedVia?: string;
+  /**
+   * Ticket CLASS (Kevin 2026-09-03 — ops-pipeline#281), derived by the caller
+   * from the PR label (`bug`/`enhancement`), the conventional-commit prefix
+   * (`fix:` vs `feat:`), or the squasher's diff class. Selects the class-aware
+   * band on the surface's WindowEntry (check 08). Absent OR any unrecognized
+   * value coerces to the fail-closed default: `enhancement` (the narrower
+   * band). The wider `bugfix` band is NEVER granted by omission — a class-less
+   * caller cannot slip into after-hours-any-day.
+   */
+  ticketClass?: TicketClass;
 }
 
 /** §8 item 13 — the only interception points that may invoke the engine. */
@@ -354,10 +387,34 @@ export function parseWindows(yamlText: string): WindowEntry[] {
         `timetable-gate: windows[${i}] status must be RULED | RULED-GATED | PROPOSED`,
       );
     }
+    // Optional per-class bands (Kevin 2026-09-03 — ops-pipeline#281). Strict:
+    // unknown class keys and non-string / empty values throw, so a typo in a
+    // brand-new registry row cannot silently pass every request through the
+    // fallback (`band` for enhancement, no fallback for bugfix) with no signal.
+    let bands: Partial<Record<TicketClass, string>> | undefined;
+    if (rec.bands !== undefined && rec.bands !== null) {
+      const bRec = asRecord(rec.bands, `windows[${i}].bands`);
+      const b: Partial<Record<TicketClass, string>> = {};
+      for (const [k, v] of Object.entries(bRec)) {
+        if (!TICKET_CLASSES.includes(k as TicketClass)) {
+          throw new Error(
+            `timetable-gate: windows[${i}].bands has unknown class \`${k}\` (must be one of: ${TICKET_CLASSES.join(", ")})`,
+          );
+        }
+        if (typeof v !== "string" || v.trim() === "") {
+          throw new Error(
+            `timetable-gate: windows[${i}].bands.${k} must be a non-empty string`,
+          );
+        }
+        b[k as TicketClass] = v;
+      }
+      bands = b;
+    }
     return {
       surface: rec.surface,
       repo: typeof rec.repo === "string" ? rec.repo : undefined,
       band: rec.band,
+      bands,
       cadence: typeof rec.cadence === "string" ? rec.cadence : undefined,
       status,
       gate_note: typeof rec.gate_note === "string" ? rec.gate_note : undefined,
@@ -394,19 +451,58 @@ export interface WindowVerdict {
 }
 
 /**
+ * Resolve the effective band for a ticket class on this window entry (Kevin
+ * 2026-09-03 — ops-pipeline#281). Precedence:
+ *   1. `bands[class]` — the class-specific value wins whenever it exists.
+ *   2. `band` — the legacy single-band field is the ENHANCEMENT default only.
+ *      bugfix has NO fallback: an entry without `bands.bugfix` fails closed
+ *      for bugfix, deliberately (the wider bugfix band is never inherited).
+ *
+ * Kevin's example (windows.yaml `acumatica-prod`): `bands: {bugfix:
+ * "after-hours any day", enhancement: "Wed 12:00 ET"}` with `band: "Wed 12:00
+ * ET"` — either an owner writes both explicitly (recommended for new rows),
+ * or leaves `band` alone as the enhancement default and adds a `bands.bugfix`
+ * to open the wider bugfix path. Migration is opt-in row-by-row.
+ */
+export function resolveClassBand(
+  entry: WindowEntry,
+  ticketClass: TicketClass,
+): { band: string } | { error: string } {
+  const classBand = entry.bands?.[ticketClass];
+  if (typeof classBand === "string" && classBand.trim() !== "") {
+    return { band: classBand };
+  }
+  if (ticketClass === "enhancement" && typeof entry.band === "string" && entry.band.trim() !== "") {
+    return { band: entry.band };
+  }
+  return {
+    error: `no band configured for class \`${ticketClass}\` on surface \`${entry.surface}\` (bands=${entry.bands ? JSON.stringify(entry.bands) : "absent"}; band=${entry.band ? `\`${entry.band}\`` : "empty"}) — fail-closed`,
+  };
+}
+
+/**
  * Evaluate a window entry at the EXPECTED PUBLISH TIME (never merge time).
  * Recognized bands:
  *   - "always"
  *   - "on demand"                       (clock-free; the other checks gate)
+ *   - "after-hours any day"             (Kevin 2026-09-03 — ops-pipeline#281;
+ *                                        weekday 06:00-18:00 ET closed; all
+ *                                        other hours + weekends open)
  *   - "<Dow> HH:MM ET"                  (weekly, `windowMinutes` wide, default 60)
  *   - "outside HH:MM-HH:MM ET weekdays" (weekends open; weekdays outside the span)
  * Everything else — including any band containing BARRED — is CLOSED.
  * PROPOSED = CLOSED (not Kevin-RULED). RULED-GATED = CLOSED while gate_note stands.
+ *
+ * `ticketClass` selects the band via `resolveClassBand`. Any unrecognized value
+ * (JavaScript garbage from an untyped caller) coerces to the fail-closed default
+ * `enhancement` — the wider bugfix band is NEVER granted by omission or by a
+ * typo'd class string.
  */
 export function evaluateWindow(
   entry: WindowEntry,
   publishAt: Date,
   windowMinutes = 60,
+  ticketClass: TicketClass = DEFAULT_TICKET_CLASS,
 ): WindowVerdict {
   if (entry.status === "PROPOSED") {
     return { open: false, reason: `window for ${entry.surface} is PROPOSED, not Kevin-RULED` };
@@ -417,13 +513,34 @@ export function evaluateWindow(
       reason: `window for ${entry.surface} is RULED-GATED: ${entry.gate_note ?? "gate note missing"}`,
     };
   }
-  const band = entry.band.trim();
+  const cls: TicketClass = TICKET_CLASSES.includes(ticketClass) ? ticketClass : DEFAULT_TICKET_CLASS;
+  const resolved = resolveClassBand(entry, cls);
+  if ("error" in resolved) return { open: false, reason: resolved.error };
+  const band = resolved.band.trim();
   if (/BARRED/i.test(band)) {
     return { open: false, reason: `band for ${entry.surface} carries a BAR: ${band}` };
   }
   if (/^always$/i.test(band)) return { open: true, reason: "band: always" };
   if (/^on demand$/i.test(band)) {
     return { open: true, reason: "band: on demand (clock-free; QA/drift checks gate)" };
+  }
+  if (/^after-hours any day$/i.test(band)) {
+    // Kevin 2026-09-03 verbatim: "if it's a bug fix, I think those go afterhours any
+    // time" — closed inside weekday 06:00-18:00 ET (mirrors the acuops-deploy.yml
+    // business-hours gate and restart-train-lib.ts `isBusinessHoursBlockedET`); open
+    // otherwise (weekday evenings, weekday early morning, and all weekend). Whole-
+    // minute comparison matches the bash `date +%H` truncation of the mirrored gate.
+    const { dow, minutes } = etParts(publishAt);
+    if (dow === "Sat" || dow === "Sun") {
+      return { open: true, reason: `weekend (after-hours any day)` };
+    }
+    if (minutes >= 6 * 60 && minutes < 18 * 60) {
+      return {
+        open: false,
+        reason: `publish lands inside business hours 06:00-18:00 ET on ${dow} — after-hours any day (ET minute ${minutes})`,
+      };
+    }
+    return { open: true, reason: `after-hours ${dow} (after-hours any day; ET minute ${minutes})` };
   }
   const weekly = band.match(/^(Sun|Mon|Tue|Wed|Thu|Fri|Sat)\w*\s+(\d{1,2}):(\d{2})\s+ET$/i);
   if (weekly) {
@@ -604,14 +721,25 @@ export function evaluateDeparture(
   }
 
   // -- Check 08: window open at EXPECTED PUBLISH time -----------------------
+  //
+  // Kevin 2026-09-03 (ops-pipeline#281): class-aware band selection. The class
+  // is derived by the caller from the PR (label / conventional-commit prefix /
+  // squasher diff class); absent OR unrecognized coerces to `enhancement` (the
+  // narrower band) — the wider `bugfix` band is NEVER granted by omission. The
+  // reason string names `class=<x> band=<y>` explicitly so the train's PLAN
+  // line (restart-train-lib.ts) can render "the class + band" without having
+  // to re-derive either fact.
   const win = registries.windows.find((w) => w.surface === arc.surface);
+  const cls: TicketClass = facts.ticketClass === "bugfix" ? "bugfix" : DEFAULT_TICKET_CLASS;
   if (!win) {
-    add("08", "window-open", "fail", `surface \`${arc.surface}\` not in windows.yaml — unlisted surfaces cannot depart`);
+    add("08", "window-open", "fail", `class=${cls}: surface \`${arc.surface}\` not in windows.yaml — unlisted surfaces cannot depart`);
   } else if (!facts.expectedPublishTime) {
-    add("08", "window-open", "fail", "expected publish time unresolved (now + build lead + 15min buffer)");
+    add("08", "window-open", "fail", `class=${cls}: expected publish time unresolved (now + build lead + 15min buffer)`);
   } else {
-    const v = evaluateWindow(win, facts.expectedPublishTime);
-    add("08", "window-open", v.open ? "pass" : "fail", v.reason);
+    const resolved = resolveClassBand(win, cls);
+    const bandLabel = "band" in resolved ? `\`${resolved.band}\`` : "unresolved";
+    const v = evaluateWindow(win, facts.expectedPublishTime, 60, cls);
+    add("08", "window-open", v.open ? "pass" : "fail", `class=${cls} band=${bandLabel}: ${v.reason}`);
   }
 
   // -- Check 09: no open P0, no load signal, 30-min substrate spacing -------
@@ -685,6 +813,11 @@ export function formatLedgerLine(
   now: Date,
   mergeSha?: string,
 ): string {
+  // Ticket class recorded EXACTLY as the evaluator resolved it (fail-closed
+  // enhancement default applied — a nullable field here would let a ledger
+  // reader silently treat "unknown" and "enhancement" as different states,
+  // then diverge from what the gate actually evaluated). ops-pipeline#281.
+  const ticketClass: TicketClass = facts.ticketClass === "bugfix" ? "bugfix" : DEFAULT_TICKET_CLASS;
   return JSON.stringify({
     ts: now.toISOString(),
     verdict: result.verdict,
@@ -693,6 +826,7 @@ export function formatLedgerLine(
     head_sha: facts.headSha ?? null,
     merge_sha: mergeSha ?? null,
     invoked_via: facts.invokedVia ?? null,
+    ticket_class: ticketClass,
     checks: result.checks.map((c) => ({ id: c.id, name: c.name, v: c.verdict })),
     failures: result.failures,
   });
