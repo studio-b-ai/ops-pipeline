@@ -76,12 +76,13 @@ const HERITAGE_TRAIN_ENABLED_VAR = "HERITAGE_TRAIN_ENABLED";
 // TICKET_REPOS constant — that file is out of scope for this leg and does not export it.
 const TICKET_REPOS = ["studio-b-ai/studiob", "studio-b-ai/client-asthetik"] as const;
 
-const TRAIN_LIVENESS_LABEL_DESCRIPTION =
-  "Heritage restart train cron-liveness watch (Rule #448): open = the */5 cron is silent while train:ready tickets are queued";
+// ≤100 chars each (GitHub's hard cap on label descriptions — 422s at `gh label create`
+// otherwise; caught here by lib/__tests__/github-issues.test.ts's source-level scan, the
+// exact guard ops-pipeline#136's first live firing was missing, Rule #159/#464).
+const TRAIN_LIVENESS_LABEL_DESCRIPTION = "Heritage restart train cron-liveness watch (#448): open = restart-train cron silent, tickets queued";
 const TRAIN_LIVENESS_LABEL_COLOR = "B60205"; // same family as restart-train.ts's own MACHINERY_LABEL_COLOR — both are alarms about this train
 const MACHINERY_ALERT_LABEL = "machinery-alert"; // shared cross-cutting tag (backlog-managers.yaml's machinery_labels) — excludes this leg's issues from rule-17 ranking
-const MACHINERY_ALERT_LABEL_DESCRIPTION =
-  "Rule #165 auto-reconciled monitor issue — excluded from LANES rule 17 ranking (see backlog-managers.yaml machinery_labels)";
+const MACHINERY_ALERT_LABEL_DESCRIPTION = "Rule #165 monitor issue -- excluded from LANES rule 17 ranking (backlog-managers.yaml)";
 const MACHINERY_ALERT_LABEL_COLOR = "5319E7";
 
 // ───────────────────────────── gh reads ─────────────────────────────
