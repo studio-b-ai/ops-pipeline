@@ -180,6 +180,14 @@ function fetchQueuedTickets(): LivenessQueuedTicket[] {
  * never reconcile on an unconfirmed read).
  */
 function fetchTrainEnabled(): { enabled: boolean } | { error: string } {
+  // Workflow-injected value from the `vars` context (no token needed; the fleet App token 403s on
+  // actions/variables). An EMPTY string = the variable is not defined on the repo = disabled — the
+  // same reading heritage-restart-train.yml's own job-level `if:` applies. Local runs without the env
+  // var fall through to `gh variable get`.
+  const injected = process.env.HERITAGE_TRAIN_ENABLED_VALUE;
+  if (injected !== undefined) {
+    return parseTrainEnabled({ stdout: injected, stderr: "", exitCode: 0 });
+  }
   try {
     const stdout = gh(["variable", "get", HERITAGE_TRAIN_ENABLED_VAR, "--repo", SELF_REPO]);
     return parseTrainEnabled({ stdout, stderr: "", exitCode: 0 });
