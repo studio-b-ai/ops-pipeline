@@ -64,6 +64,7 @@ import {
   probeEntraSecret,
   probeEntraUserPassword,
   probe1PasswordSA,
+  probeShipEngineApiKey,
   getCertExpiry,
   type EntraProbeCreds,
 } from "./lib/credential-probes.js";
@@ -93,7 +94,8 @@ type CredType =
   | "entra-client-secret"
   | "entra-user-password"
   | "cloudflare-api-token"
-  | "tls-cert";
+  | "tls-cert"
+  | "shipengine-api-key";
 
 interface ManifestItem {
   name: string;
@@ -198,6 +200,8 @@ async function runProbe(item: ManifestItem): Promise<ProbeResult> {
         return { alive: true, expiry: null, source: "probe", error: "tls-cert item missing host" };
       }
       return getCertExpiry(item.host);
+    case "shipengine-api-key":
+      return probeShipEngineApiKey(opRead(reqRef(item)));
     default:
       return { alive: true, expiry: null, source: "probe", error: `unknown credential type: ${(item as ManifestItem).type}` };
   }

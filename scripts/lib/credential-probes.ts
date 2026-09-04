@@ -293,6 +293,34 @@ export async function probeCloudflareToken(token: string, recordedExpiry: string
   }
 }
 
+/**
+ * ShipEngine API key aliveness probe (ops-pipeline#291, Rule #302 rung 2 — non-expiring BY
+ * DESIGN: the daily aliveness probe IS the monitoring, revoke-on-signal the response).
+ * GET /v1/carriers with header `API-Key: <value>` — aliveness-shaped (never returns an expiry,
+ * mirrors entra-user-password): ShipEngine keys don't carry a discoverable expiry to read.
+ *   - 200 → alive
+ *   - 401 → DEAD (revoked / rotated elsewhere)
+ *   - anything else (other status, or a network/timeout failure) → PROBE_FAILED, NEVER DEAD —
+ *     a probe failure is a monitoring gap, not evidence the credential itself is dead.
+ */
+export async function probeShipEngineApiKey(apiKey: string): Promise<ProbeResult> {
+  try {
+    const resp = await fetch("https://api.shipengine.com/v1/carriers", {
+      headers: { "API-Key": apiKey },
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    if (resp.status === 200) {
+      return { alive: true, expiry: null, source: "probe" };
+    }
+    if (resp.status === 401) {
+      return { alive: false, expiry: null, source: "probe" };
+    }
+    return { alive: true, expiry: null, source: "probe", error: `shipengine probe HTTP ${resp.status}` };
+  } catch (err) {
+    return { alive: true, expiry: null, source: "probe", error: `shipengine probe failed: ${errMsg(err)}` };
+  }
+}
+
 export interface EntraProbeCreds {
   tenantId: string;
   clientId: string;
