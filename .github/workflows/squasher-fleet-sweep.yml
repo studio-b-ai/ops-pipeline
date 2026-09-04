@@ -124,12 +124,29 @@ jobs:
             repo=$(jq -r '.repo' <<<"$repo_json")
             if [ -n "${ONLY_REPO:-}" ] && [ "$repo" != "$ONLY_REPO" ]; then continue; fi
 
+            train_flag=$(jq -r '.train' <<<"$repo_json")
             sq=$(gh pr list --repo "$repo" --label bugsquasher --state open --json number --limit 100 --jq '[.[].number]')
             tr='[]'
-            if [ "$(jq -r '.train' <<<"$repo_json")" = "true" ]; then
+            if [ "$train_flag" = "true" ]; then
               # `queued` = Kevin's 2026-09-02 one-vocabulary rename of train:ready (scripts/lib/label-authority.ts).
               tr=$(gh pr list --repo "$repo" --label 'queued' --state open --json number --limit 100 --jq '[.[].number]')
             fi
+
+            # ops#294: a pr_number-scoped "evaluate NOW" dispatch against a `queued`
+            # PR in a train:false repo is NOT this sweep's to merge — that repo's
+            # `queued` door is the restart train (heritage-restart-train.yml), and
+            # printing the same blind `queued(train)=0` this sweep prints for an
+            # unlabeled PR cost three wrong claims on studiob#655 (#464/#465 class).
+            # Detected ONLY on this exact dispatch shape — never the scheduled cron,
+            # never a train:true repo (tr already answers those) — with one targeted
+            # gh call scoped to the single dispatched PR. Wording contract + tests:
+            # scripts/lib/squasher-fleet-not-the-door.ts.
+            only_pr_carries_queued=false
+            if [ -n "${ONLY_PR:-}" ] && [ "$train_flag" != "true" ]; then
+              only_pr_carries_queued=$(gh pr view "$ONLY_PR" --repo "$repo" --json labels \
+                --jq 'any(.labels[]; .name == "queued")' 2>/dev/null || echo false)
+            fi
+
             if [ -n "${ONLY_PR:-}" ]; then
               sq=$(jq -c --argjson p "$ONLY_PR" '[.[] | select(. == $p)]' <<<"$sq")
               tr=$(jq -c --argjson p "$ONLY_PR" '[.[] | select(. == $p)]' <<<"$tr")
@@ -137,8 +154,13 @@ jobs:
 
             # Per-repo counts on every cycle (#465): an all-zero sweep must be
             # distinguishable from a blind instrument — these lines ARE the
-            # enumeration receipt.
-            echo "$repo: bugsquasher=$(jq length <<<"$sq") queued(train)=$(jq length <<<"$tr")"
+            # enumeration receipt. (Message-clarity only — the exit code below is
+            # unaffected either branch; this never fails the sweep.)
+            if [ -n "${ONLY_PR:-}" ] && [ "$train_flag" != "true" ] && [ "$only_pr_carries_queued" = "true" ]; then
+              echo "queued PR $repo#$ONLY_PR is not this sweep's to merge (fleet registry train:false) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
+            else
+              echo "$repo: bugsquasher=$(jq length <<<"$sq") queued(train)=$(jq length <<<"$tr")"
+            fi
 
             # Train entries pass ONLY train_ready — the squasher inputs are blanked
             # deliberately (the reusable ignores them in train mode; forwarding
