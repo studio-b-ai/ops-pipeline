@@ -31,6 +31,13 @@ name: Repo Hygiene
 # Flags-only (the issue's own "Law" section): this workflow, and the worker it runs,
 # never mutate a repo, never archive anything, never touch repo-baseline.json. Baseline
 # updates are human — the issue body carries the exact line(s) to edit.
+#
+# ops-pipeline#277 (2026-09-04) added a THIRD leg, required-checks-drift-worker.ts (design
+# in scripts/lib/required-checks-drift-classify.ts's header) — dead branch-protection
+# required-check contexts + unparseable workflow YAML, riding the SAME minted fleet-App
+# token as the two legs above. It needs Administration:read on top of the Contents:read +
+# Actions:read gap already documented above; also flags-only, also degrades loudly per
+# Rule #464 rather than failing the job. See that step's own comment below for specifics.
 
 on:
   schedule:
@@ -114,3 +121,24 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
         run: npx tsx dead-cron-worker.ts ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+
+      # ops-pipeline#277 — the required-checks-drift leg (scripts/required-checks-drift-
+      # worker.ts; design in scripts/lib/required-checks-drift-classify.ts's header). Third
+      # independent leg, third independent failure domain: `!cancelled()` (Rule #320) so a
+      # fleet-drift or dead-cron failure above never silently skips this one.
+      #
+      # ⚠️ EXPECTED CI DEGRADATION ON DAY ONE (2026-09-04 bug-squasher probe, ops#277
+      # comment 2): this leg needs Administration:read (branch protection) + Contents:read
+      # (workflow enumeration/content — same gap already documented above for dead-cron) +
+      # Actions:read (run-list — also already documented above) on the fleet App's org
+      # installation, none of which it currently holds. By design it does NOT fail the job
+      # — it opens/updates its two aggregate issues carrying loud `systemicFailures` notes
+      # (Rule #464) and exits 0, exactly like the dead-cron leg's own degraded-but-honest
+      # steady state until the ops#104-class grant lands (org Settings → GitHub Apps →
+      # studiob-fleet-bot, UI-only, no API path).
+      - name: Run required-checks-drift worker
+        if: ${{ !cancelled() }}
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+        run: npx tsx required-checks-drift-worker.ts ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}

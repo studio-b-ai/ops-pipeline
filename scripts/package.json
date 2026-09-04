@@ -14,6 +14,7 @@
     "monitor:credentials": "tsx credential-expiry-monitor.ts",
     "monitor:railway-volumes": "tsx railway-volume-monitor.ts",
     "monitor:dead-cron": "tsx dead-cron-worker.ts",
+    "monitor:required-checks-drift": "tsx required-checks-drift-worker.ts",
     "gate:pr-automerge": "tsx pr-automerge-gate.ts",
     "gate:railway-status": "tsx railway-status-gate.ts",
     "monitor:railway-ledger": "tsx railway-incident-ledger.ts",
