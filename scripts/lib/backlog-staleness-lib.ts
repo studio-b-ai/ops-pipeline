@@ -23,7 +23,8 @@
  * text.
  *
  * ── Finding classes v1 (exactly five, per the issue, plus one informational note) ──
- *   1. p0p1-stale     — labeled P0 or P1, `updatedAt` more than `thresholds.p0p1_days` days
+ *   1. p0p1-stale     — labeled P0 or P1, `createdAt` more than `thresholds.p0p1_days` days
+ *                        (NOT `updatedAt` — see the 2026-09-04 note below)
  *                        ago (STRICTLY greater-than — the issue's own text is "untouched > 2
  *                        days", so exactly-at-the-threshold does not flag).
  *   2. p2-stale        — labeled P2, `updatedAt` more than `thresholds.p2_days` days ago.
@@ -128,7 +129,7 @@ export interface Finding {
   /** Issue title, when `issue` is set (for worker logging; `render()`'s table shows only the linked number per the issue's own column spec). */
   title: string | null;
   labels: string[];
-  /** Whole days idle (floored) — for `p0p1-stale`/`p2-stale`/`multi-next` this is time since `updatedAt`; for `unranked` it's time since `createdAt` (see each class's detail text for which). `null` for the two repo-level classes. */
+  /** Whole days idle (floored) — for `p2-stale`/`multi-next` this is time since `updatedAt`; for `p0p1-stale` and `unranked` it's time since `createdAt` (see each class's detail text for which). `null` for the two repo-level classes. */
   daysIdle: number | null;
   detail: string;
   remedy: string;
@@ -198,11 +199,22 @@ export function classify(input: ClassifyInput): Finding[] {
   // `multi-next` even if it happens to carry `next` (a monitor issue is never a rule-17 head).
   const rankable = [...issues].filter((i) => !isMachineryExcluded(i.labels, machineryLabels)).sort(byIssueNumber);
 
-  // 1. p0p1-stale — P0 or P1, updatedAt strictly older than p0p1_days.
+  // 1. p0p1-stale — P0 or P1, createdAt strictly older than p0p1_days.
+  //
+  // 2026-09-04 (Engineer, Kevin "go"): this used to age from `updatedAt`. That clock is
+  // reset by ANY activity — including the bug-squasher's own "unable to propose fix"
+  // comment, a label edit, or the sweep's dispatch-deferred note — so the very machinery
+  // that fails to resolve a P1 keeps refreshing its freshness. Live result: eleven P1s sat
+  // 9–24 days (ops-pipeline#134, a P1 credential rotation, 19 days) while this worker ran
+  // green daily and reported ZERO findings. A P0/P1 that is still OPEN after the threshold
+  // is stale by definition — chatter does not resolve it, closing does — so it ages from
+  // the day it was filed, the same way `unranked` already does. "Last human touch" was
+  // considered and rejected: agents post under Kevin's own login, so author cannot
+  // distinguish a human comment from a bot's. P2 deliberately unchanged in this fold.
   for (const issue of rankable) {
     if (!issue.labels.includes("P0") && !issue.labels.includes("P1")) continue;
-    const idle = daysBetween(issue.updatedAt, now);
-    if (idle <= thresholds.p0p1_days) continue;
+    const age = daysBetween(issue.createdAt, now);
+    if (age <= thresholds.p0p1_days) continue;
     findings.push({
       class: "p0p1-stale",
       repo,
@@ -210,8 +222,8 @@ export function classify(input: ClassifyInput): Finding[] {
       issue: issue.number,
       title: issue.title,
       labels: issue.labels,
-      daysIdle: Math.floor(idle),
-      detail: `P0/P1 issue untouched for ${Math.floor(idle)}d since its last update (> ${thresholds.p0p1_days}d threshold).`,
+      daysIdle: Math.floor(age),
+      detail: `P0/P1 issue still open ${Math.floor(age)}d after it was filed (> ${thresholds.p0p1_days}d threshold; ages from createdAt — activity does not reset it).`,
       remedy: RULE_17_REMEDY,
     });
   }
