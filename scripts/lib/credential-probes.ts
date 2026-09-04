@@ -238,6 +238,42 @@ export async function probeGithubPat(token: string): Promise<ProbeResult> {
 }
 
 /**
+ * Pure: turn a ShipEngine `/v1/carriers` HTTP status into a ProbeResult (exported for tests).
+ *
+ * ShipEngine API keys are non-expiring by design (ladder rung 2 — the daily aliveness probe IS
+ * the monitoring, revoke-on-signal the response); this parser never returns an expiry.
+ *   - 200      → alive (key accepted; the body is not inspected — presence of a 200 IS the signal)
+ *   - 401      → DEAD (key revoked/rotated elsewhere)
+ *   - any other status → PROBE_FAILED (monitoring gap; never a silent OK — 5xx included)
+ */
+export function shipengineResultFromStatus(httpStatus: number): ProbeResult {
+  if (httpStatus === 200) {
+    return { alive: true, expiry: null, source: "probe" };
+  }
+  if (httpStatus === 401) {
+    return { alive: false, expiry: null, source: "probe" };
+  }
+  return { alive: true, expiry: null, source: "probe", error: `shipengine /v1/carriers HTTP ${httpStatus}` };
+}
+
+/**
+ * ShipEngine API key aliveness probe: GET https://api.shipengine.com/v1/carriers with the value
+ * in the `API-Key` header. Thin network seam around `shipengineResultFromStatus` — every verdict
+ * lives in the pure parser and is unit-tested there (Rule #471 both-verdict controls).
+ */
+export async function probeShipEngineApiKey(apiKey: string): Promise<ProbeResult> {
+  try {
+    const resp = await fetch("https://api.shipengine.com/v1/carriers", {
+      headers: { "API-Key": apiKey },
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    return shipengineResultFromStatus(resp.status);
+  } catch (err) {
+    return { alive: true, expiry: null, source: "probe", error: `shipengine probe failed: ${errMsg(err)}` };
+  }
+}
+
+/**
  * npm granular token: GET registry.npmjs.org/-/whoami with the token.
  * 200 → alive; 401/403 → DEAD. npm doesn't expose granular expiry via API, so the countdown
  * comes from the manifest's recorded_expiry (null → classify yields NO_EXPIRY = backfill flag).

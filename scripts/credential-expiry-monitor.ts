@@ -64,6 +64,7 @@ import {
   probeEntraSecret,
   probeEntraUserPassword,
   probe1PasswordSA,
+  probeShipEngineApiKey,
   getCertExpiry,
   type EntraProbeCreds,
 } from "./lib/credential-probes.js";
@@ -93,6 +94,7 @@ type CredType =
   | "entra-client-secret"
   | "entra-user-password"
   | "cloudflare-api-token"
+  | "shipengine-api-key"
   | "tls-cert";
 
 interface ManifestItem {
@@ -175,6 +177,8 @@ async function runProbe(item: ManifestItem): Promise<ProbeResult> {
       return probeGithubPat(opRead(reqRef(item)));
     case "cloudflare-api-token":
       return probeCloudflareToken(opRead(reqRef(item)), recorded);
+    case "shipengine-api-key":
+      return probeShipEngineApiKey(opRead(reqRef(item)));
     case "npm-granular":
       return probeNpmGranular(opRead(reqRef(item)), recorded);
     case "1password-sa":

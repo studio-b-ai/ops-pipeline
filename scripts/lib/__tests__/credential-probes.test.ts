@@ -7,6 +7,7 @@ import {
   entraUserResultFromGraph,
   cloudflareResultFromVerify,
   cloudflareResultFromZones,
+  shipengineResultFromStatus,
   type CloudflareVerifyResponse,
   type CloudflareZonesResponse,
   type EntraUserGraphResponse,
@@ -217,6 +218,43 @@ describe("cloudflareResultFromZones", () => {
     const r = cloudflareResultFromZones(zones, REC);
     expect(r.alive).toBe(true);
     expect(r.error).toBeTruthy();
+  });
+});
+
+// ── shipengineResultFromStatus (both-verdict controls per Rule #471; ShipEngine keys are rung 2 non-expiring) ──
+
+describe("shipengineResultFromStatus", () => {
+  it("200 → alive (key accepted); no expiry (non-expiring by design)", () => {
+    expect(shipengineResultFromStatus(200)).toEqual({ alive: true, expiry: null, source: "probe" });
+  });
+
+  it("401 → DEAD (key revoked/rotated elsewhere); no expiry", () => {
+    expect(shipengineResultFromStatus(401)).toEqual({ alive: false, expiry: null, source: "probe" });
+  });
+
+  it("500 → PROBE_FAILED shape (upstream 5xx is a monitoring gap, never a silent OK)", () => {
+    const r = shipengineResultFromStatus(500);
+    expect(r.alive).toBe(true);
+    expect(r.expiry).toBeNull();
+    expect(r.error).toContain("HTTP 500");
+  });
+
+  it("502 → PROBE_FAILED shape (same class as 500)", () => {
+    const r = shipengineResultFromStatus(502);
+    expect(r.alive).toBe(true);
+    expect(r.error).toContain("HTTP 502");
+  });
+
+  it("403 → PROBE_FAILED (NOT collapsed into DEAD — only a 401 is the documented revoked signal)", () => {
+    const r = shipengineResultFromStatus(403);
+    expect(r.alive).toBe(true);
+    expect(r.error).toContain("HTTP 403");
+  });
+
+  it("204 (any non-200 2xx) → PROBE_FAILED, never a silent alive", () => {
+    const r = shipengineResultFromStatus(204);
+    expect(r.alive).toBe(true);
+    expect(r.error).toContain("HTTP 204");
   });
 });
 
