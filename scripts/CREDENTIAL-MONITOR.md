@@ -21,6 +21,7 @@ Daily (GitHub Actions cron, 14:00 UTC), for each item in [`credentials.manifest.
    | `1password-sa` | `op vault list` → alive/dead (countdown from `recorded_expiry`) |
    | `cloudflare-api-token` | `api.cloudflare.com/client/v4/user/tokens/verify` → `status` alive/dead (countdown from `recorded_expiry`; verify returns no expiry) |
    | `tls-cert` | `node:tls` peer cert `notAfter` |
+   | `shipengine-api-key` | `api.shipengine.com/v1/carriers` (header `API-Key`) → 200 alive / 401 DEAD; non-expiring by design (rung 2) — aliveness-shaped, never returns an expiry |
 3. Classifies → `OK | WARN(≤14/7/1) | DEAD | NO_EXPIRY | PROBE_FAILED`.
 4. **v2 (2026-07-31, Kevin directive): alerts are GitHub issues, not Slack** — one issue per
    credential (label `credential-monitor`, title `[credential-monitor] <name> — <status>`), open =
