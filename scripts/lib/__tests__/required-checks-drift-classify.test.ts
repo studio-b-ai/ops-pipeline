@@ -3,6 +3,7 @@ import {
   extractJobCheckNames,
   diffRequiredChecks,
   classifyWorkflowYamlParse,
+  truncateToCodePoints,
   classifyProtectionProbeError,
   alertWorthyCount,
   summarizeRequiredCheckDead,
@@ -177,6 +178,38 @@ describe("classifyWorkflowYamlParse", () => {
 
   it("a top-level scalar document (parses fine, just not object-shaped) → no finding — that's `extractJobCheckNames`'s concern for class 1, not a YAML parse failure", () => {
     expect(classifyWorkflowYamlParse("repo", ".github/workflows/weird.yml", "just a string")).toBeNull();
+  });
+});
+
+// ───────────────────────────── truncateToCodePoints (ops-pipeline#309 review, P3) ─────────────────────────────
+
+describe("truncateToCodePoints", () => {
+  it("a message shorter than the limit is returned unchanged, no ellipsis", () => {
+    expect(truncateToCodePoints("short", 160)).toBe("short");
+  });
+
+  it("a message exactly at the limit is returned unchanged (boundary, not >)", () => {
+    const message = "x".repeat(160);
+    expect(truncateToCodePoints(message, 160)).toBe(message);
+  });
+
+  it("an emoji (a 2-UTF16-unit surrogate pair) landing exactly at the truncation boundary is kept WHOLE, never split into a lone surrogate (#471 planted)", () => {
+    // 159 single-unit chars + one emoji (U+1F600 = 😀) as the 160th CODE POINT,
+    // then filler past the limit so truncation actually fires.
+    const emoji = "😀";
+    const message = "a".repeat(159) + emoji + "b".repeat(50);
+
+    // First, prove the BUG this replaces: a naive UTF-16-code-UNIT slice splits the pair.
+    const naiveSlice = message.slice(0, 160);
+    expect(naiveSlice.endsWith("\uD83D")).toBe(true); // a lone high surrogate — invalid UTF-16
+    expect(naiveSlice.endsWith(emoji)).toBe(false);
+
+    // Now the fix: code-point-safe truncation keeps the emoji intact.
+    const result = truncateToCodePoints(message, 160);
+    expect(result.endsWith(`${emoji}…`)).toBe(true);
+    expect(Array.from(result)).toHaveLength(161); // 160 code points + the ellipsis glyph
+    // no lone surrogate anywhere in the output: every \uD83D is paired with its \uDE00
+    expect((result.match(/\uD83D(?!\uDE00)/g) ?? []).length).toBe(0);
   });
 });
 

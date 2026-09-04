@@ -187,15 +187,32 @@ export interface WorkflowUnparseableFinding {
 }
 
 /**
+ * Truncates `message` to at most `maxCodePoints` Unicode CODE POINTS, appending an
+ * ellipsis when it truncates — code-point-safe (ops-pipeline#309 review, P3): `.slice()`
+ * on a JS string counts UTF-16 code UNITS, so a surrogate pair (e.g. an emoji) straddling
+ * the boundary would be split in half, leaving a lone unpaired surrogate in the output —
+ * invalid UTF-16 that renders as a replacement glyph or corrupts downstream JSON/Markdown.
+ * `Array.from` iterates a string via its string ITERATOR, which yields whole code points
+ * (surrogate pairs stay paired), so slicing the resulting array can never cut one in half.
+ * Extracted as its own function (rather than inlined in `classifyWorkflowYamlParse`) so it
+ * has a deterministic, directly-testable boundary case independent of any particular YAML
+ * parser error's own message shape.
+ */
+export function truncateToCodePoints(message: string, maxCodePoints: number): string {
+  const codePoints = Array.from(message);
+  return codePoints.length > maxCodePoints ? `${codePoints.slice(0, maxCodePoints).join("")}…` : message;
+}
+
+/**
  * `workflow_unparseable` (ops-pipeline#307 fix) = THIS leg's own YAML parse of the
  * workflow file's fetched content THREW — nothing else. Deliberately does NOT reuse
  * `extractJobCheckNames`'s `null`-on-throw result: that function swallows the exception
  * for class 1's purposes (a "no jobs found" signal), where THIS class needs the actual
  * parser message — the diagnostic a human needs to fix the file — so it re-parses
- * independently and carries `err.message`, truncated to 160 chars (long YAML error
- * messages can embed large chunks of surrounding source). A document that parses to a
- * non-object (e.g. a bare scalar) is NOT this class's concern — that's still a successful
- * parse; only a thrown exception counts.
+ * independently and carries `err.message`, truncated to 160 code points via
+ * `truncateToCodePoints` (long YAML error messages can embed large chunks of surrounding
+ * source). A document that parses to a non-object (e.g. a bare scalar) is NOT this class's
+ * concern — that's still a successful parse; only a thrown exception counts.
  */
 export function classifyWorkflowYamlParse(repo: string, workflowPath: string, yamlText: string): WorkflowUnparseableFinding | null {
   try {
@@ -203,7 +220,7 @@ export function classifyWorkflowYamlParse(repo: string, workflowPath: string, ya
     return null;
   } catch (err) {
     const rawMessage = err instanceof Error ? err.message : String(err);
-    const message = rawMessage.length > 160 ? `${rawMessage.slice(0, 160)}…` : rawMessage;
+    const message = truncateToCodePoints(rawMessage, 160);
     return {
       class: "workflow_unparseable",
       repo,
