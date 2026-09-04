@@ -230,6 +230,54 @@ export function classifyWorkflowYamlParse(repo: string, workflowPath: string, ya
   }
 }
 
+// ───────────────────────────── content-fetch usability (ops-pipeline#309 review, P2) ─────────────────────────────
+
+export interface ContentFetchOk {
+  kind: "ok";
+  text: string;
+}
+export interface ContentFetchUnavailable {
+  kind: "unavailable";
+  reason: string;
+}
+export type ContentFetchResult = ContentFetchOk | ContentFetchUnavailable;
+
+/**
+ * Classifies a GitHub Contents-API response's USABILITY before anything downstream ever
+ * treats its `content` field as real workflow YAML. Born from an independent review of
+ * this leg's PR (#309, P2): the worker's `readWorkflowContent` extracted ONLY `.content`
+ * via `--jq`, discarding `encoding`/`size` entirely — but GitHub returns
+ * `{content: "", encoding: "none"}` for files >1MB (no inline payload at all), and
+ * `parseYaml("")` returns `null` WITHOUT throwing (`extractJobCheckNames`'s own
+ * doc-is-non-object branch) — so an unusable fetch would silently read as "parsed fine,
+ * zero jobs" for class 1 and "not this class's concern" for `classifyWorkflowYamlParse`
+ * (whose own doc comment says only a THROWN parse counts) — violating that stated
+ * invariant by feeding it content that was never really fetched. `parseYaml` throwing is
+ * meant to mean "a human wrote broken YAML"; a truncated/absent API payload means nothing
+ * about the file's actual validity and must never be conflated with either verdict (Rule
+ * #322).
+ *
+ * Three cases are NOT usable content — all classified `unavailable`, none ever reaches
+ * `extractJobCheckNames` or `classifyWorkflowYamlParse`:
+ *   - `size === 0` — a genuinely empty file. An empty workflow is not a parse success.
+ *   - `encoding !== "base64"` — GitHub's ">1MB, no inline payload" shape (`encoding:
+ *     "none"`), or any encoding this leg doesn't know how to decode.
+ *   - the base64-decoded text is itself empty despite `size > 0` — defensive: never trust
+ *     a decode that produced nothing just because the envelope claimed base64.
+ * The caller (the worker's `readWorkflowContent`) reports `unavailable` results as a named
+ * `probe_failed` entry — never silence, never a verdict either way, same contract as every
+ * other read failure in this leg.
+ */
+export function classifyContentFetch(parsed: { content?: string; encoding?: string; size?: number }): ContentFetchResult {
+  const encoding = parsed.encoding ?? "unknown";
+  const size = typeof parsed.size === "number" ? parsed.size : -1;
+  if (size === 0) return { kind: "unavailable", reason: `content unavailable (size ${size}, encoding ${encoding})` };
+  if (encoding !== "base64") return { kind: "unavailable", reason: `content unavailable (size ${size}, encoding ${encoding})` };
+  const text = Buffer.from((parsed.content ?? "").replace(/\s/g, ""), "base64").toString("utf-8");
+  if (text.length === 0) return { kind: "unavailable", reason: `content unavailable (size ${size}, encoding ${encoding})` };
+  return { kind: "ok", text };
+}
+
 // ───────────────────────────── summaries (Rule #465 — every class, every count, incl. 0) ─────────────────────────────
 
 export function summarizeRequiredCheckDead(findings: RequiredCheckDeadFinding[]): string {

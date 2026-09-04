@@ -3,6 +3,7 @@ import {
   extractJobCheckNames,
   diffRequiredChecks,
   classifyWorkflowYamlParse,
+  classifyContentFetch,
   truncateToCodePoints,
   classifyProtectionProbeError,
   alertWorthyCount,
@@ -179,6 +180,10 @@ describe("classifyWorkflowYamlParse", () => {
   it("a top-level scalar document (parses fine, just not object-shaped) → no finding — that's `extractJobCheckNames`'s concern for class 1, not a YAML parse failure", () => {
     expect(classifyWorkflowYamlParse("repo", ".github/workflows/weird.yml", "just a string")).toBeNull();
   });
+
+  it("regression context: `parseYaml('')` does NOT throw (returns null) — this is exactly why `classifyContentFetch` (below) must intercept an unusable Contents-API payload BEFORE it ever reaches this function, or a >1MB/empty fetch would silently read as 'parsed fine'", () => {
+    expect(classifyWorkflowYamlParse("repo", ".github/workflows/big.yml", "")).toBeNull();
+  });
 });
 
 // ───────────────────────────── truncateToCodePoints (ops-pipeline#309 review, P3) ─────────────────────────────
@@ -210,6 +215,36 @@ describe("truncateToCodePoints", () => {
     expect(Array.from(result)).toHaveLength(161); // 160 code points + the ellipsis glyph
     // no lone surrogate anywhere in the output: every \uD83D is paired with its \uDE00
     expect((result.match(/\uD83D(?!\uDE00)/g) ?? []).length).toBe(0);
+  });
+});
+
+// ───────────────────────────── classifyContentFetch (ops-pipeline#309 review, P2) ─────────────────────────────
+
+describe("classifyContentFetch", () => {
+  it("GitHub's real >1MB shape ({content:'', encoding:'none', size:2000000}) → unavailable, never silently read as empty-but-parsed content (#471 the non-default verdict, planted)", () => {
+    const result = classifyContentFetch({ content: "", encoding: "none", size: 2000000 });
+    expect(result.kind).toBe("unavailable");
+    expect(result.kind === "unavailable" ? result.reason : null).toBe("content unavailable (size 2000000, encoding none)");
+  });
+
+  it("KNOWN-GOOD: a normal base64 payload with a real size → ok, the decoded text returned verbatim (#471 positive control)", () => {
+    const yamlText = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-latest\n";
+    const b64 = Buffer.from(yamlText, "utf-8").toString("base64");
+    const result = classifyContentFetch({ content: b64, encoding: "base64", size: yamlText.length });
+    expect(result.kind).toBe("ok");
+    expect(result.kind === "ok" ? result.text : null).toBe(yamlText);
+  });
+
+  it("a genuinely empty file (size 0) → unavailable regardless of encoding — an empty workflow is not a parse success", () => {
+    expect(classifyContentFetch({ content: "", encoding: "base64", size: 0 }).kind).toBe("unavailable");
+  });
+
+  it("size > 0 but the decoded text is empty despite claiming base64 (defensive — an inconsistent envelope) → unavailable", () => {
+    expect(classifyContentFetch({ content: "", encoding: "base64", size: 500 }).kind).toBe("unavailable");
+  });
+
+  it("an unknown/missing `encoding` field → unavailable (never assume base64)", () => {
+    expect(classifyContentFetch({ content: "abc", size: 500 }).kind).toBe("unavailable");
   });
 });
 

@@ -82,6 +82,7 @@ import {
   extractJobCheckNames,
   diffRequiredChecks,
   classifyWorkflowYamlParse,
+  classifyContentFetch,
   classifyProtectionProbeError,
   alertWorthyCount,
   renderRequiredCheckDeadIssueBody,
@@ -92,6 +93,7 @@ import {
   type WorkflowUnparseableFinding,
   type WorkflowFileObservation,
   type SystemicFailure,
+  type ContentFetchResult,
 } from "./lib/required-checks-drift-classify.js";
 import { partitionRepos, type LiveRepoRow } from "./lib/dead-cron-classify.js";
 import { planIssueAction } from "./lib/repo-hygiene-lib.js";
@@ -226,15 +228,24 @@ function listWorkflowFiles(repoName: string, branch: string, counter: FetchCount
   }
 }
 
-function readWorkflowContent(repoName: string, path: string, branch: string, counter: FetchCounter): string | null {
+/**
+ * Fetches the FULL Contents-API envelope (not just `.content` via `--jq`, the pre-#309-
+ * review shape) so `classifyContentFetch` can see `encoding`/`size` and refuse to treat a
+ * >1MB file's `{content:"", encoding:"none"}` — or any other unusable payload — as real
+ * content (ops-pipeline#309 review, P2: see that function's doc comment for the full
+ * failure mode).
+ */
+function readWorkflowContent(repoName: string, path: string, branch: string, counter: FetchCounter): ContentFetchResult {
   counter.attempted += 1;
   try {
-    const b64 = gh(["api", `repos/${ORG}/${repoName}/contents/${path}?ref=${branch}`, "--jq", ".content"]);
-    return Buffer.from(b64.replace(/\s/g, ""), "base64").toString("utf-8");
+    const raw = gh(["api", `repos/${ORG}/${repoName}/contents/${path}?ref=${branch}`]);
+    const parsed = JSON.parse(raw) as { content?: string; encoding?: string; size?: number };
+    return classifyContentFetch(parsed);
   } catch (err) {
     recordFailure(counter, err);
-    console.warn(`required-checks-drift: content read failed for ${repoName}/${path}: ${errMessage(err).trim()}`);
-    return null;
+    const msg = errMessage(err).trim();
+    console.warn(`required-checks-drift: content read failed for ${repoName}/${path}: ${msg}`);
+    return { kind: "unavailable", reason: `fetch failed: ${msg}` };
   }
 }
 
@@ -300,15 +311,20 @@ async function main(): Promise<void> {
 
     const observations: WorkflowFileObservation[] = [];
     for (const path of files) {
-      const content = readWorkflowContent(repoName, path, branch, contentReads);
-      if (content === null) {
+      const result: ContentFetchResult = readWorkflowContent(repoName, path, branch, contentReads);
+      if (result.kind === "unavailable") {
+        // ops-pipeline#309 review, P2: an unusable fetch (fetch exception, >1MB file with
+        // no inline payload, or a genuinely empty file — see classifyContentFetch's doc
+        // comment) is named here and NEVER reaches extractJobCheckNames or
+        // classifyWorkflowYamlParse — scannedWorkflowCount stays unchanged, since this file
+        // was never actually scanned.
         observations.push({ path, jobNames: null });
-        probeFailedWorkflows.push(`${repoName}/${path}`);
+        probeFailedWorkflows.push(`${repoName}/${path} (${result.reason})`);
         continue;
       }
-      observations.push({ path, jobNames: extractJobCheckNames(content, basename(path).replace(/\.ya?ml$/, "")) });
+      observations.push({ path, jobNames: extractJobCheckNames(result.text, basename(path).replace(/\.ya?ml$/, "")) });
       scannedWorkflowCount += 1;
-      const finding = classifyWorkflowYamlParse(repoName, path, content);
+      const finding = classifyWorkflowYamlParse(repoName, path, result.text);
       if (finding) unparseableFindings.push(finding);
     }
 
