@@ -1,4 +1,8 @@
-import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   parseGithubExpiryHeader,
   minFutureEndDateTime,
@@ -7,10 +11,13 @@ import {
   entraUserResultFromGraph,
   cloudflareResultFromVerify,
   cloudflareResultFromZones,
+  probeShipEngineApiKey,
   type CloudflareVerifyResponse,
   type CloudflareZonesResponse,
   type EntraUserGraphResponse,
 } from "../credential-probes.js";
+import { classify } from "../credential-classify.js";
+import { reconcileSeverity } from "../severity-issue-reconcile.js";
 
 describe("parseGithubExpiryHeader", () => {
   it("treats missing/empty header as non-expiring (classic PAT)", () => {
@@ -254,5 +261,86 @@ describe("cloudflareResultFromVerify (deprecated — kept for existing test cove
     expect(noStatus.error).toBeTruthy();
     const noResult = cloudflareResultFromVerify({ success: true, result: null }, REC);
     expect(noResult.error).toBeTruthy();
+  });
+});
+
+// ── probeShipEngineApiKey (network seam; ops-pipeline#291) ──────────────────────────────────
+//
+// ShipEngine keys are non-expiring by design (rung 2) — the probe is aliveness-only, never an
+// expiry read. Wire-format fetch-spy tests call the REAL function (Rule #223): the mocked
+// transport captures what production actually sends, not what the test assembles itself.
+
+describe("probeShipEngineApiKey", () => {
+  const DUMMY_KEY = "TEST_shipengine_dummy_key_do_not_use";
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("200 → alive, aliveness-shaped (no expiry); wire format: exact URL + ONLY the API-Key header carries the secret", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ carriers: [] }), { status: 200 }));
+    const result = await probeShipEngineApiKey(DUMMY_KEY);
+    expect(result).toEqual({ alive: true, expiry: null, source: "probe" });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://api.shipengine.com/v1/carriers");
+    // ONLY API-Key carries the secret — no Authorization/Bearer sibling.
+    expect(init.headers).toEqual({ "API-Key": DUMMY_KEY });
+  });
+
+  it("401 → DEAD (revoked / rotated elsewhere)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("", { status: 401 }));
+    const result = await probeShipEngineApiKey(DUMMY_KEY);
+    expect(result).toEqual({ alive: false, expiry: null, source: "probe" });
+  });
+
+  it("500 → PROBE_FAILED shape, never DEAD on a probe failure", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("", { status: 500 }));
+    const result = await probeShipEngineApiKey(DUMMY_KEY);
+    expect(result.alive).toBe(true); // PROBE_FAILED is signaled via .error, not alive:false
+    expect(result.expiry).toBeNull();
+    expect(result.error).toContain("500");
+  });
+
+  it("network error / timeout → PROBE_FAILED shape, never DEAD", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("fetch failed: timeout"));
+    const result = await probeShipEngineApiKey(DUMMY_KEY);
+    expect(result.alive).toBe(true);
+    expect(result.expiry).toBeNull();
+    expect(result.error).toContain("shipengine probe failed");
+  });
+
+  it("a DEAD verdict drives the monitor's real open-issue escalation path (chains classify() + reconcileSeverity() — not a reimplementation)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("", { status: 401 }));
+    const probe = await probeShipEngineApiKey(DUMMY_KEY);
+    const classification = classify({ recordedExpiry: null, probe, declaredNonExpiring: true });
+    expect(classification.status).toBe("DEAD");
+    // credential-expiry-monitor.ts's statusKey(): DEAD passes through unchanged (only WARN splits into WARN-<threshold>).
+    expect(reconcileSeverity(classification.status, null)).toBe("open");
+  });
+});
+
+// ── real credentials.manifest.yaml (#291): both new ShipEngine entries load correctly ────────
+
+describe("real credentials.manifest.yaml — shipengine entries", () => {
+  const manifestPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "credentials.manifest.yaml");
+
+  it("both shipengine-production and shipengine-sandbox parse with type=shipengine-api-key, non_expiring=true, recorded_expiry=null", () => {
+    const doc = parseYaml(readFileSync(manifestPath, "utf-8")) as { credentials?: Array<Record<string, unknown>> };
+    const items = doc.credentials ?? [];
+    const prod = items.find((i) => i.name === "shipengine-production");
+    const sandbox = items.find((i) => i.name === "shipengine-sandbox");
+    expect(prod).toBeDefined();
+    expect(sandbox).toBeDefined();
+    for (const item of [prod, sandbox]) {
+      expect(item?.type).toBe("shipengine-api-key");
+      expect(item?.non_expiring).toBe(true);
+      expect(item?.recorded_expiry).toBeNull();
+      expect(typeof item?.op_ref).toBe("string");
+      expect((item?.op_ref as string)?.startsWith("op://Studio B Infrastructure/shipengine/")).toBe(true);
+    }
+    expect(prod?.op_ref).toBe("op://Studio B Infrastructure/shipengine/production_key");
+    expect(sandbox?.op_ref).toBe("op://Studio B Infrastructure/shipengine/sandbox_key");
   });
 });
