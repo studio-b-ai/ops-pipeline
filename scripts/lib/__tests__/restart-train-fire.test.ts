@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   CA_HOURS_GATE_STEP,
+  DEPLOY_TRIGGER_GLOBS,
+  MERGE_DEPLOY_DECOUPLED,
   OBSERVE_WINDOW_MS,
+  mergeDecoupledFromDeploy,
   classifyCaRun,
   classifyStudiobDeployments,
   formatEndFailedLine,
@@ -240,5 +243,38 @@ describe("mergeTouchesDeployPaths", () => {
   it("studiob has no paths: filter (deploy-api.yml carries no push trigger at all, Rule #480) — always true", () => {
     expect(mergeTouchesDeployPaths("studio-b-ai/studiob", [".github/workflows/require-review-label.yml"])).toBe(true);
     expect(mergeTouchesDeployPaths("studio-b-ai/studiob", ["src/index.ts"])).toBe(true);
+  });
+});
+
+describe("mergeDecoupledFromDeploy (Rule #480 — ops-pipeline#296 train wedge)", () => {
+  it("studiob is decoupled: the reason names the missing push trigger + the catch-up door it rides", () => {
+    const reason = mergeDecoupledFromDeploy("studio-b-ai/studiob");
+    expect(reason).not.toBeNull();
+    expect(reason).toMatch(/no push trigger/);
+    expect(reason).toMatch(/#480/);
+    expect(reason).toMatch(/live-deployed/);
+  });
+
+  it("client-asthetik is NOT decoupled (acuops-build fires on push) — the observe leg keeps waiting for its run", () => {
+    expect(mergeDecoupledFromDeploy("studio-b-ai/client-asthetik")).toBeNull();
+  });
+
+  it("unknown repo fails toward observing (null), never toward skipping (#4/#382)", () => {
+    expect(mergeDecoupledFromDeploy("studio-b-ai/some-other-repo")).toBeNull();
+    expect(mergeDecoupledFromDeploy("")).toBeNull();
+  });
+
+  it("the two tables agree: every decoupled repo also carries no paths: filter in DEPLOY_TRIGGER_GLOBS (null)", () => {
+    const repos = Object.keys(MERGE_DEPLOY_DECOUPLED);
+    expect(repos.length).toBeGreaterThan(0);
+    for (const repo of repos) {
+      expect(DEPLOY_TRIGGER_GLOBS[repo]).toBeNull();
+    }
+  });
+
+  it("an empty reason string is not a decoupling (the table must carry a human-readable ledger reason)", () => {
+    for (const reason of Object.values(MERGE_DEPLOY_DECOUPLED)) {
+      expect(reason.length).toBeGreaterThan(20);
+    }
   });
 });
