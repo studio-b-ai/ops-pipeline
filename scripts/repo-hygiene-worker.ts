@@ -123,6 +123,59 @@ function listLiveRepos(): { repos: LiveRepo[]; hitCap: boolean } {
   return { repos, hitCap: repos.length === LIVE_ENUMERATION_LIMIT };
 }
 
+// ───────────────────────────── archived-with-open-prs (issue #245) ─────────────────────────────
+
+interface OpenPrFetchOutcome {
+  attempted: number;
+  failed: number;
+  firstError: string | null;
+}
+
+/**
+ * `gh pr list --state open --limit 1 --json number` is intentionally the cheapest thing
+ * that answers "does this archived repo have at least one open PR?" — the exact count we
+ * care about is available from `gh api repos/{owner}/{repo} --jq .open_issues_count`
+ * BUT that field counts issues+PRs conflated, so it would false-positive for repos with
+ * legitimate open issues (e.g. squasher issues on our own live repos). This form asks
+ * ONLY for PRs and, when >0, follows up with a proper count via `gh pr list --json
+ * number --jq length`. We call the second form directly since it also answers the
+ * >0 question at ~the same cost as `--limit 1`.
+ */
+function fetchOpenPrCount(repoName: string): number {
+  const raw = gh(["pr", "list", "--repo", `${ORG}/${repoName}`, "--state", "open", "--json", "number", "--limit", "100"]);
+  const rows = JSON.parse(raw) as unknown[];
+  return rows.length;
+}
+
+/**
+ * Mutates `repos` in place, attaching `openPrCount` to every LIVE-ARCHIVED repo whose PR
+ * fetch succeeds. Live (unarchived) repos are deliberately skipped — an open PR on a live
+ * repo is ordinary backlog, not a phantom; the whole point of this leg is class 9. Per-repo
+ * failures never abort the run (mirrors attachBotChurn's contract): the repo just doesn't
+ * fire class 9 this run. Returns attempted/failed for a caller-side "systemic gap" check
+ * — same shape as bot-churn's outcome, same permission-degradation story: the fleet App's
+ * installation currently grants only `issues:write` + `metadata:read`, and PR listing
+ * requires `pull_requests: read` on private repos (public repos are typically readable
+ * without it). A blanket failure across ALL archived repos this run reads as the same
+ * class of permission gap flagged in the file header for bot-churn.
+ */
+function attachOpenPrCounts(repos: LiveRepo[]): OpenPrFetchOutcome {
+  const outcome: OpenPrFetchOutcome = { attempted: 0, failed: 0, firstError: null };
+  for (const repo of repos) {
+    if (!repo.isArchived) continue;
+    outcome.attempted += 1;
+    try {
+      repo.openPrCount = fetchOpenPrCount(repo.name);
+    } catch (err) {
+      outcome.failed += 1;
+      const msg = err instanceof Error ? err.message : String(err);
+      if (outcome.firstError === null) outcome.firstError = msg;
+      console.warn(`repo-hygiene: open-PR fetch failed for archived repo ${repo.name}, skipping archived-with-open-prs check for it this run: ${msg}`);
+    }
+  }
+  return outcome;
+}
+
 // ───────────────────────────── bot-churn (informational leg) ─────────────────────────────
 
 function isWithinFreshnessWindow(pushedAtIso: string, now: Date): boolean {
@@ -197,6 +250,15 @@ async function main(): Promise<void> {
     );
   }
 
+  // Class 9 (issue #245): probe open-PR counts EXCLUSIVELY for archived repos. Fills
+  // LiveRepo.openPrCount for those repos; unarchived repos stay absent and never fire.
+  const openPrOutcome = attachOpenPrCounts(liveRepos);
+  if (openPrOutcome.failed > 0) {
+    console.warn(
+      `repo-hygiene: open-PR fetch failed for ${openPrOutcome.failed}/${openPrOutcome.attempted} archived repo(s) this run; class 9 findings will be based on the successful subset. First error: ${openPrOutcome.firstError ?? "unknown error"}`,
+    );
+  }
+
   const botChurnOutcome = attachBotChurn(liveRepos, now);
   // "Systemic" = every attempt failed (and at least one was attempted) — a strong signal
   // of a permission gap rather than N independent flaky repos; collapses N near-identical
@@ -240,6 +302,7 @@ async function main(): Promise<void> {
   console.log(`=== repo-hygiene-worker${dryRun ? " --dry-run (real reads, NO issue mutations)" : ""} ===`);
   console.log(`Org: ${ORG} · Baseline: ${baselineFile.repos.length} repos (rulesVersion ${baselineFile.rulesVersion}, seeded ${baselineFile.seededAt}) · Live: ${liveRepos.length} repos${hitCap ? " (AT ENUMERATION CAP)" : ""}`);
   console.log(`bot-churn: attempted ${botChurnOutcome.attempted}, failed ${botChurnOutcome.failed}${botChurnSystemic ? " (SYSTEMIC — see warning above)" : ""}`);
+  console.log(`archived-with-open-prs probe: attempted ${openPrOutcome.attempted} archived repo(s), failed ${openPrOutcome.failed}`);
   console.log(`Existing aggregate issue: ${existing ? `#${existing.number} OPEN` : "none open"}`);
   console.log(`Findings: ${findings.length} · alert-worthy count (incl. systemic bot-churn failure): ${alertCount}`);
   console.log(`Planned action: ${action.toUpperCase()}`);

@@ -49,6 +49,20 @@
  *      via a class-1 ADD line arrives census-bare and class 6 demands its verdict on the
  *      next run — new repos cannot silently skip the census.
  *
+ * Finding class v3 (issue #245, 2026-08-30 — the half-retirement fold): archiving a repo
+ * before dispositioning its open PRs is Rule #366 executed halfway — the repo goes
+ * read-only, its open PRs can no longer be merged AND can no longer be closed (closing
+ * requires unarchive → close → re-archive; archive state is Kevin-gated), so they become
+ * permanent phantoms in every fleet-wide open-PR sweep. One new class enforces:
+ *   9. archived-with-open-prs — live archived repo carrying >0 open PRs. Rule #366 full
+ *      form. `baselineEdit: null` — resolution is a live repo-settings action (unarchive
+ *      → close/merge → re-archive) or the deliberate acceptance of the phantom; there is
+ *      no mechanical baseline accept, exactly like classes 6-8. This class reads the LIVE
+ *      `openPrCount` from `LiveRepo`; the worker probes it EXCLUSIVELY for archived
+ *      repos, since an open PR on a live repo is ordinary backlog, not a phantom. Absent
+ *      openPrCount (never probed) never fires the class — same presence contract as
+ *      `botChurn` in class 5.
+ *
  * Rule #465 (a summary line always prints every class with its count including 0) is
  * `summarizeFindings` below — the SAME function feeds both the worker's console output
  * and the issue body's closing line, so the two can never drift apart.
@@ -153,6 +167,17 @@ export interface LiveRepo {
    * network dependency at all.
    */
   botChurn?: BotChurnSample;
+  /**
+   * Open PR count as observed live (any state=open PRs, human or bot). Set by the caller
+   * ONLY for repos it chose to probe (the worker fetches this exclusively for repos where
+   * `isArchived === true` — an ordinary live repo carrying open PRs is normal backlog, not
+   * a phantom; the whole reason this field exists is class 9 below, and an archived repo
+   * is the only shape that class ever fires on). Presence-driven — same contract as
+   * `botChurn`: absent (`undefined`) means "not probed this run" and never fires class 9,
+   * `0` means "probed and clean" and also never fires class 9 (a real read of zero is not
+   * a defect). Rule #322: an absent sample is not a positive result.
+   */
+  openPrCount?: number;
 }
 
 // ───────────────────────────── bot-churn classification ─────────────────────────────
@@ -192,6 +217,7 @@ export const FINDING_CLASSES = [
   "census-verdict-missing",
   "unexecuted-retirement",
   "freeze-violation",
+  "archived-with-open-prs",
 ] as const;
 
 export type FindingClass = (typeof FINDING_CLASSES)[number];
@@ -345,6 +371,24 @@ export function diffFleet(baseline: BaselineFile, live: LiveRepo[]): Finding[] {
     });
   }
 
+  // 9. archived-with-open-prs — live archived AND caller attached a positive openPrCount.
+  // Reads the LIVE `isArchived`, not the baseline's flag (a stale baseline archived flag
+  // already fires class 3, and a repo unarchived live carries legitimate open-PR backlog
+  // regardless of what the baseline claims). Presence-driven per `LiveRepo.openPrCount`:
+  // an absent sample means "not probed this run" and never fires here — Rule #322, an
+  // empty population is not a positive result. Independent of baseline membership (a
+  // newly-born archived repo with open PRs fires this alongside class 1).
+  for (const repo of [...live].sort(byName)) {
+    if (!repo.isArchived || repo.openPrCount === undefined || repo.openPrCount === 0) continue;
+    const noun = repo.openPrCount === 1 ? "PR" : "PRs";
+    findings.push({
+      class: "archived-with-open-prs",
+      repo: repo.name,
+      detail: `\`${repo.name}\` is archived but has ${repo.openPrCount} open ${noun} — a permanent phantom in fleet-wide open-PR sweeps: archived repos are read-only, so open PRs can neither merge nor close (closing requires unarchive → close → re-archive, a Kevin-gated repo-settings action). Rule #366 full-leg teardown: close/merge PRs FIRST, then archive.`,
+      baselineEdit: null,
+    });
+  }
+
   // 6-8. census classes (v2) — active repos present in BOTH baseline and live. The
   // exemption reads LIVE `isArchived`, not the baseline's flag (a stale baseline archived
   // flag already fires class 3, and a repo archived live needs no verdict regardless of
@@ -458,6 +502,7 @@ const FINDING_CLASS_LABELS: Record<FindingClass, string> = {
   "census-verdict-missing": "Census verdict missing/invalid",
   "unexecuted-retirement": "Unexecuted retirement (kill-list tracker)",
   "freeze-violation": "Freeze violation",
+  "archived-with-open-prs": "Archived with open PRs (Rule #366 half-retirement)",
 };
 
 /**
@@ -473,6 +518,8 @@ const NULL_EDIT_NOTES: Partial<Record<FindingClass, string>> = {
     "Resolve by EXECUTING the retirement (Rule #366 full-leg teardown, Kevin-worded #97) and archiving the repo — or re-verdict the baseline line if the retirement is rescinded. No mechanical baseline accept exists.",
   "freeze-violation":
     "Resolve by investigating the push (who/why), then either re-verdict the repo (it is not frozen in practice) or refresh verdictAt after confirming the push was sanctioned.",
+  "archived-with-open-prs":
+    "Resolve by dispositioning the open PR(s): unarchive → close/merge each PR (with a pointer to what superseded the work if applicable) → re-archive (Rule #366 full-leg teardown; Kevin-gated repo-settings action, ~30s). Or accept the phantom deliberately if the underlying work is stale and this is the last one — the finding will still fire until dispositioned. No mechanical baseline accept exists.",
 };
 
 /**

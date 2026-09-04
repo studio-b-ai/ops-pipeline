@@ -413,6 +413,84 @@ describe("diffFleet — freeze-violation", () => {
   });
 });
 
+// ───────────────────────────── diffFleet: archived-with-open-prs (issue #245) ─────────────────────────────
+
+describe("diffFleet — archived-with-open-prs", () => {
+  // Negative controls first (Rule #322).
+  it("does NOT flag an archived repo with zero open PRs (the ordinary clean-retirement case)", () => {
+    const entry = baselineEntry({ archived: true, class293: "Dead" });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ isArchived: true, openPrCount: 0 })]);
+    expect(findings.filter((f) => f.class === "archived-with-open-prs")).toHaveLength(0);
+  });
+
+  it("does NOT flag an archived repo whose caller attached NO openPrCount sample (never-fetched)", () => {
+    const entry = baselineEntry({ archived: true, class293: "Dead" });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ isArchived: true })]);
+    expect(findings.filter((f) => f.class === "archived-with-open-prs")).toHaveLength(0);
+  });
+
+  it("does NOT flag a LIVE (unarchived) repo with open PRs — open PRs on a live repo are ordinary backlog, not a phantom", () => {
+    const entry = baselineEntry({ archived: false });
+    const findings = diffFleet(baseline([entry]), [liveRepo({ isArchived: false, openPrCount: 5 })]);
+    expect(findings.filter((f) => f.class === "archived-with-open-prs")).toHaveLength(0);
+  });
+
+  it("flags an archived repo carrying open PR(s), naming the count and Rule #366", () => {
+    // The exact fixture from issue #245: bolt-order-entry archived with 1 open PR (#12).
+    const entry = baselineEntry({ name: "bolt-order-entry", archived: true, class293: "Dead" });
+    const findings = diffFleet(baseline([entry]), [
+      liveRepo({ name: "bolt-order-entry", isArchived: true, openPrCount: 1 }),
+    ]);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].class).toBe("archived-with-open-prs");
+    expect(findings[0].repo).toBe("bolt-order-entry");
+    expect(findings[0].detail).toContain("bolt-order-entry");
+    expect(findings[0].detail).toContain("archived");
+    expect(findings[0].detail).toContain("1 open PR");
+    expect(findings[0].detail).toContain("#366");
+    expect(findings[0].baselineEdit).toBeNull();
+  });
+
+  it("flags an archived repo with multiple open PRs, pluralizing the count", () => {
+    const entry = baselineEntry({ name: "some-archived-repo", archived: true, class293: "Dead" });
+    const findings = diffFleet(baseline([entry]), [
+      liveRepo({ name: "some-archived-repo", isArchived: true, openPrCount: 3 }),
+    ]);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].class).toBe("archived-with-open-prs");
+    expect(findings[0].detail).toContain("3 open PRs");
+  });
+
+  it("fires alongside archived-flip when a repo just archived AND has open PRs — two independent defects", () => {
+    // Baseline says unarchived, live says archived — flip fires; open PRs on that live-archived
+    // repo also fire the new class. Fixing them requires the same underlying disposition
+    // (unarchive → close PRs → re-archive), but the classes surface distinct facts.
+    const entry = baselineEntry({ name: "recently-archived", archived: false });
+    const findings = diffFleet(baseline([entry]), [
+      liveRepo({ name: "recently-archived", isArchived: true, openPrCount: 2 }),
+    ]);
+    expect(findings.map((f) => f.class).sort()).toEqual(["archived-flip", "archived-with-open-prs"]);
+  });
+
+  it("reads the LIVE archived flag — a baseline-archived repo unarchived live with open PRs does NOT fire this class", () => {
+    // If someone unarchives to work on it, the open PRs are legitimate backlog again.
+    const entry = baselineEntry({ name: "revived", archived: true });
+    const findings = diffFleet(baseline([entry]), [
+      liveRepo({ name: "revived", isArchived: false, openPrCount: 4 }),
+    ]);
+    expect(findings.filter((f) => f.class === "archived-with-open-prs")).toHaveLength(0);
+    // The archived-flip still fires — the baseline says archived, live says not.
+    expect(findings.map((f) => f.class)).toContain("archived-flip");
+  });
+
+  it("does NOT require the repo to be present in the baseline — a NEW live archived repo with open PRs fires both classes", () => {
+    const findings = diffFleet(baseline([]), [
+      liveRepo({ name: "born-archived", isArchived: true, openPrCount: 1 }),
+    ]);
+    expect(findings.map((f) => f.class).sort()).toEqual(["archived-with-open-prs", "new-unmapped-repo"]);
+  });
+});
+
 describe("diffFleet — census pass-through on accept lines", () => {
   it("a flip's UPDATE line carries the baseline row's census fields verbatim (accepting a flip must not strip the census)", () => {
     const entry = baselineEntry({ verdict: "manual-tax", class293: "Product", verdictAt: "2026-08-30T00:00:00Z", note: "deployed on studiob-platform" });
@@ -622,6 +700,17 @@ describe("renderDriftIssueBody", () => {
     // "  Resolve: `...`" line must not appear anywhere — the footer's generic *instruction*
     // to "Apply the `Resolve:` line(s) above" is a DIFFERENT string shape (unindented prose,
     // no backtick immediately after the colon) and must not false-fail this check.
+    expect(body).not.toContain("  Resolve: `");
+  });
+
+  it("renders archived-with-open-prs findings with their per-class resolution note (Rule #366), never a mechanical Resolve line", () => {
+    const findings: Finding[] = [
+      { class: "archived-with-open-prs", repo: "bolt-order-entry", detail: "`bolt-order-entry` has 1 open PR.", baselineEdit: null },
+    ];
+    const body = renderDriftIssueBody(findings, meta);
+    expect(body).toContain("Archived with open PRs");
+    expect(body).toContain("#366");
+    expect(body).toContain("unarchive → close/merge");
     expect(body).not.toContain("  Resolve: `");
   });
 
