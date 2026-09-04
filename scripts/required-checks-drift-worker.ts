@@ -13,14 +13,18 @@
  *   2. Per repo: read branch-protection `required_status_checks` (contexts ∪
  *      checks[].context) for its default branch — a 404 means "no protection", skipped,
  *      never a finding. List `.github/workflows/*.yml`/`.yaml` on that branch via the
- *      Contents/Trees API, read each file's content, extract every check-name a job can
- *      render (`extractJobCheckNames`), diff against the required contexts
- *      (`diffRequiredChecks`) → class `required_check_dead`.
- *   3. Per workflow file found in step 2's tree listing (regardless of branch-protection
- *      state — this class doesn't care whether the workflow is required): fetch its most
- *      recent run's `name` (`gh run list --workflow <id> --limit 1`) and check whether it
- *      equals the file's own path — GitHub's tell for unparseable YAML
- *      (`classifyRunName`) → class `workflow_unparseable`.
+ *      Contents/Trees API (regardless of branch-protection state — step 3 needs every
+ *      repo's workflow files too now, see below) and read each file's content ONCE.
+ *   3. Per workflow file's fetched content: extract every check-name a job can render
+ *      (`extractJobCheckNames`) for class `required_check_dead` (only compared via
+ *      `diffRequiredChecks` when the repo's branch protection requires ≥1 context); AND
+ *      independently re-parse the SAME content for class `workflow_unparseable`
+ *      (`classifyWorkflowYamlParse` — fires when the parse itself throws; see
+ *      ops-pipeline#307, which SUPERSEDED the original "latest run named exactly the file
+ *      path" tell after it false-positived on 5/5 first-firing hits, all clean
+ *      `workflow_call` reusables — Rule #425). This dropped the `gh run list` /
+ *      Actions:read dependency entirely; both classes now ride the same Contents:read
+ *      fetch.
  *   4. Open/update/close TWO independent auto-reconciled aggregate issues on ops-pipeline
  *      itself (github-issues.ts's pattern) — ONE PER CLASS, not one per repo (see the lib
  *      file header for why this leg picked the aggregate shape over dead-cron's per-repo
@@ -29,8 +33,9 @@
  *
  * ⚠️ EXPECTED CI DEGRADATION ON DAY ONE (2026-09-04 bug-squasher probe on this exact issue,
  * ops-pipeline#277 comment 2 — read it before assuming this is a bug): the fleet App
- * (`studiob-fleet-bot`) currently holds EXACTLY `issues:write` + `metadata:read`. This leg
- * needs THREE capabilities it does not have yet:
+ * (`studiob-fleet-bot`) originally held EXACTLY `issues:write` + `metadata:read`. This leg
+ * needs TWO capabilities beyond that (post-#307 — see below, the original ship also listed
+ * a third, Actions:read, since dropped entirely):
  *   - **Administration (read)** — required for `GET
  *     /repos/{o}/{r}/branches/{b}/protection/required_status_checks` (branch protection is
  *     an admin-scoped resource per GitHub's permissions-required-for-apps docs).
@@ -38,21 +43,29 @@
  *     enumeration) and `GET /repos/{o}/{r}/contents/{path}` (workflow content) — the SAME
  *     gap already documented in dead-cron-worker.ts's header, granted together via the
  *     outstanding ops#104 visit.
- *   - **Actions (read)** — required for `GET
- *     /repos/{o}/{r}/actions/workflows/{id}/runs` (latest-run-name lookup) — also already
- *     documented in dead-cron-worker.ts's header, same ops#104 grant.
- * So on the FIRST live run, EVERY read in this worker is expected to 403, both aggregate
- * issues will carry loud `systemicFailures` notes (Rule #464 — never a silent 0 that reads
- * as "fleet healthy"), and zero real findings will surface until an org-owner grants
- * Administration:read + Contents:read + Actions:read to the fleet App's installation (org
- * Settings → GitHub Apps → studiob-fleet-bot, UI-only, no API path — mirrors Rule #78's
- * `workflows:` permission story). This is a documented, honest degraded-from-day-one ship
- * per the issue's own recommended sequencing option (c) — NOT a reason to withhold the
- * leg; the fleet App permission grant is a separate, Kevin-gated, cross-cutting follow-up
- * (Rule #6) that benefits this leg AND the dead-cron leg AND repo-hygiene's bot-churn leg
- * simultaneously, so gating this PR on it would just duplicate the same wait three times.
+ * So on the FIRST live run, EVERY read in this worker was expected to 403, both aggregate
+ * issues would carry loud `systemicFailures` notes (Rule #464 — never a silent 0 that reads
+ * as "fleet healthy"), and zero real findings would surface until an org-owner granted
+ * Administration:read + Contents:read to the fleet App's installation (org Settings →
+ * GitHub Apps → studiob-fleet-bot, UI-only, no API path — mirrors Rule #78's `workflows:`
+ * permission story). This was a documented, honest degraded-from-day-one ship per the
+ * issue's own recommended sequencing option (c) — NOT a reason to withhold the leg; the
+ * fleet App permission grant was a separate, Kevin-gated, cross-cutting follow-up (Rule #6)
+ * that benefited this leg AND the dead-cron leg AND repo-hygiene's bot-churn leg
+ * simultaneously.
  *
- * Run LOCALLY under a personally-authed `gh` (an org owner's own session), all three reads
+ * ⚠️ ops-pipeline#307 (2026-09-04, this leg's FIRST live firing): `workflow_unparseable`'s
+ * original design — GitHub's own "latest run named exactly the file path" tell — false-
+ * positived on 5/5 hits, all clean `workflow_call` reusables and other legitimate path-
+ * named-run cases (Rule #425: a detector that fires on clean input is lying about dirty
+ * input too). Fixed by deriving the finding from THIS worker's own YAML parse of the
+ * already-fetched workflow content instead (`classifyWorkflowYamlParse`) — the
+ * `gh run list` calls and the Actions:read dependency they required are GONE; both classes
+ * now ride the same Contents:read fetch, fetched once per repo regardless of branch-
+ * protection state (previously gated behind `required_check_dead` needing ≥1 required
+ * context — this class needs it unconditionally).
+ *
+ * Run LOCALLY under a personally-authed `gh` (an org owner's own session), both reads
  * work today — same story as dead-cron-worker.ts's identical footnote.
  *
  * Flags-only (the lib's Law): never edits branch protection, never fixes/disables/retires
@@ -68,7 +81,7 @@ import { basename } from "node:path";
 import {
   extractJobCheckNames,
   diffRequiredChecks,
-  classifyRunName,
+  classifyWorkflowYamlParse,
   classifyProtectionProbeError,
   alertWorthyCount,
   renderRequiredCheckDeadIssueBody,
@@ -92,7 +105,7 @@ const LABEL = "required-checks-drift";
 const LABEL_DESCRIPTION = "required-checks-drift: dead branch-protection contexts / unparseable workflow YAML (weekly)";
 const LABEL_COLOR = "B60205";
 const TITLE_DEAD = "[repo-hygiene] required-status-check contexts with no live job";
-const TITLE_UNPARSEABLE = "[repo-hygiene] workflow YAML unparseable (run name == file path)";
+const TITLE_UNPARSEABLE = "[repo-hygiene] workflow YAML unparseable";
 
 /** Safety bound, not a paging mechanism (Rule #331) — mirrors both sibling workers. */
 const LIVE_ENUMERATION_LIMIT = 300;
@@ -225,42 +238,6 @@ function readWorkflowContent(repoName: string, path: string, branch: string, cou
   }
 }
 
-// ───────────────────────────── latest run name (Actions:read) ─────────────────────────────
-
-interface WorkflowListRow {
-  id: number;
-  path: string;
-}
-
-/** Workflow records (id + path) for the repo — needed because `gh run list -w` accepts an id/filename, not a full nested path, and id is the least ambiguous. Independent read from the Contents-API tree listing above (different API family entirely — Actions, not Contents), so it gets its own counter. */
-function listWorkflowRecords(repoName: string, counter: FetchCounter): WorkflowListRow[] | null {
-  counter.attempted += 1;
-  try {
-    const raw = gh(["api", `repos/${ORG}/${repoName}/actions/workflows?per_page=100`, "--paginate", "--jq", ".workflows[] | {id, path}"]);
-    return raw
-      .split("\n")
-      .filter((l) => l.trim().length > 0)
-      .map((l) => JSON.parse(l) as WorkflowListRow);
-  } catch (err) {
-    recordFailure(counter, err);
-    console.warn(`required-checks-drift: workflow-records list failed for ${repoName}: ${errMessage(err).trim()}`);
-    return null;
-  }
-}
-
-function fetchLatestRunName(repoName: string, workflowId: number, counter: FetchCounter): string | undefined {
-  counter.attempted += 1;
-  try {
-    const raw = gh(["run", "list", "--repo", `${ORG}/${repoName}`, "--workflow", String(workflowId), "--all", "--limit", "1", "--json", "name"]);
-    const rows = JSON.parse(raw) as { name: string }[];
-    return rows[0]?.name;
-  } catch (err) {
-    recordFailure(counter, err);
-    console.warn(`required-checks-drift: run-list read failed for ${repoName} workflow#${workflowId}: ${errMessage(err).trim()}`);
-    return undefined;
-  }
-}
-
 // ───────────────────────────── main ─────────────────────────────
 
 async function main(): Promise<void> {
@@ -281,8 +258,7 @@ async function main(): Promise<void> {
   console.log(`Scanning ${scannedRepos.length} non-archived non-template repo(s) of ${live.length} live (${partition.archived.length} archived, ${partition.templates.length} template out of scope).`);
 
   const protectionReads = newCounter();
-  const contentReads = newCounter(); // covers BOTH git/trees enumeration and per-file content reads — same GitHub App permission (Contents:read)
-  const actionsReads = newCounter(); // covers BOTH the workflow-records list and the per-workflow run-list read — same GitHub App permission (Actions:read)
+  const contentReads = newCounter(); // covers git/trees enumeration + per-file content reads — same GitHub App permission (Contents:read); now the ONLY read either class depends on beyond branch protection (ops-pipeline#307 dropped the Actions:read `gh run list` dependency entirely)
 
   const deadFindings: RequiredCheckDeadFinding[] = [];
   const unparseableFindings: WorkflowUnparseableFinding[] = [];
@@ -299,71 +275,58 @@ async function main(): Promise<void> {
     }
 
     const protection = fetchRequiredContexts(repoName, branch, protectionReads);
+    if (protection.kind === "probe-failed") probeFailedRepos.push(repoName);
+    const contextsToCompare = protection.kind === "contexts" ? protection.contexts : [];
+    const needsDeadComparison = contextsToCompare.length > 0;
 
-    // ── required_check_dead: only meaningful when protection exists and requires ≥1 context ──
-    if (protection.kind === "probe-failed") {
-      probeFailedRepos.push(repoName);
-    } else if (protection.kind === "contexts" && protection.contexts.length > 0) {
-      const files = listWorkflowFiles(repoName, branch, contentReads);
-      if (files === null) {
-        inconclusiveRepos.push(repoName);
-      } else if (files.length > MAX_WORKFLOW_FILES_PER_REPO) {
-        console.warn(`required-checks-drift: ${repoName}@${branch} has ${files.length} workflow files (> ${MAX_WORKFLOW_FILES_PER_REPO} cap) — marked inconclusive rather than truncated (Rule #331).`);
-        inconclusiveRepos.push(repoName);
-      } else {
-        const observations: WorkflowFileObservation[] = files.map((path) => {
-          const content = readWorkflowContent(repoName, path, branch, contentReads);
-          const jobNames = content === null ? null : extractJobCheckNames(content, basename(path).replace(/\.ya?ml$/, ""));
-          return { path, jobNames };
-        });
-        const { findings, inconclusive } = diffRequiredChecks(repoName, protection.contexts, observations);
-        deadFindings.push(...findings);
-        if (inconclusive) inconclusiveRepos.push(repoName);
-      }
+    // ── workflow files: fetched ONCE per repo, regardless of branch-protection state —
+    // `workflow_unparseable` (class 2) needs every scannable repo's workflow files
+    // unconditionally now (ops-pipeline#307); `required_check_dead` (class 1) still only
+    // COMPARES them when the repo requires ≥1 context (`needsDeadComparison`), same as
+    // before — this is purely reusing one fetch for two purposes, no behavior change to
+    // class 1's own logic. ──
+    const files = listWorkflowFiles(repoName, branch, contentReads);
+    if (files === null) {
+      if (needsDeadComparison) inconclusiveRepos.push(repoName);
+      probeFailedWorkflows.push(repoName);
+      continue;
     }
-    // protection.kind === "no-protection", or contexts.length === 0: nothing to compare — no finding, no failure.
+    if (files.length > MAX_WORKFLOW_FILES_PER_REPO) {
+      console.warn(`required-checks-drift: ${repoName}@${branch} has ${files.length} workflow files (> ${MAX_WORKFLOW_FILES_PER_REPO} cap) — marked inconclusive/probe-failed rather than truncated (Rule #331).`);
+      if (needsDeadComparison) inconclusiveRepos.push(repoName);
+      probeFailedWorkflows.push(repoName);
+      continue;
+    }
 
-    // ── workflow_unparseable: independent of branch protection — every scannable repo's workflow files ──
-    const records = listWorkflowRecords(repoName, actionsReads);
-    if (records === null) continue; // already warned + counted above
-    for (const wf of records) {
-      if (!WORKFLOW_PATH_PATTERN.test(wf.path)) continue; // dynamic workflows (CodeQL default setup etc.) — mirrors dead-cron-worker.ts's identical guard
-      scannedWorkflowCount += 1;
-      const latestName = fetchLatestRunName(repoName, wf.id, actionsReads);
-      if (latestName === undefined) {
-        // Either zero runs ever, OR the read itself failed. Only the latter is a probe
-        // failure worth naming — `recordFailure` already logged it and bumped the
-        // counter; we can't distinguish the two shapes from this return value alone
-        // (Rule #322: `fetchLatestRunName` deliberately collapses "no runs" and "read
-        // failed" to the SAME safe `undefined`, since both must behave identically here —
-        // never fire the finding). We surface the workflow in `probeFailedWorkflows` only
-        // when `actionsReads` grew a NEW failure on this exact call.
+    const observations: WorkflowFileObservation[] = [];
+    for (const path of files) {
+      const content = readWorkflowContent(repoName, path, branch, contentReads);
+      if (content === null) {
+        observations.push({ path, jobNames: null });
+        probeFailedWorkflows.push(`${repoName}/${path}`);
         continue;
       }
-      const finding = classifyRunName(repoName, wf.path, latestName);
+      observations.push({ path, jobNames: extractJobCheckNames(content, basename(path).replace(/\.ya?ml$/, "")) });
+      scannedWorkflowCount += 1;
+      const finding = classifyWorkflowYamlParse(repoName, path, content);
       if (finding) unparseableFindings.push(finding);
     }
-  }
 
-  // `probeFailedWorkflows` reconstruction: the loop above can't tell "0 runs" from "read
-  // failed" per-iteration without threading extra state through fetchLatestRunName's
-  // return type (which Rule #322 wants collapsed to `undefined` either way, since both
-  // must never fire a finding) — so a coarser, still-honest signal: when actionsReads
-  // failed at all this run, name it in the body via systemicFailures (below); a fully
-  // itemized per-workflow probe-failed list is not required by the spec's finding shape
-  // and would need a second counter parallel to `undefined`'s two causes. Left empty by
-  // design — the systemic-failure note carries the degradation signal instead.
+    if (needsDeadComparison) {
+      const { findings, inconclusive } = diffRequiredChecks(repoName, contextsToCompare, observations);
+      deadFindings.push(...findings);
+      if (inconclusive) inconclusiveRepos.push(repoName);
+    }
+    // protection.kind === "no-protection", or contexts.length === 0: nothing to compare for class 1 — no finding, no failure; class 2 already ran above regardless.
+  }
 
   const requiredCheckSystemic = [toSystemicFailure("branch-protection reads (Administration:read)", protectionReads), toSystemicFailure("workflow-file reads (Contents:read)", contentReads)].filter(
     (x): x is SystemicFailure => x !== null,
   );
-  const unparseableSystemic = [toSystemicFailure("workflow-run reads (Actions:read)", actionsReads), toSystemicFailure("workflow-file reads (Contents:read)", contentReads)].filter(
-    (x): x is SystemicFailure => x !== null,
-  );
+  const unparseableSystemic = [toSystemicFailure("workflow-file reads (Contents:read)", contentReads)].filter((x): x is SystemicFailure => x !== null);
 
   console.log(`protection reads: ${protectionReads.attempted} attempted, ${protectionReads.failed} failed${isSystemic(protectionReads) ? " (SYSTEMIC)" : ""}`);
   console.log(`content reads (trees + files): ${contentReads.attempted} attempted, ${contentReads.failed} failed${isSystemic(contentReads) ? " (SYSTEMIC)" : ""}`);
-  console.log(`actions reads (workflow list + run list): ${actionsReads.attempted} attempted, ${actionsReads.failed} failed${isSystemic(actionsReads) ? " (SYSTEMIC)" : ""}`);
   console.log(summarizeRequiredCheckDead(deadFindings));
   console.log(summarizeWorkflowUnparseable(unparseableFindings));
 
