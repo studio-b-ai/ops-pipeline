@@ -9,8 +9,10 @@
  * needed an admin bypass for six months (Rule #29's exact failure mode: a broken gate
  * looks like a strict one, so nobody noticed). A second, independent defect in the SAME
  * repo compounded it: `ci.yml` itself was unparseable YAML, so the job that would have
- * produced ANY context never ran at all — GitHub's own tell is a workflow run whose
- * `name` defaults to the file path instead of a real name.
+ * produced ANY context never ran at all. This leg detects unparseable YAML by running
+ * `parseYaml` on the file content directly (see class 2 below); the "run name equals
+ * the file path" tell explored in the incident doc turned out to fire on clean
+ * `workflow_call` workflows too and was abandoned in ops-pipeline#307.
  *
  * Law (inherited from repo-hygiene-lib.ts / dead-cron-classify.ts, same detector family):
  * **flags-only**. Nothing here (or in the caller, required-checks-drift-worker.ts) ever
@@ -40,16 +42,22 @@
  *      only current live state. `null`-safe: a repo with NO branch protection (404 on the
  *      protection endpoint) is skipped entirely — no protection is not a finding.
  *
- *   2. workflow_unparseable  — a workflow file's most recent run is named EXACTLY its own
- *      file path (e.g. `.github/workflows/ci.yml`) instead of a real workflow/job name.
- *      This is GitHub's own tell for "the YAML never parsed" (verbatim from the incident:
- *      "GitHub records a zero-job failed run named `.github/workflows/ci.yml` on every
- *      push") — deliberately NOT driven by this file's own `extractJobCheckNames` parse
- *      result, because GitHub's parser is the ground truth this class exists to surface;
- *      this file's parser could disagree with GitHub's in either direction and that
- *      disagreement is not the signal we want. A workflow with zero runs ever is NOT
- *      evidence of anything (Rule #322 — an empty population is not a positive result) —
- *      `latestRunName === undefined` never fires this class.
+ *   2. workflow_unparseable  — a workflow file's YAML fails to parse. Fired by
+ *      `classifyWorkflowContent`, which runs the SAME `parseYaml` this file's own
+ *      `extractJobCheckNames` uses to enumerate job names — a real `YAMLParseError` IS the
+ *      finding, and its message is carried into the issue body verbatim (Rule #322 both-
+ *      verdicts, Rule #425 no false positives on clean input).
+ *
+ *      ⚠️ ops-pipeline#307 (2026-09-04 rewrite): the previous "latest run name equals the
+ *      file path" tell fired on CLEAN workflows — 5/5 first-firing hits were false
+ *      positives. GitHub renders the run-name-equals-path default for reusable
+ *      `workflow_call` workflows and other non-error cases too, so the tell couldn't
+ *      discriminate "YAML broken" from "the workflow just doesn't set a run name". The
+ *      new mechanism is deliberately narrower: only an actual parser exception fires.
+ *      A parser-side ill-shaped-but-valid document (top-level scalar, empty file) is NOT
+ *      a parse exception — it does not fire this class; it may still make the repo
+ *      inconclusive for `required_check_dead` if `extractJobCheckNames` can't derive job
+ *      names, which is the correct downstream behaviour.
  */
 
 import { parse as parseYaml } from "yaml";
@@ -176,25 +184,35 @@ export interface WorkflowUnparseableFinding {
   class: "workflow_unparseable";
   repo: string;
   workflowPath: string;
+  /** The parser's own error message (verbatim from `parseYaml`) — carried into the issue body so a human sees the exact line/column the parser rejected without re-running the parse. */
+  parseError: string;
   detail: string;
 }
 
 /**
- * `latestRunName === workflowPath` is GitHub's own tell that a workflow's YAML never
- * parsed (verbatim from the incident: a zero-job run named exactly the file path, on
- * every push). `undefined` (no runs fetched/exist yet) never fires — Rule #322, an empty
- * population is not a positive result; a workflow that has simply never run is not
- * evidence its YAML is broken.
+ * Fires `workflow_unparseable` when (and only when) `parseYaml` throws on the given file
+ * content — the parser's own message is captured and named in both the finding's
+ * `parseError` field and its human-readable `detail` (issue #307's fix spec: "name the
+ * error"). Well-formed but ill-shaped documents (a top-level scalar, an empty file, an
+ * array) do NOT fire — they parse fine; a differently-shaped-workflow defect is a
+ * separate class GitHub itself surfaces its own way, and firing this class off them
+ * violates Rule #425 (a detector that fires on clean input is lying about dirty input
+ * too — the exact regression #307 fixes).
  */
-export function classifyRunName(repo: string, workflowPath: string, latestRunName: string | undefined): WorkflowUnparseableFinding | null {
-  if (latestRunName === undefined) return null;
-  if (latestRunName !== workflowPath) return null;
-  return {
-    class: "workflow_unparseable",
-    repo,
-    workflowPath,
-    detail: `\`${repo}\`'s workflow \`${workflowPath}\` — its most recent run is named exactly the file path (\`${latestRunName}\`) instead of a real workflow/job name, GitHub's own tell that the YAML never parsed (0 jobs ever ran from it; the note-intelligence \`ci.yml\` incident — broken by a Slack-body block-scalar indent since 2026-03-26, unnoticed for months). Fix the YAML (a local \`python3 -c 'import yaml,sys;yaml.safe_load(open(sys.argv[1]))'\` or \`actionlint\` pass catches it) — every job this file was meant to run has been silently dead weight since it broke.`,
-  };
+export function classifyWorkflowContent(repo: string, workflowPath: string, yamlText: string): WorkflowUnparseableFinding | null {
+  try {
+    parseYaml(yamlText);
+    return null;
+  } catch (err) {
+    const parseError = err instanceof Error ? err.message : String(err);
+    return {
+      class: "workflow_unparseable",
+      repo,
+      workflowPath,
+      parseError,
+      detail: `\`${repo}\`'s workflow \`${workflowPath}\` — the YAML failed to parse. Every job this file was meant to run has been silently dead weight since it broke (the note-intelligence \`ci.yml\` incident — a Slack-body block-scalar indent that sat broken since 2026-03-26, unnoticed for months — is the canonical shape). Fix locally with \`python3 -c 'import yaml,sys;yaml.safe_load(open(sys.argv[1]))'\` or \`actionlint\`, then push; the next scheduled run confirms recovery. Parser output:\n\n\`\`\`\n${parseError}\n\`\`\``,
+    };
+  }
 }
 
 // ───────────────────────────── summaries (Rule #465 — every class, every count, incl. 0) ─────────────────────────────
@@ -289,9 +307,14 @@ export interface WorkflowUnparseableMeta {
   org: string;
   scannedWorkflowCount: number;
   generatedAt: string;
-  /** Repos/workflows where the run-list read failed (not evidence either way — see systemicFailures). */
+  /**
+   * Individual workflow files whose Contents-API read failed this run — named as
+   * `<repo>/<path>` (issue #307's fix spec: "a workflow file the Contents API cannot
+   * fetch → `probe_failed` (named), never silence"). Distinct from `systemicFailures`
+   * below (which reports a fleet-wide capability outage).
+   */
   probeFailedWorkflows: string[];
-  /** See `RequiredCheckDeadMeta.systemicFailures`'s doc comment — same array-not-optional rationale (Actions:read for run-list, Contents:read for enumerating which workflow files exist at all can BOTH be simultaneously missing). */
+  /** See `RequiredCheckDeadMeta.systemicFailures`'s doc comment — same array-not-optional rationale. Since ops-pipeline#307 this class is driven by parse errors on file content, so it depends only on Contents:read. */
   systemicFailures: SystemicFailure[];
 }
 
@@ -309,7 +332,7 @@ export function renderWorkflowUnparseableIssueBody(findings: WorkflowUnparseable
   }
   if (meta.probeFailedWorkflows.length > 0) {
     lines.push("");
-    lines.push(`Run-list read failed (excluded from this run's evidence, not a clean result): ${meta.probeFailedWorkflows.sort().join(", ")}.`);
+    lines.push(`Workflow-file content read failed for these files (excluded from this run's evidence, never silently treated as clean — issue #307): ${meta.probeFailedWorkflows.sort().join(", ")}.`);
   }
 
   lines.push("");

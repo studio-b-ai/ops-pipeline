@@ -40,6 +40,11 @@ name: Repo Hygiene
 # shows the fleet App already holds contents=write + actions=write + checks=read; the
 # 'Contents/Actions gap' wording that used to sit here was a stale carry (#412). Flags-only,
 # degrades loudly per Rule #464 rather than failing the job. See that step's comment below.
+# ops-pipeline#307 (2026-09-04) rewrote the workflow_unparseable class to fire on parser
+# exceptions instead of the "run name equals file path" tell (which false-fired on clean
+# `workflow_call` workflows) — the leg no longer reads workflow-run metadata, so
+# Actions:read isn't a dependency of this leg anymore; only Administration:read remains
+# outstanding for the required_check_dead half.
 
 on:
   schedule:

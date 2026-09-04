@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   extractJobCheckNames,
   diffRequiredChecks,
-  classifyRunName,
+  classifyWorkflowContent,
   classifyProtectionProbeError,
   alertWorthyCount,
   summarizeRequiredCheckDead,
@@ -137,27 +137,66 @@ describe("diffRequiredChecks", () => {
   });
 });
 
-// ───────────────────────────── classifyRunName (class: workflow_unparseable) ─────────────────────────────
+// ───────────────────────────── classifyWorkflowContent (class: workflow_unparseable) ─────────────────────────────
+//
+// ops-pipeline#307: the previous "latest run name equals the file path" tell fired on CLEAN
+// workflows (5/5 first-firing hits were false positives — reusable `workflow_call` workflows
+// and other run-name defaults share GitHub's "name = file path" fallback with unparseable
+// YAML, so the tell couldn't discriminate). The new mechanism reads the parser's OWN verdict
+// on the file content: an actual `parseYaml` exception IS the finding, its message names the
+// error (Rule #322 both-verdicts).
 
-describe("classifyRunName", () => {
-  it("run name equals the file path → finding (GitHub's unparseable-YAML tell, the note-intelligence ci.yml incident)", () => {
-    const finding = classifyRunName("note-intelligence", ".github/workflows/ci.yml", ".github/workflows/ci.yml");
+describe("classifyWorkflowContent — parse-error-based (ops-pipeline#307)", () => {
+  it("known-bad: truly unparseable YAML → finding whose detail names the parser's error message", () => {
+    const yamlText = "jobs:\n  build:\n    steps:\n    - run: echo hi\n\tinvalid: tab-indent";
+    const finding = classifyWorkflowContent("some-repo", ".github/workflows/ci.yml", yamlText);
     expect(finding).not.toBeNull();
     expect(finding?.class).toBe("workflow_unparseable");
-    expect(finding?.repo).toBe("note-intelligence");
+    expect(finding?.repo).toBe("some-repo");
     expect(finding?.workflowPath).toBe(".github/workflows/ci.yml");
+    expect(finding?.parseError.length).toBeGreaterThan(0);
+    expect(finding?.detail).toContain("some-repo");
+    expect(finding?.detail).toContain(".github/workflows/ci.yml");
+    // The parser's own message must appear in the detail — the issue's exact spec: "name the error".
+    expect(finding?.detail).toContain(finding!.parseError);
   });
 
-  it("KNOWN-GOOD: run name is a real name (\"CI\") → no finding (#471 positive control)", () => {
-    expect(classifyRunName("note-intelligence", ".github/workflows/ci.yml", "CI")).toBeNull();
+  it("KNOWN-GOOD: a clean workflow → null (#471 positive control)", () => {
+    const yamlText = "name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n    - run: echo hi\n";
+    expect(classifyWorkflowContent("some-repo", ".github/workflows/ci.yml", yamlText)).toBeNull();
   });
 
-  it("no runs yet (undefined) → no finding — Rule #322, an empty population is not evidence", () => {
-    expect(classifyRunName("repo", ".github/workflows/new.yml", undefined)).toBeNull();
+  it("KNOWN-GOOD (issue #307 regression): a clean `workflow_call` reusable workflow → null — even though GitHub renders its runs with a name-equals-path default that used to false-fire this class", () => {
+    const yamlText = [
+      "name: acuops-deploy",
+      "on:",
+      "  workflow_call:",
+      "    inputs:",
+      "      target:",
+      "        required: true",
+      "        type: string",
+      "jobs:",
+      "  deploy:",
+      "    runs-on: ubuntu-latest",
+      "    steps:",
+      "    - run: echo deploying",
+      "",
+    ].join("\n");
+    expect(classifyWorkflowContent("acuops-pipeline", ".github/workflows/acuops-deploy.yml", yamlText)).toBeNull();
   });
 
-  it("a run name that happens to CONTAIN the path but isn't exactly it → no finding (exact match only)", () => {
-    expect(classifyRunName("repo", ".github/workflows/ci.yml", "Deploy .github/workflows/ci.yml")).toBeNull();
+  it("KNOWN-GOOD: a YAML top-level scalar parses fine → null (not a parse exception, so not this class's finding — an ill-shaped workflow is a different defect GitHub surfaces its own way)", () => {
+    expect(classifyWorkflowContent("some-repo", ".github/workflows/x.yml", "just a scalar string")).toBeNull();
+  });
+
+  it("KNOWN-GOOD: an empty file parses fine → null (again, not a parse exception)", () => {
+    expect(classifyWorkflowContent("some-repo", ".github/workflows/x.yml", "")).toBeNull();
+  });
+
+  it("known-bad: an unclosed flow sequence → finding (parser throws, message names the location)", () => {
+    const finding = classifyWorkflowContent("some-repo", ".github/workflows/broken.yml", "name: X\njobs: [unclosed\n");
+    expect(finding).not.toBeNull();
+    expect(finding?.parseError.length).toBeGreaterThan(0);
   });
 });
 
@@ -288,8 +327,9 @@ describe("renderWorkflowUnparseableIssueBody", () => {
     expect(body).toContain("workflow_unparseable=0");
   });
 
-  it("a finding's detail appears in the body", () => {
-    const finding = classifyRunName("note-intelligence", ".github/workflows/ci.yml", ".github/workflows/ci.yml");
+  it("a finding's detail appears in the body (parse error message included)", () => {
+    const finding = classifyWorkflowContent("note-intelligence", ".github/workflows/ci.yml", "jobs:\n\tbad-tab: 1\n");
+    expect(finding).not.toBeNull();
     const body = renderWorkflowUnparseableIssueBody(finding ? [finding] : [], {
       org: "studio-b-ai",
       scannedWorkflowCount: 12,
@@ -300,5 +340,19 @@ describe("renderWorkflowUnparseableIssueBody", () => {
     expect(body).toContain("note-intelligence");
     expect(body).toContain(".github/workflows/ci.yml");
     expect(body).toContain("workflow_unparseable=1");
+    // The parser's message must appear in the rendered issue body (the issue's fix spec).
+    expect(body).toContain(finding!.parseError);
+  });
+
+  it("probe-failed workflows (Contents API couldn't fetch the file) are NAMED in the body — never silent (issue #307)", () => {
+    const body = renderWorkflowUnparseableIssueBody([], {
+      org: "studio-b-ai",
+      scannedWorkflowCount: 8,
+      generatedAt: NOW,
+      probeFailedWorkflows: ["some-repo/.github/workflows/mystery.yml", "other-repo/.github/workflows/x.yml"],
+      systemicFailures: [],
+    });
+    expect(body).toContain("some-repo/.github/workflows/mystery.yml");
+    expect(body).toContain("other-repo/.github/workflows/x.yml");
   });
 });
