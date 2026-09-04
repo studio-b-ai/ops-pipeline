@@ -103,6 +103,7 @@ import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 import { enrollGateRefusal, resolveGateRefusals } from "./lib/gate-enroll.js";
+import { mergeDoorFrom, formatTrainMergeReceipt, type MergeDoor } from "./lib/merge-door.js";
 import {
   resolveAuthorityLogins,
   evaluateLabelAuthority,
@@ -716,6 +717,12 @@ export interface TrainReadyOptions {
    *  intersected with MERGE_AUTHORITY_LOGINS via resolveAuthorityLogins (never wider
    *  than that ceiling). Omit for the default full roster (doc §3.2). */
   callerLogins?: readonly string[];
+  /** The merge receipt's DOOR fact (#412) — which workflow run actually executed
+   *  this evaluation. `main()` computes this once from the live Actions
+   *  environment (`mergeDoorFrom()`) and threads it in; tests pass a synthetic
+   *  door (or omit it) directly, no env stubbing required. Omit/undefined ⇒
+   *  treated the same as null (renders the honest "unknown" door). */
+  door?: MergeDoor | null;
 }
 
 /**
@@ -1126,21 +1133,14 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     return { outcome: "merge-attempt-failed", detail };
   }
 
-  const receipt = [
-    "**`queued` — MERGED by the restart train** (label-authority v2, ops#190 rung A1; one vocabulary 9/02)",
-    "",
-    "| Leg | Result |",
-    "|---|---|",
-    `| authority (label-authority v2, revalidated pre-merge) | ✅ authorized by \`${revalidateVerdict.authorizingEvent.actorLogin}\` (timeline position ${revalidateVerdict.authorizingEvent.position}) |`,
-    "| merge-ready (OPEN, not draft, mergeStateStatus CLEAN) + CI rollup clean | ✅ |",
-    "| independent review (Claude Sonnet 5) | ✅ CLEAN |",
-    "| revalidate: PR snapshot (labels/sha/state/mergeStateStatus) | ✅ no drift |",
-    "| revalidate: authority timeline re-check | ✅ still authorized |",
-    "",
-    `Evaluated sha: \`${prJson.headRefOid}\` (merge was SHA-pinned via \`--match-head-commit\`).`,
-    "",
-    "This comment is a write-only receipt — no automation reads it back.",
-  ].join("\n");
+  // #412: the receipt body itself lives in merge-door.ts (formatTrainMergeReceipt)
+  // so the door-line fix is unit-testable without this file's gh/Anthropic mocks.
+  const receipt = formatTrainMergeReceipt({
+    door: opts.door ?? null,
+    authorizingLogin: revalidateVerdict.authorizingEvent.actorLogin,
+    authorizingPosition: revalidateVerdict.authorizingEvent.position,
+    headRefOid: prJson.headRefOid,
+  });
   commentOnPr(repo, pr, receipt);
   logTrainGateLine(repo, pr, "merged", `merged at ${prJson.headRefOid}`);
   return { outcome: "merged", detail: `merged at ${prJson.headRefOid}` };
@@ -1167,7 +1167,10 @@ async function main(): Promise<void> {
   // below is deliberately NOT extended here — that vocabulary is typed to the
   // B-side gate's leg shape (see logTrainGateLine's own rationale).
   if (trainReady) {
-    await evaluateTrainReady(repo, pr);
+    // #412: the door fact is read ONCE here, at the call site, from the live
+    // Actions environment — never inside evaluateTrainReady itself, which stays
+    // pure/injectable for tests (see TrainReadyOptions.door).
+    await evaluateTrainReady(repo, pr, { door: mergeDoorFrom() });
     return;
   }
   try {
