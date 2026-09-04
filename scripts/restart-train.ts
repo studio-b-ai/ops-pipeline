@@ -176,6 +176,7 @@ import {
   formatObserveNote,
   formatStartLine,
   isRevertTitle,
+  mergeDecoupledFromDeploy,
   mergeTouchesDeployPaths,
   observeStateKey,
   observeTimeoutVerdict,
@@ -1061,6 +1062,20 @@ async function runObservePass(
 
   const repoClass = repoClassFor(pr.repo);
   if (repoClass === "studiob") {
+    // A #480-decoupled repo has NO deploy to observe: deploy-api.yml carries no push trigger, so
+    // the post-merge Railway deployment the leg below waits for can never appear — the ladder
+    // would time out and lock the train behind a machinery issue over a boot that structurally
+    // cannot follow the merge (ops-pipeline#296: four Kevin-queued PRs wedged behind it). The
+    // restart rung for such a repo ENDS AT THE MERGE, via the SAME successful-END routine
+    // (`completeObserve`) a real restart uses; the deploy rides the repo's own catch-up door.
+    const decoupled = mergeDecoupledFromDeploy(pr.repo);
+    if (decoupled !== null) {
+      console.log(
+        `[restart-train] observe: no-restart — ${pr.repo}#${pr.number} merged ${pr.mergeCommitOid.slice(0, 7)}; merge is decoupled from deploy (Rule #480); releasing`,
+      );
+      await completeObserve(target, pr, `no-restart: merge decoupled from deploy — ${decoupled}`, flags);
+      return { inFlight: false };
+    }
     const cls = await observeStudiobLeg(pr.mergedAt);
     if (cls.kind === "deployed") {
       const health = await probeStudiobHealth();

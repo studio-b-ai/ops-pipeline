@@ -132,9 +132,10 @@ export function isRevertTitle(title: string): boolean {
  *   service (Rule #480). So NO studiob merge ever fires a build off push, regardless of which
  *   files changed. Modeled as `null` ("no `paths:` filter" — the degenerate case where every
  *   push would be deploy-relevant) rather than `false`: this helper's job is to fail TOWARD
- *   observing, never toward skipping (#4/#382). Nothing in THIS fix routes studiob through this
- *   helper yet (the observe branch it's wired into is client-asthetik-only) — this entry exists
- *   so a future studiob consumer inherits the safe default instead of a silent `undefined`.
+ *   observing, never toward skipping (#4/#382). The studiob observe branch never reaches this
+ *   helper: it resolves EARLIER via MERGE_DEPLOY_DECOUPLED (below — ops-pipeline#296), so this
+ *   entry exists so a future studiob consumer inherits the safe default instead of a silent
+ *   `undefined`, and becomes load-bearing again the day studiob's push trigger returns.
  */
 export const DEPLOY_TRIGGER_GLOBS: Record<string, readonly string[] | null> = {
   "studio-b-ai/client-asthetik": ["acumatica/Customization/**", "acumatica/acuops.yaml", "acumatica/instance-manifest.json", "src/**"],
@@ -157,6 +158,43 @@ export function mergeTouchesDeployPaths(repo: string, files: string[]): boolean 
   if (globs === undefined) return true;
   if (globs === null) return true;
   return files.some((f) => pathMatchesAny(f, globs));
+}
+
+// ───────────────────────────── merge↔deploy decoupling law (Rule #480) ─────────────────────────────
+
+/**
+ * Repos whose MERGE is structurally decoupled from DEPLOY (Rule #480): no push trigger exists,
+ * so no post-merge Railway deployment can EVER appear for the observe leg to watch. Sourced from
+ * the same verbatim workflow read as DEPLOY_TRIGGER_GLOBS above — `studio-b-ai/studiob`'s
+ * deploy-api.yml carries ONLY `workflow_dispatch` + two `schedule` crons (23:30Z / 01:30Z) since
+ * studiob#552 (2026-08-29).
+ *
+ * The defect this fixes (ops-pipeline#296): the studiob observe branch waited for a post-merge
+ * deployment that cannot come, walked the whole timeout ladder, and locked the train behind a
+ * machinery issue — with four Kevin-queued PRs stuck behind single-flight.
+ *
+ * Resolution law: a decoupled repo's restart rung ENDS AT THE MERGE. The deploy (and the boot it
+ * causes) rides the repo's own catch-up door — deploy-api.yml's smokes + the `live-deployed`
+ * moving tag (#430) are THAT door's receipts, not the train's. The value is the human-readable
+ * reason the END ledger line carries.
+ *
+ * Bias: an EXPLICIT entry only. An unknown repo is NOT decoupled (`null`) — the helper fails
+ * toward observing, never toward skipping (#4/#382), the same stance as mergeTouchesDeployPaths.
+ * If a push trigger ever RETURNS to a listed repo, delete its entry here; the `null` entry in
+ * DEPLOY_TRIGGER_GLOBS then becomes the load-bearing safe default again.
+ */
+export const MERGE_DEPLOY_DECOUPLED: Record<string, string> = {
+  "studio-b-ai/studiob":
+    "deploy-api.yml has no push trigger (studiob#552, Rule #480) — the deploy rides the 23:30Z/01:30Z catch-up crons, receipted by its own smokes + the live-deployed tag",
+};
+
+/**
+ * The decoupling reason for `repo`, or `null` when the repo's merge still implies a deploy the
+ * observe leg must wait for. Only an explicit MERGE_DEPLOY_DECOUPLED entry returns a reason.
+ */
+export function mergeDecoupledFromDeploy(repo: string): string | null {
+  const reason = MERGE_DEPLOY_DECOUPLED[repo];
+  return typeof reason === "string" && reason.length > 0 ? reason : null;
 }
 
 // ───────────────────────────── studiob leg classification ─────────────────────────────
