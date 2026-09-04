@@ -51,20 +51,46 @@ function run(issues: IssueInput[], repoLabels: string[] = ALL_P_LABELS, override
 
 // ───────────────────────────── classify — p0p1-stale ─────────────────────────────
 
+// 2026-09-04 — the ops-pipeline#134 shape, planted as a KNOWN-BAD (Rule #471: prove the
+// verdict the guard does not default to). A P1 filed 19 days ago whose updatedAt is TODAY
+// (a bot commented on it this morning) MUST fire. Under the old updatedAt clock this exact
+// issue read as 1 day idle and never fired while it sat for 19 days.
+describe("classify — p0p1-stale ages from createdAt, not updatedAt (ops-pipeline#134)", () => {
+  it("FIRES on a 19-day-old P1 that a bot touched today (the #134 shape)", () => {
+    const findings = run([issue({ number: 134, labels: ["P1", "needs-human"], createdAt: daysAgo(19), updatedAt: daysAgo(0), title: "Rotate 3 leaked key sets" })]);
+    const f = findings.find((x) => x.class === "p0p1-stale" && x.issue === 134);
+    expect(f).toBeDefined();
+    expect(f!.daysIdle).toBe(19);
+    expect(f!.detail).toContain("ages from createdAt");
+  });
+
+  it("does NOT fire on a P1 filed yesterday, however stale its updatedAt looks", () => {
+    // Negative control: createdAt is the clock now; a weird old updatedAt must not matter.
+    const findings = run([issue({ number: 135, labels: ["P1"], createdAt: daysAgo(1), updatedAt: daysAgo(30) })]);
+    expect(findings.filter((f) => f.class === "p0p1-stale")).toHaveLength(0);
+  });
+
+  it("activity never resets the clock: same 19-day P1 with updatedAt 5 minutes ago still fires", () => {
+    const findings = run([issue({ number: 136, labels: ["P0"], createdAt: daysAgo(19), updatedAt: NOW })]);
+    expect(findings.some((f) => f.class === "p0p1-stale" && f.issue === 136)).toBe(true);
+  });
+});
+
+
 describe("classify — p0p1-stale", () => {
   // Negative control first (Rule #322).
   it("does NOT flag a fresh P1", () => {
-    const findings = run([issue({ number: 1, labels: ["P1"], updatedAt: daysAgo(1) })]);
+    const findings = run([issue({ number: 1, labels: ["P1"], createdAt: daysAgo(1) })]);
     expect(findings.filter((f) => f.class === "p0p1-stale")).toHaveLength(0);
   });
 
   it("does NOT flag exactly AT the threshold (strictly greater-than, per the issue's own '> 2 days' wording)", () => {
-    const findings = run([issue({ number: 2, labels: ["P1"], updatedAt: daysAgo(2) })]);
+    const findings = run([issue({ number: 2, labels: ["P1"], createdAt: daysAgo(2) })]);
     expect(findings.filter((f) => f.class === "p0p1-stale")).toHaveLength(0);
   });
 
   it("flags a P1 untouched beyond the threshold", () => {
-    const findings = run([issue({ number: 3, labels: ["P1"], updatedAt: daysAgo(5), title: "Stale P1" })]);
+    const findings = run([issue({ number: 3, labels: ["P1"], createdAt: daysAgo(5), title: "Stale P1" })]);
     const f = findings.find((x) => x.class === "p0p1-stale");
     expect(f).toBeDefined();
     expect(f!.issue).toBe(3);
@@ -76,7 +102,7 @@ describe("classify — p0p1-stale", () => {
   });
 
   it("flags a P0 the same way as P1", () => {
-    const findings = run([issue({ number: 4, labels: ["P0"], updatedAt: daysAgo(3) })]);
+    const findings = run([issue({ number: 4, labels: ["P0"], createdAt: daysAgo(3) })]);
     expect(findings.some((f) => f.class === "p0p1-stale" && f.issue === 4)).toBe(true);
   });
 });
@@ -105,7 +131,7 @@ describe("classify — p2-stale", () => {
   // A P1 issue that happens to also be old is p0p1-stale territory, not p2-stale — the two
   // classes are keyed strictly off which label is present.
   it("a stale P1 does NOT also read as p2-stale", () => {
-    const findings = run([issue({ number: 13, labels: ["P1"], updatedAt: daysAgo(20) })]);
+    const findings = run([issue({ number: 13, labels: ["P1"], createdAt: daysAgo(20) })]);
     expect(findings.filter((f) => f.issue === 13 && f.class === "p2-stale")).toHaveLength(0);
   });
 });
@@ -294,7 +320,7 @@ describe("classify — deterministic ordering", () => {
   it("groups findings in FINDING_CLASSES order regardless of input array order", () => {
     const issues = [
       issue({ number: 5, labels: [], createdAt: daysAgo(10) }), // unranked
-      issue({ number: 1, labels: ["P1", "next"], updatedAt: daysAgo(5) }), // p0p1-stale (carries next so headless doesn't also fire — kept out of this ordering test on purpose)
+      issue({ number: 1, labels: ["P1", "next"], createdAt: daysAgo(5) }), // p0p1-stale (ages from createdAt since 2026-09-04) (carries next so headless doesn't also fire — kept out of this ordering test on purpose)
       issue({ number: 3, labels: ["P2"], updatedAt: daysAgo(20) }), // p2-stale
     ];
     const findings = run(issues);
