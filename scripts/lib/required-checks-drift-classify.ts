@@ -40,16 +40,23 @@
  *      only current live state. `null`-safe: a repo with NO branch protection (404 on the
  *      protection endpoint) is skipped entirely — no protection is not a finding.
  *
- *   2. workflow_unparseable  — a workflow file's most recent run is named EXACTLY its own
- *      file path (e.g. `.github/workflows/ci.yml`) instead of a real workflow/job name.
- *      This is GitHub's own tell for "the YAML never parsed" (verbatim from the incident:
+ *   2. workflow_unparseable  — a workflow file under `.github/workflows/` fails to parse as
+ *      YAML — THIS leg's own parse of the file's fetched content, nothing derived.
+ *      ⚠️ SUPERSEDED design (ops-pipeline#307, 2026-09-04 first firing): originally driven
+ *      by GitHub's OWN tell — a workflow whose most recent run is named EXACTLY its file
+ *      path instead of a real workflow/job name (the note-intelligence `ci.yml` incident:
  *      "GitHub records a zero-job failed run named `.github/workflows/ci.yml` on every
- *      push") — deliberately NOT driven by this file's own `extractJobCheckNames` parse
- *      result, because GitHub's parser is the ground truth this class exists to surface;
- *      this file's parser could disagree with GitHub's in either direction and that
- *      disagreement is not the signal we want. A workflow with zero runs ever is NOT
- *      evidence of anything (Rule #322 — an empty population is not a positive result) —
- *      `latestRunName === undefined` never fires this class.
+ *      push"). That tell FALSIFIED on its first live firing: 5/5 hits were clean
+ *      `workflow_call` reusables and other legitimate path-named-run cases whose YAML
+ *      parsed fine with `yaml.safe_load` and carried a real top-level `name:` — "a
+ *      detector that fires on clean input is lying about dirty input too" (Rule #425). Fix:
+ *      derive the finding from THIS file's own parse result instead — the content fetch
+ *      class 1 already performs (`readWorkflowContent`, Contents:read) feeds this class
+ *      too now, so the worker no longer calls `gh run list` at all, dropping the
+ *      Actions:read dependency entirely and cutting API volume. A workflow with content the
+ *      Contents API cannot fetch is `probe_failed` (repo/path named) — a fetch failure says
+ *      nothing about the YAML's validity and must never silently read as either verdict
+ *      (Rule #322).
  */
 
 import { parse as parseYaml } from "yaml";
@@ -180,21 +187,95 @@ export interface WorkflowUnparseableFinding {
 }
 
 /**
- * `latestRunName === workflowPath` is GitHub's own tell that a workflow's YAML never
- * parsed (verbatim from the incident: a zero-job run named exactly the file path, on
- * every push). `undefined` (no runs fetched/exist yet) never fires — Rule #322, an empty
- * population is not a positive result; a workflow that has simply never run is not
- * evidence its YAML is broken.
+ * Truncates `message` to at most `maxCodePoints` Unicode CODE POINTS, appending an
+ * ellipsis when it truncates — code-point-safe (ops-pipeline#309 review, P3): `.slice()`
+ * on a JS string counts UTF-16 code UNITS, so a surrogate pair (e.g. an emoji) straddling
+ * the boundary would be split in half, leaving a lone unpaired surrogate in the output —
+ * invalid UTF-16 that renders as a replacement glyph or corrupts downstream JSON/Markdown.
+ * `Array.from` iterates a string via its string ITERATOR, which yields whole code points
+ * (surrogate pairs stay paired), so slicing the resulting array can never cut one in half.
+ * Extracted as its own function (rather than inlined in `classifyWorkflowYamlParse`) so it
+ * has a deterministic, directly-testable boundary case independent of any particular YAML
+ * parser error's own message shape.
  */
-export function classifyRunName(repo: string, workflowPath: string, latestRunName: string | undefined): WorkflowUnparseableFinding | null {
-  if (latestRunName === undefined) return null;
-  if (latestRunName !== workflowPath) return null;
-  return {
-    class: "workflow_unparseable",
-    repo,
-    workflowPath,
-    detail: `\`${repo}\`'s workflow \`${workflowPath}\` — its most recent run is named exactly the file path (\`${latestRunName}\`) instead of a real workflow/job name, GitHub's own tell that the YAML never parsed (0 jobs ever ran from it; the note-intelligence \`ci.yml\` incident — broken by a Slack-body block-scalar indent since 2026-03-26, unnoticed for months). Fix the YAML (a local \`python3 -c 'import yaml,sys;yaml.safe_load(open(sys.argv[1]))'\` or \`actionlint\` pass catches it) — every job this file was meant to run has been silently dead weight since it broke.`,
-  };
+export function truncateToCodePoints(message: string, maxCodePoints: number): string {
+  const codePoints = Array.from(message);
+  return codePoints.length > maxCodePoints ? `${codePoints.slice(0, maxCodePoints).join("")}…` : message;
+}
+
+/**
+ * `workflow_unparseable` (ops-pipeline#307 fix) = THIS leg's own YAML parse of the
+ * workflow file's fetched content THREW — nothing else. Deliberately does NOT reuse
+ * `extractJobCheckNames`'s `null`-on-throw result: that function swallows the exception
+ * for class 1's purposes (a "no jobs found" signal), where THIS class needs the actual
+ * parser message — the diagnostic a human needs to fix the file — so it re-parses
+ * independently and carries `err.message`, truncated to 160 code points via
+ * `truncateToCodePoints` (long YAML error messages can embed large chunks of surrounding
+ * source). A document that parses to a non-object (e.g. a bare scalar) is NOT this class's
+ * concern — that's still a successful parse; only a thrown exception counts.
+ */
+export function classifyWorkflowYamlParse(repo: string, workflowPath: string, yamlText: string): WorkflowUnparseableFinding | null {
+  try {
+    parseYaml(yamlText);
+    return null;
+  } catch (err) {
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    const message = truncateToCodePoints(rawMessage, 160);
+    return {
+      class: "workflow_unparseable",
+      repo,
+      workflowPath,
+      detail: `\`${repo}\`'s workflow \`${workflowPath}\` fails to parse as YAML: ${message} — every job this file was meant to run has been silently dead weight since it broke (a local \`python3 -c 'import yaml,sys;yaml.safe_load(open(sys.argv[1]))'\` or \`actionlint\` pass reproduces this).`,
+    };
+  }
+}
+
+// ───────────────────────────── content-fetch usability (ops-pipeline#309 review, P2) ─────────────────────────────
+
+export interface ContentFetchOk {
+  kind: "ok";
+  text: string;
+}
+export interface ContentFetchUnavailable {
+  kind: "unavailable";
+  reason: string;
+}
+export type ContentFetchResult = ContentFetchOk | ContentFetchUnavailable;
+
+/**
+ * Classifies a GitHub Contents-API response's USABILITY before anything downstream ever
+ * treats its `content` field as real workflow YAML. Born from an independent review of
+ * this leg's PR (#309, P2): the worker's `readWorkflowContent` extracted ONLY `.content`
+ * via `--jq`, discarding `encoding`/`size` entirely — but GitHub returns
+ * `{content: "", encoding: "none"}` for files >1MB (no inline payload at all), and
+ * `parseYaml("")` returns `null` WITHOUT throwing (`extractJobCheckNames`'s own
+ * doc-is-non-object branch) — so an unusable fetch would silently read as "parsed fine,
+ * zero jobs" for class 1 and "not this class's concern" for `classifyWorkflowYamlParse`
+ * (whose own doc comment says only a THROWN parse counts) — violating that stated
+ * invariant by feeding it content that was never really fetched. `parseYaml` throwing is
+ * meant to mean "a human wrote broken YAML"; a truncated/absent API payload means nothing
+ * about the file's actual validity and must never be conflated with either verdict (Rule
+ * #322).
+ *
+ * Three cases are NOT usable content — all classified `unavailable`, none ever reaches
+ * `extractJobCheckNames` or `classifyWorkflowYamlParse`:
+ *   - `size === 0` — a genuinely empty file. An empty workflow is not a parse success.
+ *   - `encoding !== "base64"` — GitHub's ">1MB, no inline payload" shape (`encoding:
+ *     "none"`), or any encoding this leg doesn't know how to decode.
+ *   - the base64-decoded text is itself empty despite `size > 0` — defensive: never trust
+ *     a decode that produced nothing just because the envelope claimed base64.
+ * The caller (the worker's `readWorkflowContent`) reports `unavailable` results as a named
+ * `probe_failed` entry — never silence, never a verdict either way, same contract as every
+ * other read failure in this leg.
+ */
+export function classifyContentFetch(parsed: { content?: string; encoding?: string; size?: number }): ContentFetchResult {
+  const encoding = parsed.encoding ?? "unknown";
+  const size = typeof parsed.size === "number" ? parsed.size : -1;
+  if (size === 0) return { kind: "unavailable", reason: `content unavailable (size ${size}, encoding ${encoding})` };
+  if (encoding !== "base64") return { kind: "unavailable", reason: `content unavailable (size ${size}, encoding ${encoding})` };
+  const text = Buffer.from((parsed.content ?? "").replace(/\s/g, ""), "base64").toString("utf-8");
+  if (text.length === 0) return { kind: "unavailable", reason: `content unavailable (size ${size}, encoding ${encoding})` };
+  return { kind: "ok", text };
 }
 
 // ───────────────────────────── summaries (Rule #465 — every class, every count, incl. 0) ─────────────────────────────
@@ -289,15 +370,15 @@ export interface WorkflowUnparseableMeta {
   org: string;
   scannedWorkflowCount: number;
   generatedAt: string;
-  /** Repos/workflows where the run-list read failed (not evidence either way — see systemicFailures). */
+  /** Repos/repo-paths where the workflow file's content could not be fetched via the Contents API (not evidence either way — a fetch failure says nothing about the YAML's validity — see systemicFailures). */
   probeFailedWorkflows: string[];
-  /** See `RequiredCheckDeadMeta.systemicFailures`'s doc comment — same array-not-optional rationale (Actions:read for run-list, Contents:read for enumerating which workflow files exist at all can BOTH be simultaneously missing). */
+  /** See `RequiredCheckDeadMeta.systemicFailures`'s doc comment — same array-not-optional rationale. Post-#307: this class depends on Contents:read ONLY (the prior Actions:read `gh run list` dependency was dropped entirely). */
   systemicFailures: SystemicFailure[];
 }
 
 export function renderWorkflowUnparseableIssueBody(findings: WorkflowUnparseableFinding[], meta: WorkflowUnparseableMeta): string {
   const lines: string[] = [];
-  lines.push(`Workflows whose most recent run is named exactly their own file path — \`${meta.org}\` (GitHub's tell for unparseable YAML).`);
+  lines.push(`Workflows whose content fails to parse as YAML — \`${meta.org}\` (this leg's own parse of the fetched file; see ops-pipeline#307 for the superseded run-name-tell design).`);
   lines.push("");
   lines.push(`This run ${meta.generatedAt} · ${meta.scannedWorkflowCount} workflow file(s) checked.`);
 
@@ -309,11 +390,11 @@ export function renderWorkflowUnparseableIssueBody(findings: WorkflowUnparseable
   }
   if (meta.probeFailedWorkflows.length > 0) {
     lines.push("");
-    lines.push(`Run-list read failed (excluded from this run's evidence, not a clean result): ${meta.probeFailedWorkflows.sort().join(", ")}.`);
+    lines.push(`Content fetch failed via the Contents API (excluded from this run's evidence, not a clean result): ${meta.probeFailedWorkflows.sort().join(", ")}.`);
   }
 
   lines.push("");
-  lines.push(`### Unparseable-YAML tell (${findings.length})`);
+  lines.push(`### Unparseable workflow YAML (${findings.length})`);
   lines.push("");
   if (findings.length === 0) {
     lines.push("_none_");
@@ -327,7 +408,7 @@ export function renderWorkflowUnparseableIssueBody(findings: WorkflowUnparseable
   lines.push(summarizeWorkflowUnparseable(findings) + ".");
   lines.push("");
   lines.push(
-    "**Flags-only**: this leg never edits a workflow file — a human fixes the YAML (local `yaml.safe_load`/`actionlint` reproduces the parse error) and the next scheduled run confirms recovery. Auto-closes when every workflow above produces a real named run again.",
+    "**Flags-only**: this leg never edits a workflow file — a human fixes the YAML (local `yaml.safe_load`/`actionlint` reproduces the parse error) and the next scheduled run confirms recovery. Auto-closes when every workflow above parses cleanly again.",
   );
   return lines.join("\n");
 }

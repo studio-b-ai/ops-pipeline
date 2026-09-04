@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   extractJobCheckNames,
   diffRequiredChecks,
-  classifyRunName,
+  classifyWorkflowYamlParse,
+  classifyContentFetch,
+  truncateToCodePoints,
   classifyProtectionProbeError,
   alertWorthyCount,
   summarizeRequiredCheckDead,
@@ -137,27 +139,112 @@ describe("diffRequiredChecks", () => {
   });
 });
 
-// ───────────────────────────── classifyRunName (class: workflow_unparseable) ─────────────────────────────
+// ───────────────────────────── classifyWorkflowYamlParse (class: workflow_unparseable) ─────────────────────────────
+// ops-pipeline#307: the ORIGINAL design (run name === file path — GitHub's own tell) fired
+// on 5/5 clean workflows at first live firing (Rule #425). Fixed to derive the finding from
+// THIS leg's own YAML parse of the fetched content instead — both verdicts planted below.
 
-describe("classifyRunName", () => {
-  it("run name equals the file path → finding (GitHub's unparseable-YAML tell, the note-intelligence ci.yml incident)", () => {
-    const finding = classifyRunName("note-intelligence", ".github/workflows/ci.yml", ".github/workflows/ci.yml");
+describe("classifyWorkflowYamlParse", () => {
+  it("invalid YAML (planted: bad tab indentation) → ONE finding carrying the parser's message (#471 the non-default verdict, planted)", () => {
+    const badYaml = "jobs:\n  build:\n  - this is not a mapping\n\tinvalid tab indent";
+    const finding = classifyWorkflowYamlParse("note-intelligence", ".github/workflows/ci.yml", badYaml);
     expect(finding).not.toBeNull();
     expect(finding?.class).toBe("workflow_unparseable");
     expect(finding?.repo).toBe("note-intelligence");
     expect(finding?.workflowPath).toBe(".github/workflows/ci.yml");
+    expect(finding?.detail).toMatch(/fails to parse as YAML/);
+    // the actual parser message is carried, not a generic "it's broken" string
+    expect(finding?.detail.length).toBeGreaterThan("`note-intelligence`'s workflow `.github/workflows/ci.yml` fails to parse as YAML: ".length);
   });
 
-  it("KNOWN-GOOD: run name is a real name (\"CI\") → no finding (#471 positive control)", () => {
-    expect(classifyRunName("note-intelligence", ".github/workflows/ci.yml", "CI")).toBeNull();
+  it("a long parser error message (verified 214 chars raw — a duplicate-key error with a 200-char key name) is truncated to 160 chars plus an ellipsis marker", () => {
+    const longKey = "a".repeat(200);
+    const yamlText = `jobs:\n  build:\n    ${longKey}: 1\n    ${longKey}: 2\n`;
+    const finding = classifyWorkflowYamlParse("repo", ".github/workflows/huge.yml", yamlText);
+    expect(finding).not.toBeNull();
+    const afterPrefix = finding!.detail.split("fails to parse as YAML: ")[1].split(" — every job")[0];
+    expect(afterPrefix.endsWith("…")).toBe(true);
+    expect(afterPrefix.length).toBe(161); // 160 chars of message + the ellipsis marker
   });
 
-  it("no runs yet (undefined) → no finding — Rule #322, an empty population is not evidence", () => {
-    expect(classifyRunName("repo", ".github/workflows/new.yml", undefined)).toBeNull();
+  it("KNOWN-GOOD: a clean `workflow_call` reusable whose latest run would be named by its path → NO finding (the exact #307 false-positive shape, #471 positive control)", () => {
+    const cleanReusable = ["name: AcuOps Deploy", "on:", "  workflow_call:", "    inputs:", "      environment:", "        required: true", "        type: string", "jobs:", "  deploy:", "    runs-on: ubuntu-latest"].join("\n");
+    expect(classifyWorkflowYamlParse("acuops-pipeline", ".github/workflows/acuops-deploy.yml", cleanReusable)).toBeNull();
   });
 
-  it("a run name that happens to CONTAIN the path but isn't exactly it → no finding (exact match only)", () => {
-    expect(classifyRunName("repo", ".github/workflows/ci.yml", "Deploy .github/workflows/ci.yml")).toBeNull();
+  it("a workflow with no top-level `name:` key that parses fine → no finding (structure, not syntax, is not this class's concern)", () => {
+    const noName = ["on: push", "jobs:", "  build:", "    runs-on: ubuntu-latest"].join("\n");
+    expect(classifyWorkflowYamlParse("repo", ".github/workflows/nameless.yml", noName)).toBeNull();
+  });
+
+  it("a top-level scalar document (parses fine, just not object-shaped) → no finding — that's `extractJobCheckNames`'s concern for class 1, not a YAML parse failure", () => {
+    expect(classifyWorkflowYamlParse("repo", ".github/workflows/weird.yml", "just a string")).toBeNull();
+  });
+
+  it("regression context: `parseYaml('')` does NOT throw (returns null) — this is exactly why `classifyContentFetch` (below) must intercept an unusable Contents-API payload BEFORE it ever reaches this function, or a >1MB/empty fetch would silently read as 'parsed fine'", () => {
+    expect(classifyWorkflowYamlParse("repo", ".github/workflows/big.yml", "")).toBeNull();
+  });
+});
+
+// ───────────────────────────── truncateToCodePoints (ops-pipeline#309 review, P3) ─────────────────────────────
+
+describe("truncateToCodePoints", () => {
+  it("a message shorter than the limit is returned unchanged, no ellipsis", () => {
+    expect(truncateToCodePoints("short", 160)).toBe("short");
+  });
+
+  it("a message exactly at the limit is returned unchanged (boundary, not >)", () => {
+    const message = "x".repeat(160);
+    expect(truncateToCodePoints(message, 160)).toBe(message);
+  });
+
+  it("an emoji (a 2-UTF16-unit surrogate pair) landing exactly at the truncation boundary is kept WHOLE, never split into a lone surrogate (#471 planted)", () => {
+    // 159 single-unit chars + one emoji (U+1F600 = 😀) as the 160th CODE POINT,
+    // then filler past the limit so truncation actually fires.
+    const emoji = "😀";
+    const message = "a".repeat(159) + emoji + "b".repeat(50);
+
+    // First, prove the BUG this replaces: a naive UTF-16-code-UNIT slice splits the pair.
+    const naiveSlice = message.slice(0, 160);
+    expect(naiveSlice.endsWith("\uD83D")).toBe(true); // a lone high surrogate — invalid UTF-16
+    expect(naiveSlice.endsWith(emoji)).toBe(false);
+
+    // Now the fix: code-point-safe truncation keeps the emoji intact.
+    const result = truncateToCodePoints(message, 160);
+    expect(result.endsWith(`${emoji}…`)).toBe(true);
+    expect(Array.from(result)).toHaveLength(161); // 160 code points + the ellipsis glyph
+    // no lone surrogate anywhere in the output: every \uD83D is paired with its \uDE00
+    expect((result.match(/\uD83D(?!\uDE00)/g) ?? []).length).toBe(0);
+  });
+});
+
+// ───────────────────────────── classifyContentFetch (ops-pipeline#309 review, P2) ─────────────────────────────
+
+describe("classifyContentFetch", () => {
+  it("GitHub's real >1MB shape ({content:'', encoding:'none', size:2000000}) → unavailable, never silently read as empty-but-parsed content (#471 the non-default verdict, planted)", () => {
+    const result = classifyContentFetch({ content: "", encoding: "none", size: 2000000 });
+    expect(result.kind).toBe("unavailable");
+    expect(result.kind === "unavailable" ? result.reason : null).toBe("content unavailable (size 2000000, encoding none)");
+  });
+
+  it("KNOWN-GOOD: a normal base64 payload with a real size → ok, the decoded text returned verbatim (#471 positive control)", () => {
+    const yamlText = "name: CI\njobs:\n  build:\n    runs-on: ubuntu-latest\n";
+    const b64 = Buffer.from(yamlText, "utf-8").toString("base64");
+    const result = classifyContentFetch({ content: b64, encoding: "base64", size: yamlText.length });
+    expect(result.kind).toBe("ok");
+    expect(result.kind === "ok" ? result.text : null).toBe(yamlText);
+  });
+
+  it("a genuinely empty file (size 0) → unavailable regardless of encoding — an empty workflow is not a parse success", () => {
+    expect(classifyContentFetch({ content: "", encoding: "base64", size: 0 }).kind).toBe("unavailable");
+  });
+
+  it("size > 0 but the decoded text is empty despite claiming base64 (defensive — an inconsistent envelope) → unavailable", () => {
+    expect(classifyContentFetch({ content: "", encoding: "base64", size: 500 }).kind).toBe("unavailable");
+  });
+
+  it("an unknown/missing `encoding` field → unavailable (never assume base64)", () => {
+    expect(classifyContentFetch({ content: "abc", size: 500 }).kind).toBe("unavailable");
   });
 });
 
@@ -289,7 +376,8 @@ describe("renderWorkflowUnparseableIssueBody", () => {
   });
 
   it("a finding's detail appears in the body", () => {
-    const finding = classifyRunName("note-intelligence", ".github/workflows/ci.yml", ".github/workflows/ci.yml");
+    const badYaml = "jobs:\n  build:\n  - this is not a mapping\n\tinvalid tab indent";
+    const finding = classifyWorkflowYamlParse("note-intelligence", ".github/workflows/ci.yml", badYaml);
     const body = renderWorkflowUnparseableIssueBody(finding ? [finding] : [], {
       org: "studio-b-ai",
       scannedWorkflowCount: 12,
@@ -300,5 +388,18 @@ describe("renderWorkflowUnparseableIssueBody", () => {
     expect(body).toContain("note-intelligence");
     expect(body).toContain(".github/workflows/ci.yml");
     expect(body).toContain("workflow_unparseable=1");
+  });
+
+  it("a Contents-API fetch failure (404/500) names the repo/path as probe_failed — never silence, never a finding (ops-pipeline#307's explicit third verdict)", () => {
+    const body = renderWorkflowUnparseableIssueBody([], {
+      org: "studio-b-ai",
+      scannedWorkflowCount: 5,
+      generatedAt: NOW,
+      probeFailedWorkflows: ["some-repo/.github/workflows/unreadable.yml"],
+      systemicFailures: [],
+    });
+    expect(body).toContain("some-repo/.github/workflows/unreadable.yml");
+    expect(body).toContain("workflow_unparseable=0"); // a fetch failure is not evidence either way — never counted as a finding
+    expect(body).toContain("Content fetch failed via the Contents API"); // the probe-failed note renders even though the findings section is empty ("_none_")
   });
 });
