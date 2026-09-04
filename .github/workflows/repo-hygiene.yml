@@ -35,9 +35,11 @@ name: Repo Hygiene
 # ops-pipeline#277 (2026-09-04) added a THIRD leg, required-checks-drift-worker.ts (design
 # in scripts/lib/required-checks-drift-classify.ts's header) — dead branch-protection
 # required-check contexts + unparseable workflow YAML, riding the SAME minted fleet-App
-# token as the two legs above. It needs Administration:read on top of the Contents:read +
-# Actions:read gap already documented above; also flags-only, also degrades loudly per
-# Rule #464 rather than failing the job. See that step's own comment below for specifics.
+# token as the two legs above. It needs Administration:read (branch-protection reads) —
+# the ONLY missing grant: a live probe 9/04 18:4xZ (`gh api orgs/studio-b-ai/installations`)
+# shows the fleet App already holds contents=write + actions=write + checks=read; the
+# 'Contents/Actions gap' wording that used to sit here was a stale carry (#412). Flags-only,
+# degrades loudly per Rule #464 rather than failing the job. See that step's comment below.
 
 on:
   schedule:
@@ -127,11 +129,10 @@ jobs:
       # independent leg, third independent failure domain: `!cancelled()` (Rule #320) so a
       # fleet-drift or dead-cron failure above never silently skips this one.
       #
-      # ⚠️ EXPECTED CI DEGRADATION ON DAY ONE (2026-09-04 bug-squasher probe, ops#277
-      # comment 2): this leg needs Administration:read (branch protection) + Contents:read
-      # (workflow enumeration/content — same gap already documented above for dead-cron) +
-      # Actions:read (run-list — also already documented above) on the fleet App's org
-      # installation, none of which it currently holds. By design it does NOT fail the job
+      # ⚠️ EXPECTED DEGRADATION UNTIL ONE GRANT LANDS: this leg needs Administration:read
+      # (branch-protection reads) on the fleet App's org installation — the only permission
+      # it lacks (Contents + Actions are already granted at write; live probe 9/04 18:4xZ).
+      # By design it does NOT fail the job
       # — it opens/updates its two aggregate issues carrying loud `systemicFailures` notes
       # (Rule #464) and exits 0, exactly like the dead-cron leg's own degraded-but-honest
       # steady state until the ops#104-class grant lands (org Settings → GitHub Apps →
