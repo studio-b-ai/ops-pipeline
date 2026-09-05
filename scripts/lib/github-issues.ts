@@ -21,6 +21,14 @@ export interface IssueRef {
   number: number;
   title: string;
   state: "OPEN" | "CLOSED";
+  /**
+   * Present when the caller passed `include: "labels"`; absent otherwise. ops-pipeline#320
+   * (needs-human router hold-rail leg): the router needs `lane:<seat>` labels to rail each
+   * named seat's inbox in addition to Dispatcher — the only current caller that needs this
+   * shape. Existing callers destructuring `{number, title, state}` are unaffected
+   * (structural typing; the optional field is simply ignored when absent).
+   */
+  labels?: { name: string }[];
 }
 
 /** Thin `gh` CLI seam — every helper below goes through here so stdio handling stays in one place. */
@@ -119,10 +127,21 @@ export function withGhRetry<T>(fn: () => T, opts: GhRetryOptions = {}): T {
  * realistic scale (hundreds of simultaneously open alert issues would itself be a five-alarm
  * operational signal, not a normal monitor page-cap risk).
  */
-export function listIssuesByLabel(repo: string, label: string, state: "open" | "closed" | "all", limit = 1000): IssueRef[] {
+export function listIssuesByLabel(
+  repo: string,
+  label: string,
+  state: "open" | "closed" | "all",
+  limit = 1000,
+  opts: { includeLabels?: boolean } = {},
+): IssueRef[] {
+  // ops-pipeline#320: opt-in labels field for the needs-human router hold-rail leg.
+  // Default false so existing callers keep exactly the same wire (single opt-in, single
+  // JSON field, no per-caller drift). `gh --json` accepts a comma list — adding `labels`
+  // returns each issue with `labels: [{name, description, color, ...}]`.
+  const fields = opts.includeLabels === true ? "number,title,state,labels" : "number,title,state";
   const out = withGhRetry(() => gh([
     "issue", "list", "--repo", repo, "--label", label, "--state", state,
-    "--limit", String(limit), "--json", "number,title,state",
+    "--limit", String(limit), "--json", fields,
   ]), { label: `issue list ${repo}` });
   const parsed = JSON.parse(out) as IssueRef[];
   return Array.isArray(parsed) ? parsed : [];

@@ -30,6 +30,16 @@ on:
         required: false
         type: boolean
         default: false
+    secrets:
+      # ops-pipeline#317 / #320: the seat-inbox door's bearer (webhook-router
+      # SEAT_INBOX_TOKEN — a SECOND STORE of the same value in webhook-router's Railway
+      # env, Rule #99: rotate atomically across BOTH stores or one 401s while the other
+      # works). Optional so a caller without it still routes; the hold-rail leg then
+      # prints [rail-skipped] on every hold rather than silently dropping the board
+      # line (Rule #464: a deployment gap must be visible). WEBHOOK_ROUTER_URL is a
+      # `vars.` in ops-pipeline (the public hostname, not a secret); see the run step.
+      SEAT_INBOX_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -80,4 +90,14 @@ jobs:
           # get honored, the fix is a Kevin-gated read:org-scoped PAT passed as a
           # secret here, not more client-side logic.
           GH_TOKEN: ${{ github.token }}
+          # ops-pipeline#317 / #320 hold-rail leg — the router POSTs
+          # /internal/seat-inbox on every HOLD_RECEIPT_MARKER to rail Dispatcher (+
+          # every lane:<seat> seat) so `/yard` sees the hold the same hour. Both are
+          # OPTIONAL: hold-rail fails visibly ([rail-skipped]) when unconfigured, so
+          # ordinary routing keeps working while callers roll the plumbing out
+          # (Rule #464 — a gap must be visible in every run until someone fixes it).
+          # `vars.WEBHOOK_ROUTER_URL` resolves in the CALLER's repo, same as the
+          # squasher-automerge/gate-enroll pattern.
+          WEBHOOK_ROUTER_URL: ${{ vars.WEBHOOK_ROUTER_URL }}
+          SEAT_INBOX_TOKEN: ${{ secrets.SEAT_INBOX_TOKEN }}
         run: npx tsx needs-human-router.ts --repo "${{ inputs.repo }}" ${{ inputs.dry_run && '--dry-run' || '' }}
