@@ -30,8 +30,10 @@
  */
 
 import {
+  addLabel,
   closeIssue,
   commentIssue,
+  ensureLabel,
   getCommentReactions,
   listIssueComments,
   listIssuesByLabel,
@@ -59,6 +61,15 @@ import {
 const LABEL = "needs-human";
 const ORG = "studio-b-ai";
 const ACTION_CAP = 10;
+
+// ops-pipeline#317 (Kevin ruling 2026-09-05 "default to WORK"): a routed issue whose probe
+// trailer didn't parse still ROUTES, but this label goes on so the format bug stays visible in
+// the lane backlog (rather than being silently swallowed by a same-repo default). ensureLabel is
+// called before each add so a caller repo that doesn't yet have the label gets one — idempotent
+// via `--force`, mirroring every other alert-issue monitor's own bootstrap pattern.
+const PROBE_TRAILER_UNPARSED_LABEL = "probe-trailer-unparsed";
+const PROBE_TRAILER_UNPARSED_DESCRIPTION = "ops#317: probe machine trailer unparseable; routed anyway";
+const PROBE_TRAILER_UNPARSED_COLOR = "FBCA04";
 
 // v1 covered repos = the cross-repo allowlist too (design comment: "Cross-repo allowlist = the
 // same set" as the repos where needs-human issues exist today). Static per v1 — no fleet
@@ -91,15 +102,22 @@ const isAuthorizedReactor = createAuthorizedReactorChecker();
 
 // ───────────────────────────── receipts ─────────────────────────────
 
-function routeReceipt(): string {
-  return [
+function routeReceipt(probeTrailerUnparsed = false): string {
+  const lines = [
     ROUTE_RECEIPT_MARKER,
     "🧭 **Auto-routed to this repo's lane backlog** — the probe comment above is the pre-brief.",
     "",
     "React 👎 here to have the next sweep close this as rejected, or just close it.",
     "",
     "_(ops-pipeline#66 — Kevin ruling 2026-08-14: route immediately, a 👎 is a brake, never a gate. The `needs-human` label has been removed.)_",
-  ].join("\n");
+  ];
+  if (probeTrailerUnparsed) {
+    lines.push(
+      "",
+      "⚠️ The probe's machine trailer didn't parse cleanly — routed anyway (Kevin ruling 2026-09-05, ops#317: default to WORK; a hold requires a parsed `NEEDS-KEVIN: yes`). The `probe-trailer-unparsed` label was added so the format bug stays visible.",
+    );
+  }
+  return lines.join("\n");
 }
 
 function closeRejectedReceipt(): string {
@@ -284,11 +302,25 @@ function logMainOutcome(
       // the issue exactly as it was pre-attempt: still labeled, no marker, safely
       // re-evaluated fresh next run. The skip-already-routed case above self-heals the other
       // partial-failure direction (comment succeeded, label removal didn't).
+      //
+      // ops#317: when the probe trailer didn't parse cleanly, ALSO add
+      // `probe-trailer-unparsed` after the label removal — this surfaces the format bug in the
+      // lane backlog without holding the underlying work (Kevin ruling 2026-09-05, "default to
+      // WORK"). ensureLabel is idempotent (`--force`) and runs before addLabel so a caller repo
+      // that doesn't yet carry the label bootstraps it on first use.
+      const probeTrailerUnparsed = disposition.probeTrailerUnparsed === true;
       const result = tryApply(() => {
-        commentIssue(repo, issue.number, routeReceipt());
+        commentIssue(repo, issue.number, routeReceipt(probeTrailerUnparsed));
         removeLabel(repo, issue.number, LABEL);
+        if (probeTrailerUnparsed) {
+          ensureLabel(repo, PROBE_TRAILER_UNPARSED_LABEL, PROBE_TRAILER_UNPARSED_DESCRIPTION, PROBE_TRAILER_UNPARSED_COLOR);
+          addLabel(repo, issue.number, PROBE_TRAILER_UNPARSED_LABEL);
+        }
       }, dryRun);
-      logResult(head, "route-same-repo (post receipt + remove label)", result);
+      const describe = probeTrailerUnparsed
+        ? "route-same-repo (post receipt + remove label + add probe-trailer-unparsed)"
+        : "route-same-repo (post receipt + remove label)";
+      logResult(head, describe, result);
       if (result !== "capped") actionedThisRun.add(issue.number);
       return;
     }

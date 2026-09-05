@@ -143,20 +143,32 @@ describe("routeDisposition — main per-issue pass", () => {
     expect(routeDisposition(base({ probeCommentBody: legacyBody }))).toEqual({ kind: "route-same-repo" });
   });
 
-  // codex review pass 2 P2 (2026-08-14): a MALFORMED trailer attempt must NOT get the same
-  // lowest-scrutiny same-repo default as a genuinely legacy comment — see
-  // looksLikeAttemptedTrailer's doc comment. Held for a human instead.
-  it("malformed trailer attempt (stray trailing text) -> hold-needs-kevin, NOT route-same-repo", () => {
+  // Kevin ruling 2026-09-05 (issue #317, "default to WORK"): a malformed trailer attempt no
+  // longer holds — it still routes, but with `probeTrailerUnparsed: true` so the caller can
+  // surface the format bug via a `probe-trailer-unparsed` label. A hold requires a PARSED
+  // `NEEDS-KEVIN: yes`, never a broken-trailer default. Supersedes the pass-2 (2026-08-14)
+  // "malformed → hold" behavior.
+  it("malformed trailer attempt (stray trailing text) -> route-same-repo w/ probeTrailerUnparsed (Kevin ruling 2026-09-05)", () => {
     const body = ["ROUTING: same-repo", "NEEDS-KEVIN: no", "Let me know if you need anything else!"].join("\n");
-    expect(routeDisposition(base({ probeCommentBody: body }))).toEqual({ kind: "hold-needs-kevin" });
+    expect(routeDisposition(base({ probeCommentBody: body }))).toEqual({ kind: "route-same-repo", probeTrailerUnparsed: true });
   });
 
-  it("malformed trailer attempt (corrupted ROUTING line) -> hold-needs-kevin", () => {
+  it("malformed trailer attempt (corrupted ROUTING line) -> route-same-repo w/ probeTrailerUnparsed", () => {
     const body = ["ROUTING same-repo (missing colon)", "NEEDS-KEVIN: no"].join("\n");
-    expect(routeDisposition(base({ probeCommentBody: body }))).toEqual({ kind: "hold-needs-kevin" });
+    expect(routeDisposition(base({ probeCommentBody: body }))).toEqual({ kind: "route-same-repo", probeTrailerUnparsed: true });
   });
 
-  it("same-repo trailer, needs-kevin no -> route-same-repo", () => {
+  // Positive control: a genuinely-legacy null-parse (no attempted trailer at all) routes WITHOUT
+  // the probeTrailerUnparsed flag — the format-bug label is scoped to the attempted-but-broken
+  // case, not fired for every legacy comment.
+  it("legacy null-parse routes without probeTrailerUnparsed (only the attempted-but-broken case carries the flag)", () => {
+    const legacyBody = ["## Culprit hypothesis", "the sync filter", "## NEEDS-KEVIN", "no", "## Confidence + what would falsify this", "high"].join("\n");
+    const out = routeDisposition(base({ probeCommentBody: legacyBody }));
+    expect(out.kind).toBe("route-same-repo");
+    expect(out).not.toHaveProperty("probeTrailerUnparsed", true);
+  });
+
+  it("same-repo trailer, needs-kevin no -> route-same-repo (no probeTrailerUnparsed on a clean parse)", () => {
     expect(routeDisposition(base({ probeCommentBody: trailer("same-repo", "no") }))).toEqual({ kind: "route-same-repo" });
   });
 
