@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 import {
   type DepartureFacts,
+  DEFAULT_TICKET_CLASS,
   evaluateDeparture,
   evaluateWindow,
   formatLedgerLine,
@@ -24,6 +25,8 @@ import {
   parseWindows,
   pathMatchesAny,
   type Registries,
+  resolveClassBand,
+  TICKET_CLASSES,
   type WindowEntry,
 } from "../timetable-gate.js";
 
@@ -437,5 +440,326 @@ describe("formatLedgerLine", () => {
     expect(parsed.checks).toHaveLength(13);
     expect(parsed.ts).toBe("2026-09-02T16:00:00.000Z");
     expect(line).not.toContain("\n");
+  });
+
+  it("records ticket_class exactly as the evaluator resolved it (default enhancement, never nullable)", () => {
+    // A class-less caller must appear as `enhancement` in the ledger (never `null`
+    // / `unknown`) — a ledger reader that treats those as distinct states would
+    // diverge from what the gate actually evaluated. Kevin 2026-09-03 (ops#281).
+    const line = formatLedgerLine(
+      evaluateDeparture(goodRegistries(), goodFacts()),
+      goodFacts(),
+      new Date("2026-09-02T16:00:00Z"),
+    );
+    expect(JSON.parse(line).ticket_class).toBe("enhancement");
+    const bugfixFacts: DepartureFacts = { ...goodFacts(), ticketClass: "bugfix" };
+    expect(JSON.parse(
+      formatLedgerLine(
+        evaluateDeparture(goodRegistries(), bugfixFacts),
+        bugfixFacts,
+        new Date("2026-09-02T16:00:00Z"),
+      ),
+    ).ticket_class).toBe("bugfix");
+    const garbageFacts = { ...goodFacts(), ticketClass: "hotfix" as unknown as "bugfix" };
+    expect(JSON.parse(
+      formatLedgerLine(
+        evaluateDeparture(goodRegistries(), garbageFacts),
+        garbageFacts,
+        new Date("2026-09-02T16:00:00Z"),
+      ),
+    ).ticket_class).toBe("enhancement");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Class-aware bands (Kevin 2026-09-03 — ops-pipeline#281)
+//
+// Kevin verbatim: "if it's a bug fix, I think those go afterhours any time. if
+// they're enhancements, they go anytime to test but production is only
+// wednesday at noon". Fail-closed default: enhancement (the narrower band) —
+// the wider bugfix band is NEVER granted by omission.
+// ---------------------------------------------------------------------------
+
+describe("TICKET_CLASSES + DEFAULT_TICKET_CLASS", () => {
+  it("enumerates exactly the two Kevin-named classes; default is enhancement (fail-closed)", () => {
+    expect([...TICKET_CLASSES]).toEqual(["bugfix", "enhancement"]);
+    expect(DEFAULT_TICKET_CLASS).toBe("enhancement");
+  });
+});
+
+describe("parseWindows — per-class bands", () => {
+  it("parses `bands` alongside `band`, preserving the legacy enhancement default", () => {
+    // pg-enum-drift-exempt: windows.yaml status vocabulary, no Postgres
+    const w = parseWindows(
+      [
+        "windows:",
+        "  - surface: acumatica-prod",
+        "    band: \"Wed 12:00 ET\"",
+        "    status: RULED",
+        "    bands:",
+        "      bugfix: \"after-hours any day\"",
+        "      enhancement: \"Wed 12:00 ET\"",
+      ].join("\n"),
+    );
+    expect(w[0].band).toBe("Wed 12:00 ET");
+    expect(w[0].bands).toEqual({ bugfix: "after-hours any day", enhancement: "Wed 12:00 ET" });
+  });
+
+  it("rejects an unknown class key in `bands` (typo cannot silently fall through)", () => {
+    expect(() =>
+      // pg-enum-drift-exempt: windows.yaml status vocabulary, no Postgres
+      parseWindows(
+        [
+          "windows:",
+          "  - surface: s",
+          "    band: always",
+          "    status: RULED",
+          "    bands:",
+          "      hotfix: whenever",
+        ].join("\n"),
+      ),
+    ).toThrow(/unknown class/);
+  });
+
+  it("rejects a non-string / empty `bands.<class>` value", () => {
+    expect(() =>
+      // pg-enum-drift-exempt: windows.yaml status vocabulary, no Postgres
+      parseWindows(
+        [
+          "windows:",
+          "  - surface: s",
+          "    band: always",
+          "    status: RULED",
+          "    bands:",
+          "      bugfix: \"\"",
+        ].join("\n"),
+      ),
+    ).toThrow(/must be a non-empty string/);
+    expect(() =>
+      // pg-enum-drift-exempt: windows.yaml status vocabulary, no Postgres
+      parseWindows(
+        [
+          "windows:",
+          "  - surface: s",
+          "    band: always",
+          "    status: RULED",
+          "    bands:",
+          "      bugfix: 42",
+        ].join("\n"),
+      ),
+    ).toThrow(/must be a non-empty string/);
+  });
+
+  it("accepts a windows.yaml row WITHOUT `bands` (back-compat: legacy single-band rows)", () => {
+    // pg-enum-drift-exempt: windows.yaml status vocabulary, no Postgres
+    const w = parseWindows("windows:\n  - surface: s\n    band: always\n    status: RULED");
+    expect(w[0].bands).toBeUndefined();
+    expect(w[0].band).toBe("always");
+  });
+});
+
+describe("resolveClassBand — precedence", () => {
+  // pg-enum-drift-exempt: WindowEntry.status YAML vocabulary, no Postgres
+  const both: WindowEntry = {
+    surface: "s",
+    band: "Wed 12:00 ET",
+    bands: { bugfix: "after-hours any day", enhancement: "Wed 12:00 ET" },
+    status: "RULED",
+  };
+  // pg-enum-drift-exempt: WindowEntry.status YAML vocabulary, no Postgres
+  const legacy: WindowEntry = { surface: "s", band: "always", status: "RULED" };
+
+  it("picks bands[class] when present, for both classes", () => {
+    expect(resolveClassBand(both, "bugfix")).toEqual({ band: "after-hours any day" });
+    expect(resolveClassBand(both, "enhancement")).toEqual({ band: "Wed 12:00 ET" });
+  });
+
+  it("falls back to `band` for ENHANCEMENT when `bands` is absent (legacy row)", () => {
+    expect(resolveClassBand(legacy, "enhancement")).toEqual({ band: "always" });
+  });
+
+  it("bugfix has NO fallback — a legacy row fails closed for bugfix", () => {
+    const r = resolveClassBand(legacy, "bugfix");
+    expect("error" in r).toBe(true);
+    if ("error" in r) expect(r.error).toMatch(/no band configured for class .bugfix./);
+  });
+
+  it("a partial `bands` (only bugfix) still lets enhancement inherit `band`", () => {
+    // pg-enum-drift-exempt: WindowEntry.status YAML vocabulary, no Postgres
+    const partial: WindowEntry = {
+      surface: "s",
+      band: "Wed 12:00 ET",
+      bands: { bugfix: "after-hours any day" },
+      status: "RULED",
+    };
+    expect(resolveClassBand(partial, "bugfix")).toEqual({ band: "after-hours any day" });
+    expect(resolveClassBand(partial, "enhancement")).toEqual({ band: "Wed 12:00 ET" });
+  });
+});
+
+describe("evaluateWindow — 'after-hours any day' grammar", () => {
+  // pg-enum-drift-exempt: WindowEntry.status YAML vocabulary, no Postgres
+  const ah: WindowEntry = { surface: "s", band: "after-hours any day", status: "RULED" };
+
+  it("closed inside weekday 06:00-18:00 ET", () => {
+    const wedNoon = new Date("2026-09-02T16:30:00Z"); // Wed 12:30 ET (EDT = UTC-4)
+    const v = evaluateWindow(ah, wedNoon);
+    expect(v.open).toBe(false);
+    expect(v.reason).toMatch(/inside business hours/);
+  });
+
+  it("open weekday evening (past 18:00 ET) and weekday early morning (before 06:00 ET)", () => {
+    expect(evaluateWindow(ah, new Date("2026-09-02T23:30:00Z")).open).toBe(true); // Wed 19:30 ET
+    expect(evaluateWindow(ah, new Date("2026-09-02T09:30:00Z")).open).toBe(true); // Wed 05:30 ET
+  });
+
+  it("open all day Saturday and Sunday", () => {
+    expect(evaluateWindow(ah, new Date("2026-09-05T16:00:00Z")).open).toBe(true); // Sat 12:00 ET
+    expect(evaluateWindow(ah, new Date("2026-09-06T16:00:00Z")).open).toBe(true); // Sun 12:00 ET
+  });
+
+  it("boundary: 18:00 ET is OPEN (half-open), 05:59 ET is OPEN, 06:00 ET is CLOSED", () => {
+    // Wed 18:00 ET = 22:00 UTC (EDT)
+    expect(evaluateWindow(ah, new Date("2026-09-02T22:00:00Z")).open).toBe(true);
+    // Wed 06:00 ET = 10:00 UTC (EDT)
+    expect(evaluateWindow(ah, new Date("2026-09-02T10:00:00Z")).open).toBe(false);
+    // Wed 05:59 ET = 09:59 UTC (EDT)
+    expect(evaluateWindow(ah, new Date("2026-09-02T09:59:00Z")).open).toBe(true);
+  });
+});
+
+describe("evaluateWindow — ticketClass argument", () => {
+  // pg-enum-drift-exempt: WindowEntry.status YAML vocabulary, no Postgres
+  const dual: WindowEntry = {
+    surface: "s",
+    band: "Wed 12:00 ET",
+    bands: { bugfix: "after-hours any day", enhancement: "Wed 12:00 ET" },
+    status: "RULED",
+  };
+  const WED_1230_ET = new Date("2026-09-02T16:30:00Z");
+  const SAT_NOON_ET = new Date("2026-09-05T16:00:00Z");
+
+  it("bugfix uses bands.bugfix (after-hours any day) — Saturday opens, Wed noon closes", () => {
+    expect(evaluateWindow(dual, SAT_NOON_ET, 60, "bugfix").open).toBe(true);
+    expect(evaluateWindow(dual, WED_1230_ET, 60, "bugfix").open).toBe(false);
+  });
+
+  it("enhancement uses bands.enhancement (Wed 12:00 ET) — Wed noon opens, Saturday closes", () => {
+    expect(evaluateWindow(dual, WED_1230_ET, 60, "enhancement").open).toBe(true);
+    expect(evaluateWindow(dual, SAT_NOON_ET, 60, "enhancement").open).toBe(false);
+  });
+
+  it("default class is enhancement (fail-closed for omission — no bugfix by silence)", () => {
+    // pg-enum-drift-exempt: WindowEntry.status YAML vocabulary, no Postgres
+    const bugfixOnly: WindowEntry = {
+      surface: "s",
+      band: "Wed 12:00 ET",
+      bands: { bugfix: "after-hours any day" },
+      status: "RULED",
+    };
+    // Saturday would OPEN under bugfix but must CLOSE under the default enhancement.
+    const v = evaluateWindow(bugfixOnly, SAT_NOON_ET);
+    expect(v.open).toBe(false);
+  });
+
+  it("an unrecognized ticketClass string coerces to enhancement (never bugfix by garbage)", () => {
+    // pg-enum-drift-exempt: WindowEntry.status YAML vocabulary, no Postgres
+    const bugfixOnly: WindowEntry = {
+      surface: "s",
+      band: "Wed 12:00 ET",
+      bands: { bugfix: "after-hours any day" },
+      status: "RULED",
+    };
+    // Cast through unknown to simulate a runtime caller outside TS's union.
+    const v = evaluateWindow(bugfixOnly, SAT_NOON_ET, 60, "hotfix" as unknown as "bugfix");
+    expect(v.open).toBe(false);
+  });
+
+  it("bugfix on a legacy row (no bands) fails closed — the wider band is never inherited", () => {
+    // pg-enum-drift-exempt: WindowEntry.status YAML vocabulary, no Postgres
+    const legacy: WindowEntry = { surface: "s", band: "always", status: "RULED" };
+    const v = evaluateWindow(legacy, WED_1230_ET, 60, "bugfix");
+    expect(v.open).toBe(false);
+    expect(v.reason).toMatch(/no band configured for class .bugfix./);
+  });
+});
+
+describe("evaluateDeparture — check 08 class-aware evaluation", () => {
+  function classAwareWindows(): WindowEntry[] {
+    // pg-enum-drift-exempt: WindowEntry.status YAML vocabulary, no Postgres
+    return [
+      {
+        surface: "railway:test-svc",
+        band: "Wed 12:00 ET",
+        bands: { bugfix: "after-hours any day", enhancement: "Wed 12:00 ET" },
+        status: "RULED",
+      },
+    ];
+  }
+
+  it("bugfix ticket DEPARTS on a Saturday against a per-class bands map", () => {
+    const reg: Registries = { ...goodRegistries(), windows: classAwareWindows() };
+    const facts: DepartureFacts = {
+      ...goodFacts(),
+      ticketClass: "bugfix",
+      expectedPublishTime: new Date("2026-09-05T16:00:00Z"), // Sat 12:00 ET
+    };
+    const r = evaluateDeparture(reg, facts);
+    expect(r.verdict).toBe("DEPART");
+    expect(r.failures).toEqual([]);
+    const c08 = r.checks.find((c) => c.id === "08");
+    expect(c08?.reason).toMatch(/class=bugfix/);
+    expect(c08?.reason).toMatch(/band=`after-hours any day`/);
+  });
+
+  it("enhancement ticket at Wed 12:30 ET DEPARTS; the same slot fails bugfix (business hours)", () => {
+    const reg: Registries = { ...goodRegistries(), windows: classAwareWindows() };
+    const wedNoon: DepartureFacts = {
+      ...goodFacts(),
+      ticketClass: "enhancement",
+      expectedPublishTime: new Date("2026-09-02T16:30:00Z"),
+    };
+    expect(evaluateDeparture(reg, wedNoon).verdict).toBe("DEPART");
+    const bugfixSameSlot: DepartureFacts = { ...wedNoon, ticketClass: "bugfix" };
+    const r = evaluateDeparture(reg, bugfixSameSlot);
+    expect(r.verdict).toBe("FALL_THROUGH");
+    expect(r.failures.some((f) => /^\[08\].*class=bugfix.*business hours/.test(f))).toBe(true);
+  });
+
+  it("absent ticketClass defaults to enhancement — never bugfix by omission (fail-closed)", () => {
+    const reg: Registries = { ...goodRegistries(), windows: classAwareWindows() };
+    // Saturday would open under bugfix; the default enhancement gates it to Wed.
+    const facts: DepartureFacts = {
+      ...goodFacts(),
+      ticketClass: undefined,
+      expectedPublishTime: new Date("2026-09-05T16:00:00Z"),
+    };
+    const r = evaluateDeparture(reg, facts);
+    expect(r.verdict).toBe("FALL_THROUGH");
+    const f08 = r.failures.find((f) => /^\[08\]/.test(f));
+    expect(f08).toBeDefined();
+    expect(f08).toMatch(/class=enhancement/);
+  });
+
+  it("check 08 reason names the class + resolved band structurally (PLAN-line consumer)", () => {
+    const reg: Registries = { ...goodRegistries(), windows: classAwareWindows() };
+    const facts: DepartureFacts = {
+      ...goodFacts(),
+      ticketClass: "bugfix",
+      expectedPublishTime: new Date("2026-09-02T16:30:00Z"), // Wed noon — bugfix closed here
+    };
+    const r = evaluateDeparture(reg, facts);
+    const c08 = r.checks.find((c) => c.id === "08");
+    expect(c08?.reason).toMatch(/^class=bugfix band=`after-hours any day`:/);
+  });
+
+  it("bugfix on a legacy (single-band) row fails check 08 — the wider band is never inherited", () => {
+    // Legacy windows[0] has only `band: always`, no `bands`. A bugfix ticket
+    // must NOT slip through under the enhancement default.
+    const facts: DepartureFacts = { ...goodFacts(), ticketClass: "bugfix" };
+    const r = evaluateDeparture(goodRegistries(), facts);
+    expect(r.verdict).toBe("FALL_THROUGH");
+    const f08 = r.failures.find((f) => /^\[08\]/.test(f));
+    expect(f08).toMatch(/no band configured for class .bugfix./);
   });
 });
