@@ -41,6 +41,7 @@ import {
   gh,
   type IssueComment,
 } from "./lib/github-issues.js";
+import { railHold, type HoldRail } from "./lib/hold-rail.js";
 import { createAuthorizedReactorChecker } from "./lib/needs-human-authorization.js";
 import { PROBE_MARKER } from "./lib/needs-human-probe-lib.js";
 import {
@@ -71,6 +72,28 @@ const PROBE_TRAILER_UNPARSED_LABEL = "probe-trailer-unparsed";
 const PROBE_TRAILER_UNPARSED_DESCRIPTION = "ops#317: probe machine trailer unparseable; routed anyway";
 const PROBE_TRAILER_UNPARSED_COLOR = "FBCA04";
 
+// ops-pipeline#317 / #320 (Kevin ruling 2026-09-05 "default to WORK"): on every hold, the
+// router adds this label so `/yard` can sweep by label AND rails the Dispatcher (+ any
+// `lane:<seat>` seats) via the seat-inbox door — a hold with no board line is a defect.
+// `--force` on `gh label create` means the same-hour ensure is idempotent (re-runs are
+// no-ops), so the first firing on a caller repo without the label bootstraps it (#464:
+// a first firing is part of the ship, not its follow-up).
+const KEVIN_DECISION_LABEL = "kevin-decision";
+const KEVIN_DECISION_DESCRIPTION = "ops#317/#320: /yard sweeps by this label — needs a Kevin decision";
+const KEVIN_DECISION_COLOR = "D93F0B";
+
+function ensureKevinDecisionLabel(repo: string): void {
+  gh([
+    "label", "create", KEVIN_DECISION_LABEL, "--repo", repo, "--force",
+    "--description", KEVIN_DECISION_DESCRIPTION, "--color", KEVIN_DECISION_COLOR,
+  ]);
+}
+
+function addKevinDecisionLabel(repo: string, num: number): void {
+  // `gh issue edit --add-label` is idempotent (a repeat is a no-op, not an error), so
+  // callers never need to pre-check membership.
+  gh(["issue", "edit", String(num), "--repo", repo, "--add-label", KEVIN_DECISION_LABEL]);
+}
 // v1 covered repos = the cross-repo allowlist too (design comment: "Cross-repo allowlist = the
 // same set" as the repos where needs-human issues exist today). Static per v1 — no fleet
 // discovery, matching the design's explicit static-list scope.
@@ -225,8 +248,11 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
 }
 
-function runMainPass(repo: string, dryRun: boolean, actionedThisRun: Set<number>): RouterDisposition[] {
-  const issues = listIssuesByLabel(repo, LABEL, "open");
+async function runMainPass(repo: string, dryRun: boolean, actionedThisRun: Set<number>): Promise<RouterDisposition[]> {
+  // ops-pipeline#320: `includeLabels: true` so the hold-rail leg can enumerate every
+  // `lane:<seat>` label on a held issue and rail that seat too (in addition to Dispatcher).
+  // Existing consumers of `IssueRef` are unaffected — the `labels` field is optional.
+  const issues = listIssuesByLabel(repo, LABEL, "open", 1000, { includeLabels: true });
   const dispositions: RouterDisposition[] = [];
 
   console.log(`[router] ${repo}: ${issues.length} open '${LABEL}' issue(s) — main pass.`);
@@ -250,20 +276,22 @@ function runMainPass(repo: string, dryRun: boolean, actionedThisRun: Set<number>
     dispositions.push(disposition);
 
     const row: IssueRow = { number: issue.number, title: truncate(issue.title, 70) };
-    logMainOutcome(row, disposition, holdReceiptPresent, dryRun, actionedThisRun, repo);
+    const labelNames = (issue.labels ?? []).map((l) => l.name);
+    await logMainOutcome(row, disposition, holdReceiptPresent, dryRun, actionedThisRun, repo, labelNames);
   }
 
   return dispositions;
 }
 
-function logMainOutcome(
+async function logMainOutcome(
   issue: IssueRow,
   disposition: RouterDisposition,
   holdReceiptPresent: boolean,
   dryRun: boolean,
   actionedThisRun: Set<number>,
   repo: string,
-): void {
+  labels: readonly string[],
+): Promise<void> {
   const head = `  #${issue.number} "${issue.title}"`;
 
   switch (disposition.kind) {
@@ -329,8 +357,26 @@ function logMainOutcome(
         console.log(`${head}  hold-needs-kevin (receipt already posted — no action)`);
         return;
       }
-      const result = tryApply(() => commentIssue(repo, issue.number, holdNeedsKevinReceipt()), dryRun);
-      logResult(head, "hold-needs-kevin (post hold receipt once)", result);
+      // ops-pipeline#317 / #320 (Kevin ruling 2026-09-05): on the FIRST hold, post the
+      // hold receipt AND add `kevin-decision` (so `/yard` can sweep by label) AND rail
+      // the Dispatcher inbox + each `lane:<seat>` seat (deterministic trigger, not a
+      // memory-promise — #279). The whole first-firing dance lives inside ONE tryApply
+      // so the shared #331 action budget still meters it as one action; the async rail
+      // fires AFTER the sync gh work lands so a rail failure never strands the receipt
+      // or label. `holdReceiptPresent` on subsequent runs re-enters the branch above and
+      // skips — the marker-scan gate is the once-per-hold dedup by construction.
+      const rail: HoldRail = {
+        repo, issueNumber: issue.number, title: issue.title,
+        reason: "held: probe flagged NEEDS-KEVIN: yes",
+      };
+      const result = tryApply(() => {
+        commentIssue(repo, issue.number, holdNeedsKevinReceipt());
+        ensureKevinDecisionLabel(repo);
+        addKevinDecisionLabel(repo, issue.number);
+      }, dryRun);
+      logResult(head, "hold-needs-kevin (post hold receipt + add kevin-decision)", result);
+      if (result === "applied") await railHold(rail, labels);
+      else if (result === "would-apply") console.log(`${head}  hold-needs-kevin [PREVIEW — would rail dispatcher${labels.some((l) => l.startsWith("lane:")) ? ` + ${labels.filter((l) => l.startsWith("lane:")).join(",")}` : ""}]`);
       if (result !== "capped") actionedThisRun.add(issue.number);
       return;
     }
@@ -340,8 +386,24 @@ function logMainOutcome(
         console.log(`${head}  hold-cross-repo -> ${targetNote} (receipt already posted — no action)`);
         return;
       }
-      const result = tryApply(() => commentIssue(repo, issue.number, holdCrossRepoReceipt(disposition.target, disposition.targetAllowed)), dryRun);
-      logResult(head, `hold-cross-repo -> ${targetNote} (post hold receipt once)`, result);
+      // Same dance as hold-needs-kevin above — see that branch for the ordering rationale
+      // (sync gh mutations inside tryApply, async rail after, marker-scan is the once-
+      // per-hold dedup). Reason names the target so the Dispatcher line makes the cross-
+      // repo default-on-silence action legible without opening the issue.
+      const rail: HoldRail = {
+        repo, issueNumber: issue.number, title: issue.title,
+        reason: disposition.targetAllowed
+          ? `held: cross-repo → ${disposition.target}`
+          : `held: cross-repo → ${disposition.target} (off allowlist)`,
+      };
+      const result = tryApply(() => {
+        commentIssue(repo, issue.number, holdCrossRepoReceipt(disposition.target, disposition.targetAllowed));
+        ensureKevinDecisionLabel(repo);
+        addKevinDecisionLabel(repo, issue.number);
+      }, dryRun);
+      logResult(head, `hold-cross-repo -> ${targetNote} (post hold receipt + add kevin-decision)`, result);
+      if (result === "applied") await railHold(rail, labels);
+      else if (result === "would-apply") console.log(`${head}  hold-cross-repo [PREVIEW — would rail dispatcher${labels.some((l) => l.startsWith("lane:")) ? ` + ${labels.filter((l) => l.startsWith("lane:")).join(",")}` : ""}]`);
       if (result !== "capped") actionedThisRun.add(issue.number);
       return;
     }
@@ -412,7 +474,7 @@ async function main(): Promise<void> {
   console.log(`=== needs-human-router — ${repo}${dryRun ? " --dry-run (real reads, zero mutations)" : ""} ===`);
 
   const actionedThisRun = new Set<number>();
-  const mainDispositions = runMainPass(repo, dryRun, actionedThisRun);
+  const mainDispositions = await runMainPass(repo, dryRun, actionedThisRun);
   const recallDispositions = runRecallPass(repo, dryRun, actionedThisRun);
 
   const allDispositions = [...mainDispositions, ...recallDispositions];
