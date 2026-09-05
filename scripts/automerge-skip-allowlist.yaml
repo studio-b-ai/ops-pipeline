@@ -73,6 +73,30 @@ repos:
     # additionally content-conditional (detect-code-change.code_changed) —
     # the exact transitive-skip state the gate exists to catch.
 
+  # RULING 2026-09-03 (ops#274 — Mechanic seat): both repos still carry the
+  # pre-ops#250 in-repo `Auto-Approve & Merge` job in their own ci.yml. Now
+  # that they are enrolled in the fleet sweep (ops#273) and their review gate
+  # honors Kevin's `queued` (studiob#639 ports acudev#47 / acuops#168), that
+  # job is (1) a rollup blocker — it triggers on the default pull_request
+  # event set (opened/synchronize/reopened) and skips-by-design once
+  # `Require review label` is red, without re-running on the `labeled`
+  # event when `queued` later greens the review gate; the sweep's
+  # ci-rollup then sees the stale entry and refuses (Rule #459). And (2)
+  # it is a SECOND MERGER on the same PRs — the sweep merges sha-pinned on
+  # a roster human's label, this job auto-merges on "build green + nothing
+  # red" (Rule #485: one door). Sanctioning `Auto-Approve & Merge` under
+  # `repos:` here is the INTERIM fix — it clears the rollup blocker so the
+  # sweep can operate; the DURABLE fix is retiring the job from both
+  # repos (the ops#250 pattern applied to their own ci.yml). "Auto-Approve
+  # & Merge" is NOT a load-bearing check whose absence the sweep needs to
+  # notice (the sweep itself is the load-bearing merger); sanctioning it
+  # here does not weaken the Rule #320 protections above — it withdraws a
+  # deprecated in-repo second-merger from the CI leg.
+  studio-b-ai/acudev:
+    - "Auto-Approve & Merge"
+  studio-b-ai/acuops-pipeline:
+    - "Auto-Approve & Merge"
+
 # RULING 2026-09-02 (amends the ops#235 ruling above; incident: the restart
 # train's 22:18Z first after-hours tick refused studio-b-ai/client-asthetik#359
 # citing these same 5 by-design PR-event skips — "Auto-qualifier (shadow)" is
