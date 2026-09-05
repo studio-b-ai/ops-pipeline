@@ -116,7 +116,13 @@ export type RouterDisposition =
   | { kind: "skip-already-routed" }
   | { kind: "close-rejected" }
   | { kind: "hold-needs-kevin" }
-  | { kind: "route-same-repo" }
+  /** `probeTrailerUnparsed: true` = the trailer looked attempted but did not parse (or the
+   * diagnosis was truncated before the trailer). Kevin ruling 2026-09-05 (issue #317, "default
+   * to WORK"): still routes, so the format bug stays visible in the lane rather than parking the
+   * whole issue as `hold-needs-kevin`. The caller applies a `probe-trailer-unparsed` label so
+   * the malformed-trailer signal is still surfaced. Absent/false = clean parse (or genuinely
+   * legacy) — the ordinary same-repo route with no extra signal. */
+  | { kind: "route-same-repo"; probeTrailerUnparsed?: boolean }
   | { kind: "hold-cross-repo"; target: string; targetAllowed: boolean }
   | { kind: "no-probe" };
 
@@ -152,16 +158,17 @@ export interface RouterDecisionInput {
  *   2. Authorized 👎, pre-routing -> close-rejected. This is the ONE place the brake acts in the
  *      main pass, and only because a human actually pressed it before routing ran.
  *   3. No probe comment yet -> no-probe (counted, never mutated — #331).
- *   4. Parse the trailer. `null` from parseProbeRouting means one of TWO different things
- *      (codex review pass 2 P2, 2026-08-14) and they are NOT treated the same:
- *        - genuinely legacy (no trailer attempted at all, per looksLikeAttemptedTrailer) ->
- *          same-repo + needsKevin:false, per the design comment (the standing ~21 pre-trailer
- *          probes; same-repo relabeling is the lowest-blast-radius action and self-correcting
- *          at fold time).
- *        - a MALFORMED attempt (the tail contains "ROUTING:"/"NEEDS-KEVIN:" but didn't parse
- *          cleanly) -> hold-needs-kevin. The model tried to signal something and the signal was
- *          lost to a parsing failure; defaulting a broken channel to the lowest-scrutiny path
- *          would be trusting output we know is corrupted. Held for a human instead.
+ *   4. Parse the trailer. `null` from parseProbeRouting can mean two things (codex review pass 2
+ *      P2, 2026-08-14) — genuinely legacy (no trailer attempted at all, per
+ *      looksLikeAttemptedTrailer) OR a MALFORMED attempt (the tail contains
+ *      "ROUTING:"/"NEEDS-KEVIN:" but didn't parse cleanly). BOTH now route (Kevin ruling
+ *      2026-09-05, issue #317: "default to WORK — a hold requires a PARSED NEEDS-KEVIN: yes").
+ *      The malformed case additionally carries `probeTrailerUnparsed: true` so the caller can
+ *      surface the format bug via a `probe-trailer-unparsed` label — it stays visible in the
+ *      lane backlog rather than being silently swallowed by a same-repo default. The prior v1
+ *      behavior (malformed → hold-needs-kevin) is SUPERSEDED: parking whole issues to route the
+ *      format-bug signal was a false trade — a routed issue with a `probe-trailer-unparsed`
+ *      label carries the same signal without holding the underlying work.
  *      Otherwise (a clean parse) NEEDS-KEVIN:yes always wins regardless of ROUTING (a same-repo
  *      fix can still need a human — the design comment's step-3 bullets are checked in exactly
  *      this order: NEEDS-KEVIN first, then same-repo, then cross-repo).
@@ -182,9 +189,12 @@ export function routeDisposition(input: RouterDecisionInput): RouterDisposition 
 
   const parsed = parseProbeRouting(input.probeCommentBody);
   if (parsed === null) {
-    // Malformed attempt vs. genuinely legacy — see the doc comment above. A broken signal is
-    // held for a human rather than trusted with the lowest-scrutiny same-repo default.
-    if (looksLikeAttemptedTrailer(input.probeCommentBody)) return { kind: "hold-needs-kevin" };
+    // Kevin ruling 2026-09-05 (issue #317, "default to WORK"): both malformed-attempt and
+    // genuinely-legacy null-parses route. The malformed case carries `probeTrailerUnparsed:true`
+    // so the caller can surface the format bug via a `probe-trailer-unparsed` label — visible in
+    // the lane backlog without parking the underlying issue. A hold requires a PARSED
+    // `NEEDS-KEVIN: yes`, never a broken-trailer default.
+    if (looksLikeAttemptedTrailer(input.probeCommentBody)) return { kind: "route-same-repo", probeTrailerUnparsed: true };
     return { kind: "route-same-repo" }; // genuinely legacy default
   }
 

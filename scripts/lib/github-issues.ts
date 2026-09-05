@@ -202,6 +202,18 @@ export function removeLabel(repo: string, num: number, label: string): void {
   gh(["issue", "edit", String(num), "--repo", repo, "--remove-label", label]);
 }
 
+/**
+ * Add a label to an issue — additive for ops-pipeline#317 (default-to-WORK ruling, 2026-09-05):
+ * a same-repo route with an unparseable probe trailer ALSO surfaces the format bug via a
+ * `probe-trailer-unparsed` label so it stays visible in the lane backlog. `gh issue edit
+ * --add-label` is idempotent (a repeat is a no-op) but does REQUIRE the label to already exist —
+ * pair with `ensureLabel(...)` first if the label may be absent, mirroring the alert-issue
+ * monitors' own pattern.
+ */
+export function addLabel(repo: string, num: number, label: string): void {
+  gh(["issue", "edit", String(num), "--repo", repo, "--add-label", label]);
+}
+
 export interface IssueComment {
   /** Numeric REST id — NOT the GraphQL node id `gh issue view --json comments` returns; this is
    * the id `GET /repos/{repo}/issues/comments/{id}/reactions` requires. */

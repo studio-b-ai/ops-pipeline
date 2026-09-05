@@ -99,6 +99,22 @@ describe("prompt + comment framing", () => {
     expect(s).toContain("Always exactly two lines");
   });
 
+  // ops-pipeline#317 (Kevin ruling 2026-09-05 "default to WORK"): NEEDS-KEVIN narrows to the
+  // named gates only, and a bug on a customer-facing surface is WORK — not a gate.
+  it("system prompt narrows NEEDS-KEVIN to the named gates and calls out customer-facing bugs as WORK (ops#317)", () => {
+    const s = buildSystemPrompt();
+    // The narrowed enumeration: customer pricing, credentials, approved-arc gate, legal, spend.
+    expect(s).toContain("customer");
+    expect(s).toContain("pricing");
+    expect(s).toContain("credentials");
+    expect(s).toContain("Rule #97");
+    expect(s).toContain("legal");
+    expect(s).toContain("spend");
+    // The exact "work, not a gate" carve-out (case-insensitive to shield against a future
+    // rewording that keeps meaning but changes casing).
+    expect(s).toMatch(/work,?\s+not\s+a\s+gate/i);
+  });
+
   it("rendered comment carries the dedup marker, the hypothesis framing (#412/#167), and the diagnosis verbatim", () => {
     const c = renderComment("## Culprit hypothesis\nthe sync filter", "claude-sonnet-5");
     expect(c.startsWith(PROBE_MARKER)).toBe(true);

@@ -205,7 +205,7 @@ describe("retry surface stays reads-only (source guards)", () => {
     return src.slice(at, next === -1 ? undefined : next);
   }
 
-  it.each(["ensureLabel", "openIssue", "closeIssue", "commentIssue", "retitleIssue", "editIssueBody", "removeLabel"])(
+  it.each(["ensureLabel", "openIssue", "closeIssue", "commentIssue", "retitleIssue", "editIssueBody", "removeLabel", "addLabel"])(
     "mutator %s does NOT call withGhRetry",
     (name) => {
       expect(functionBody(libSrc, name)).not.toContain("withGhRetry(");
