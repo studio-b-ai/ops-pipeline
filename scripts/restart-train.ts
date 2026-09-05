@@ -123,6 +123,7 @@ import {
   removeLabel,
   type IssueComment,
   type IssueRef,
+  withGhRetry,
 } from "./lib/github-issues.js";
 import {
   fetchProjectRefs,
@@ -285,12 +286,16 @@ async function fetchClientAsthetikAnchorCandidate(nowIso: string): Promise<Ancho
   const stampOk = keepAtOrBefore(nowIso);
   let runsJson: string;
   try {
-    runsJson = gh([
-      "api",
-      `repos/${TICKET_REPOS[1]}/actions/workflows/${CLIENT_ASTHETIK_WORKFLOW_ID}/runs?status=success&per_page=5`,
-      "--jq",
-      "[.workflow_runs[].id]",
-    ]);
+    // ops-pipeline#302: a transient 504 on this one-shot read crashed the whole tick — READ-ONLY,
+    // so the bounded transient retry applies (≤3 attempts; 4xx/auth still rethrow on the first).
+    runsJson = withGhRetry(() =>
+      gh([
+        "api",
+        `repos/${TICKET_REPOS[1]}/actions/workflows/${CLIENT_ASTHETIK_WORKFLOW_ID}/runs?status=success&per_page=5`,
+        "--jq",
+        "[.workflow_runs[].id]",
+      ]),
+    );
   } catch (err) {
     throw classifyReadError(err, "actions:read (client-asthetik workflow runs)");
   }
@@ -300,7 +305,9 @@ async function fetchClientAsthetikAnchorCandidate(nowIso: string): Promise<Ancho
   for (const runId of runIds) {
     let jobsJson: string;
     try {
-      jobsJson = gh(["api", `repos/${TICKET_REPOS[1]}/actions/runs/${runId}/jobs`, "--jq", ".jobs"]);
+      jobsJson = withGhRetry(() =>
+        gh(["api", `repos/${TICKET_REPOS[1]}/actions/runs/${runId}/jobs`, "--jq", ".jobs"]),
+      ); // ops-pipeline#302 — the read that took the 504 on run 33900628144
     } catch (err) {
       throw classifyReadError(err, "actions:read (client-asthetik run jobs)");
     }
