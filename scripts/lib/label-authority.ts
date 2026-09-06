@@ -548,6 +548,8 @@ export function fetchAuthorityTimeline(
   // evaluator was written against (position = index in the assembled window).
   const collected: GraphQLTimelineNode[] = [];
   let filteredCount: number | null = null;
+  let totalFilteredCount = 0;
+  let expectedRemaining = 0;
   let before: string | null = null;
   let hasPreviousPage = true;
   let pages = 0;
@@ -569,12 +571,24 @@ export function fetchAuthorityTimeline(
     if (typeof conn.pageInfo?.hasPreviousPage !== "boolean") {
       throw new Error(`fetchAuthorityTimeline: GraphQL response "pageInfo.hasPreviousPage" is not a boolean for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
     }
-    if (filteredCount !== null && conn.filteredCount !== filteredCount) {
+    // GitHub's `timelineItems.filteredCount` is "the count of items after applying
+    // `before`/`after`" — on a `before:`-cursored page it counts only the items OLDER
+    // than the cursor, not the whole connection (live 2026-09-06 15:37Z on
+    // bolt-wms#2120: page 1 = 311 with 250 nodes, page 2 = 61 — the first version of
+    // this walk expected 311 again and threw "timeline changed during pagination",
+    // failing the human-receipt check closed on the exact PR it was built to read).
+    // Invariant: page N's filteredCount must equal the previous page's filteredCount
+    // minus the previous page's node count. A mismatch means the connection changed
+    // under the walk (an event landed mid-fetch) — refuse rather than stitch.
+    if (filteredCount === null) {
+      totalFilteredCount = conn.filteredCount;
+    } else if (conn.filteredCount !== expectedRemaining) {
       throw new Error(
-        `fetchAuthorityTimeline: timeline changed during pagination (filteredCount ${filteredCount} → ${conn.filteredCount}) for ${repo}#${prNumber}`,
+        `fetchAuthorityTimeline: timeline changed during pagination (expected ${expectedRemaining} items before the cursor, got ${conn.filteredCount}) for ${repo}#${prNumber}`,
       );
     }
     filteredCount = conn.filteredCount;
+    expectedRemaining = conn.filteredCount - conn.nodes.length;
     collected.unshift(...conn.nodes);
     pages += 1;
     hasPreviousPage = conn.pageInfo.hasPreviousPage;
@@ -591,9 +605,9 @@ export function fetchAuthorityTimeline(
   if (filteredCount === null) {
     throw new Error(`fetchAuthorityTimeline: no timeline page fetched for ${repo}#${prNumber}`);
   }
-  if (filteredCount < collected.length) {
+  if (totalFilteredCount < collected.length) {
     throw new Error(
-      `fetchAuthorityTimeline: GraphQL response is internally inconsistent (filteredCount ${filteredCount} < ` +
+      `fetchAuthorityTimeline: GraphQL response is internally inconsistent (filteredCount ${totalFilteredCount} < ` +
         `nodes.length ${collected.length}) for ${repo}#${prNumber}`,
     );
   }
@@ -671,7 +685,7 @@ export function fetchAuthorityTimeline(
   // exist BEFORE the assembled window) OR `filteredCount` exceeds what was assembled
   // (the connection knows of relevant events the pipeline never delivered). Either way
   // the authorizing event cannot be reliably located, and the evaluator refuses.
-  return { timeline, truncated: hasPreviousPage || filteredCount > timeline.length };
+  return { timeline, truncated: hasPreviousPage || totalFilteredCount > timeline.length };
 }
 
 /**

@@ -521,7 +521,8 @@ describe("fetchAuthorityTimeline pagination (bolt-wms#2120 label loop, 2026-09-0
     const run = (v: { before: string | null }) => {
       calls.push(v.before);
       if (v.before === null) return pageJson(newest, 311, true, "CURSOR-OLDEST-OF-NEWEST-PAGE");
-      if (v.before === "CURSOR-OLDEST-OF-NEWEST-PAGE") return pageJson(oldest, 311, false, null);
+      // GitHub reports the count AFTER the `before` cursor on page 2: 311 − 250 = 61 (the live 15:37Z shape).
+      if (v.before === "CURSOR-OLDEST-OF-NEWEST-PAGE") return pageJson(oldest, 61, false, null);
       throw new Error(`unexpected cursor ${v.before}`);
     };
     const { timeline, truncated } = fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, run);
@@ -543,7 +544,7 @@ describe("fetchAuthorityTimeline pagination (bolt-wms#2120 label loop, 2026-09-0
 
   it("planted (fail-closed): a timeline deeper than the page bound is still reported truncated and the evaluator REFUSES", () => {
     let calls = 0;
-    const run = (_v: { before: string | null }) => { calls += 1; return pageJson([commitNode], 100000, true, `cur-${calls}`); };
+    const run = (_v: { before: string | null }) => { calls += 1; return pageJson([commitNode], 100000 - (calls - 1), true, `cur-${calls}`); };
     const { timeline, truncated } = fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, run);
     expect(calls).toBe(AUTHORITY_TIMELINE_MAX_PAGES);
     expect(truncated).toBe(true);
@@ -556,8 +557,25 @@ describe("fetchAuthorityTimeline pagination (bolt-wms#2120 label loop, 2026-09-0
     expect(fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, run).truncated).toBe(true);
   });
 
-  it("control: a connection that changes under the walk (filteredCount moves between pages) throws rather than stitching", () => {
+  it("control: a connection that changes under the walk (page 2's count ≠ page 1's count minus page 1's nodes) throws rather than stitching", () => {
+    // page 1: 5 items, 1 node → page 2 must report 4; it reports 6 (an event landed mid-walk)
     const run = (v: { before: string | null }) => (v.before === null ? pageJson([commitNode], 5, true, "c1") : pageJson([commitNode], 6, false, null));
+    expect(() => fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, run)).toThrow(/changed during pagination/);
+  });
+
+  it("known-GOOD (the live 15:37Z failure as positive control): page 2 reporting the post-cursor count (311 → 61) is CONSISTENT — no throw, not truncated, 311 assembled", () => {
+    const newest = Array.from({ length: AUTHORITY_TIMELINE_PAGE_SIZE }, () => commitNode);
+    const oldest = Array.from({ length: 61 }, () => commitNode);
+    const run = (v: { before: string | null }) => (v.before === null ? pageJson(newest, 311, true, "c1") : pageJson(oldest, 61, false, null));
+    const { timeline, truncated } = fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, run);
+    expect(truncated).toBe(false);
+    expect(timeline).toHaveLength(311);
+  });
+
+  it("known-BAD: page 2 repeating the WHOLE-connection count (311 again) is the inconsistent shape and throws", () => {
+    const newest = Array.from({ length: AUTHORITY_TIMELINE_PAGE_SIZE }, () => commitNode);
+    const oldest = Array.from({ length: 61 }, () => commitNode);
+    const run = (v: { before: string | null }) => (v.before === null ? pageJson(newest, 311, true, "c1") : pageJson(oldest, 311, false, null));
     expect(() => fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, run)).toThrow(/changed during pagination/);
   });
 
