@@ -419,17 +419,28 @@ function gh(args: string[]): string {
  *  "timeline-truncated" fail-closed refusal of a healthy PR. `filteredCount`
  *  respects the filter. */
 export const AUTHORITY_TIMELINE_PAGE_SIZE = 250;
+/** Upper bound on backward pages walked per fetch (2026-09-06, the bolt-wms#2120
+ *  label-loop incident: a runaway relabel loop pushed one PR to 311 relevant events,
+ *  so the single `last: 250` window reported `truncated` and the human `reviewed`
+ *  receipt at position 2 became unreadable through EVERY door — fail-closed by design,
+ *  but permanently, for a PR whose authorizing event is plainly on the record). The
+ *  fetch now walks `before: startCursor` back to the connection's start, so a noisy
+ *  timeline still yields the COMPLETE relevant window; only a timeline that exceeds
+ *  PAGE_SIZE × MAX_PAGES (2,000 events) — or an internally inconsistent response —
+ *  still reports `truncated` (and still refuses). */
+export const AUTHORITY_TIMELINE_MAX_PAGES = 8;
 
 const AUTHORITY_TIMELINE_QUERY = `
-query($owner: String!, $repo: String!, $number: Int!) {
+query($owner: String!, $repo: String!, $number: Int!, $before: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       timelineItems(
         itemTypes: [LABELED_EVENT, UNLABELED_EVENT, PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT]
         last: ${AUTHORITY_TIMELINE_PAGE_SIZE}
+        before: $before
       ) {
         filteredCount
-        pageInfo { hasPreviousPage }
+        pageInfo { hasPreviousPage startCursor }
         nodes {
           __typename
           ... on LabeledEvent { label { name } actor { __typename login } createdAt }
@@ -462,7 +473,7 @@ interface GraphQLTimelineResponse {
       pullRequest?: {
         timelineItems?: {
           filteredCount: number;
-          pageInfo?: { hasPreviousPage?: boolean | null } | null;
+          pageInfo?: { hasPreviousPage?: boolean | null; startCursor?: string | null } | null;
           nodes: GraphQLTimelineNode[];
         } | null;
       } | null;
@@ -501,68 +512,94 @@ export function normalizeActorLogin(actor: { __typename?: string | null; login?:
   return login;
 }
 
-export function fetchAuthorityTimeline(repo: string, prNumber: number): { timeline: AuthorityTimelineItem[]; truncated: boolean } {
-  const [owner, name] = repo.split("/");
-  if (!owner || !name) {
-    throw new Error(`fetchAuthorityTimeline: repo must be "org/repo", got ${JSON.stringify(repo)}`);
-  }
+/** One GraphQL page runner — injectable so the pagination walk is testable without a
+ *  live `gh` (the default shells out exactly as before). Returns the raw response text. */
+export type AuthorityTimelineQueryRunner = (variables: { owner: string; repo: string; number: number; before: string | null }) => string;
 
-  const out = gh([
+function runAuthorityTimelineQuery(variables: { owner: string; repo: string; number: number; before: string | null }): string {
+  const args = [
     "api",
     "graphql",
     "-f",
     `query=${AUTHORITY_TIMELINE_QUERY}`,
     "-f",
-    `owner=${owner}`,
+    `owner=${variables.owner}`,
     "-f",
-    `repo=${name}`,
+    `repo=${variables.repo}`,
     "-F",
-    `number=${prNumber}`,
-  ]);
+    `number=${variables.number}`,
+  ];
+  if (variables.before !== null) args.push("-f", `before=${variables.before}`);
+  return gh(args);
+}
 
-  const parsed = JSON.parse(out) as GraphQLTimelineResponse;
-  const conn = parsed.data?.repository?.pullRequest?.timelineItems;
-  if (!conn) {
-    // Fail closed on any unexpected shape (missing PR, missing repo, a GraphQL
-    // `errors` response `gh api graphql` didn't already turn into a non-zero exit) —
-    // never silently degrade to "empty timeline", which a caller cannot distinguish
-    // from a genuinely-empty relevant window (Rule #4).
-    throw new Error(`fetchAuthorityTimeline: unexpected GraphQL response shape for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+export function fetchAuthorityTimeline(
+  repo: string,
+  prNumber: number,
+  runQuery: AuthorityTimelineQueryRunner = runAuthorityTimelineQuery,
+): { timeline: AuthorityTimelineItem[]; truncated: boolean } {
+  const [owner, name] = repo.split("/");
+  if (!owner || !name) {
+    throw new Error(`fetchAuthorityTimeline: repo must be "org/repo", got ${JSON.stringify(repo)}`);
   }
-
-  // Fail closed on a malformed/untrustworthy connection shape rather than trust the
-  // compile-time `as GraphQLTimelineResponse` assertion above at runtime (codex P1,
-  // ops#190 A1 review): `JSON.parse` + `as` performs ZERO runtime validation, so a
-  // missing, null, or non-numeric `filteredCount` would silently coerce
-  // `conn.filteredCount > timeline.length` below to `false` (e.g. `undefined > 5` is
-  // `false`, and `null > 5` is also `false` since `null` coerces to `0`) — reporting
-  // NOT-truncated on a response this function has no trustworthy signal about, which
-  // `evaluateLabelAuthority` could then walk as if it were a complete, reliable
-  // window. Same reasoning for `nodes` not actually being an array at runtime, for
-  // `pageInfo.hasPreviousPage` not actually being a boolean (a missing pageInfo must
-  // refuse, never read as "no previous page"), and for a `filteredCount` smaller than
-  // the node count actually received (internally inconsistent — the FILTERED count can
-  // never be less than the nodes the same filtered query returned). Any of these
-  // throws, matching this function's existing throw-on-untrustworthy-shape convention
-  // immediately above and in the unrecognized-`__typename` branch below (Rule #4:
-  // doubt resolves toward refusal — the caller's fail-closed error handling, not this
-  // function, decides the outcome).
-  if (!Array.isArray(conn.nodes)) {
-    throw new Error(`fetchAuthorityTimeline: GraphQL response "nodes" is not an array for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+  // Walk BACKWARD from the newest page (`last: N`) via `before: startCursor` until the
+  // connection reports no previous page or the page bound is hit. Pages are prepended
+  // so the assembled array is oldest-first, matching the single-window semantics the
+  // evaluator was written against (position = index in the assembled window).
+  const collected: GraphQLTimelineNode[] = [];
+  let filteredCount: number | null = null;
+  let before: string | null = null;
+  let hasPreviousPage = true;
+  let pages = 0;
+  let lastOut = "";
+  while (hasPreviousPage && pages < AUTHORITY_TIMELINE_MAX_PAGES) {
+    const out = runQuery({ owner, repo: name, number: prNumber, before });
+    lastOut = out;
+    const parsed = JSON.parse(out) as GraphQLTimelineResponse;
+    const conn = parsed.data?.repository?.pullRequest?.timelineItems;
+    if (!conn) {
+      throw new Error(`fetchAuthorityTimeline: unexpected GraphQL response shape for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+    }
+    if (!Array.isArray(conn.nodes)) {
+      throw new Error(`fetchAuthorityTimeline: GraphQL response "nodes" is not an array for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+    }
+    if (typeof conn.filteredCount !== "number" || !Number.isFinite(conn.filteredCount) || conn.filteredCount < 0) {
+      throw new Error(`fetchAuthorityTimeline: GraphQL response "filteredCount" is not a valid non-negative number for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+    }
+    if (typeof conn.pageInfo?.hasPreviousPage !== "boolean") {
+      throw new Error(`fetchAuthorityTimeline: GraphQL response "pageInfo.hasPreviousPage" is not a boolean for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+    }
+    if (filteredCount !== null && conn.filteredCount !== filteredCount) {
+      throw new Error(
+        `fetchAuthorityTimeline: timeline changed during pagination (filteredCount ${filteredCount} → ${conn.filteredCount}) for ${repo}#${prNumber}`,
+      );
+    }
+    filteredCount = conn.filteredCount;
+    collected.unshift(...conn.nodes);
+    pages += 1;
+    hasPreviousPage = conn.pageInfo.hasPreviousPage;
+    if (hasPreviousPage) {
+      if (typeof conn.pageInfo.startCursor !== "string" || conn.pageInfo.startCursor.length === 0) {
+        throw new Error(`fetchAuthorityTimeline: GraphQL response claims a previous page but has no "pageInfo.startCursor" for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+      }
+      if (conn.nodes.length === 0) {
+        throw new Error(`fetchAuthorityTimeline: GraphQL response claims a previous page but returned an empty page for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+      }
+      before = conn.pageInfo.startCursor;
+    }
   }
-  if (typeof conn.filteredCount !== "number" || !Number.isFinite(conn.filteredCount) || conn.filteredCount < 0) {
-    throw new Error(`fetchAuthorityTimeline: GraphQL response "filteredCount" is not a valid non-negative number for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
+  if (filteredCount === null) {
+    throw new Error(`fetchAuthorityTimeline: no timeline page fetched for ${repo}#${prNumber}`);
   }
-  if (typeof conn.pageInfo?.hasPreviousPage !== "boolean") {
-    throw new Error(`fetchAuthorityTimeline: GraphQL response "pageInfo.hasPreviousPage" is not a boolean for ${repo}#${prNumber}: ${out.slice(0, 500)}`);
-  }
-  if (conn.filteredCount < conn.nodes.length) {
+  if (filteredCount < collected.length) {
     throw new Error(
-      `fetchAuthorityTimeline: GraphQL response is internally inconsistent (filteredCount ${conn.filteredCount} < ` +
-        `nodes.length ${conn.nodes.length}) for ${repo}#${prNumber}`,
+      `fetchAuthorityTimeline: GraphQL response is internally inconsistent (filteredCount ${filteredCount} < ` +
+        `nodes.length ${collected.length}) for ${repo}#${prNumber}`,
     );
   }
-
+  // `out` = the last page's raw text, quoted (truncated) in per-node shape errors below.
+  const out = lastOut;
+  const conn = { nodes: collected };
   const timeline: AuthorityTimelineItem[] = conn.nodes.map((node, index) => {
     const type = TIMELINE_TYPENAME_MAP[node.__typename];
     if (!type) {
@@ -630,23 +667,11 @@ export function fetchAuthorityTimeline(repo: string, prNumber: number): { timeli
       createdAt: node.createdAt ?? undefined,
     };
   });
-
-  // Truncation = `pageInfo.hasPreviousPage` (the connection's own windowing signal:
-  // relevant events exist BEFORE this `last: N` window) OR `filteredCount >
-  // timeline.length` as a belt-and-suspenders inconsistency guard. Deliberately NOT
-  // `totalCount`: live-proven 2026-08-28 (studiob#613, train run 33218268263 +
-  // three direct GraphQL probes) that `totalCount` on `timelineItems` counts the
-  // UNFILTERED timeline — it ignores the `itemTypes:` argument — so any ordinary
-  // issue comment (including the train's OWN CLICK DUE receipt comment) pushes it
-  // past `nodes.length` on a complete window, permanently fail-closing a healthy PR
-  // as "timeline-truncated" one tick after the train itself comments. Probe receipt:
-  // filteredCount:2 / nodes:2 / hasPreviousPage:false / totalCount:3 on a PR with 2
-  // relevant events + 1 comment. `filteredCount` respects the filter, and comparing
-  // it against the ACTUAL returned count (not the literal page-size constant) still
-  // catches the should-never-happen short-page case (Rule #4: doubt resolves toward
-  // refusal — but a signal proven to fire on healthy PRs is a false-refusal
-  // generator, not conservatism; Rule #471's planted GOOD control caught this).
-  return { timeline, truncated: conn.pageInfo.hasPreviousPage === true || conn.filteredCount > timeline.length };
+  // Truncation = a previous page still exists past the page bound (relevant events
+  // exist BEFORE the assembled window) OR `filteredCount` exceeds what was assembled
+  // (the connection knows of relevant events the pipeline never delivered). Either way
+  // the authorizing event cannot be reliably located, and the evaluator refuses.
+  return { timeline, truncated: hasPreviousPage || filteredCount > timeline.length };
 }
 
 /**

@@ -13,6 +13,9 @@ import {
   QUEUED_LABEL_PAIR,
   evaluateLabelAuthority,
   normalizeActorLogin,
+  fetchAuthorityTimeline,
+  AUTHORITY_TIMELINE_PAGE_SIZE,
+  AUTHORITY_TIMELINE_MAX_PAGES,
   type AuthorityInput,
   type AuthorityTimelineItem,
   type AuthoritySnapshot,
@@ -475,5 +478,91 @@ describe("formatStaleLabelRemovalReceipt", () => {
     expect(body).toContain(staleVerdict.detail);
     expect(body).toContain("abc123");
     expect(body.toLowerCase()).toContain("write-only");
+  });
+});
+
+
+// ───── 2026-09-06 (the bolt-wms#2120 label-loop incident): paginated authority timeline ─────
+//
+// A runaway relabel loop pushed one PR to 311 relevant events; the single `last: 250`
+// window reported `truncated` and the roster human's `reviewed` at position 2 became
+// unreadable through EVERY door (fail-closed by design, but permanently). The fetch now
+// walks `before: startCursor` back to the connection's start. Both verdicts are planted
+// (Rules #322/#471): a complete walk that AUTHORIZES the old receipt, and a walk past the
+// page bound that still REFUSES.
+type PageNode = { __typename: string; label?: { name: string }; actor?: { login: string }; createdAt?: string };
+function pageJson(nodes: PageNode[], filteredCount: number, hasPreviousPage: boolean, startCursor: string | null = "cur"): string {
+  return JSON.stringify({
+    data: { repository: { pullRequest: { timelineItems: { filteredCount, pageInfo: { hasPreviousPage, startCursor }, nodes } } } },
+  });
+}
+const labeledNode = (login: string, label: string, createdAt = "2026-09-06T05:05:53Z"): PageNode => ({
+  __typename: "LabeledEvent", label: { name: label }, actor: { login }, createdAt,
+});
+const unlabeledNode = (login: string, label: string): PageNode => ({ __typename: "UnlabeledEvent", label: { name: label }, actor: { login } });
+const commitNode: PageNode = { __typename: "PullRequestCommit" };
+
+describe("fetchAuthorityTimeline pagination (bolt-wms#2120 label loop, 2026-09-06)", () => {
+  it("control: a single complete page is returned oldest-first and NOT truncated, with before=null on the only call", () => {
+    const calls: Array<string | null> = [];
+    const run = (v: { before: string | null }) => { calls.push(v.before); return pageJson([commitNode, labeledNode("kbibelhausen", "reviewed")], 2, false, null); };
+    const { timeline, truncated } = fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, run);
+    expect(calls).toEqual([null]);
+    expect(truncated).toBe(false);
+    expect(timeline.map((t) => [t.type, t.label, t.position])).toEqual([["PULL_REQUEST_COMMIT", undefined, 0], ["LABELED", "reviewed", 1]]);
+  });
+
+  it("planted (#2120 shape): 311 relevant events across two pages — the human `reviewed` on the OLDEST page is assembled at position 1 and AUTHORIZES", () => {
+    // newest page: 250 churn events (the loop); oldest page: commit, reviewed, then 59 churn events
+    const churn = (n: number): PageNode[] => Array.from({ length: n }, (_, i) => (i % 2 === 0 ? labeledNode("kbibelhausen", "automerge:code-fix", "2026-09-06T06:10:00Z") : unlabeledNode("kbibelhausen", "automerge:code-fix")));
+    const newest = churn(AUTHORITY_TIMELINE_PAGE_SIZE);
+    const oldest = [commitNode, labeledNode("kbibelhausen", "reviewed"), ...churn(59)];
+    const calls: Array<string | null> = [];
+    const run = (v: { before: string | null }) => {
+      calls.push(v.before);
+      if (v.before === null) return pageJson(newest, 311, true, "CURSOR-OLDEST-OF-NEWEST-PAGE");
+      if (v.before === "CURSOR-OLDEST-OF-NEWEST-PAGE") return pageJson(oldest, 311, false, null);
+      throw new Error(`unexpected cursor ${v.before}`);
+    };
+    const { timeline, truncated } = fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, run);
+    expect(calls).toEqual([null, "CURSOR-OLDEST-OF-NEWEST-PAGE"]);
+    expect(truncated).toBe(false);
+    expect(timeline).toHaveLength(311);
+    expect(timeline[0].type).toBe("PULL_REQUEST_COMMIT");
+    expect(timeline[1]).toMatchObject({ type: "LABELED", label: "reviewed", actorLogin: "kbibelhausen", position: 1 });
+    expect(timeline[310].position).toBe(310);
+    const verdict = evaluateLabelAuthority({
+      currentLabels: ["reviewed", "bugsquasher", "automerge:code-fix"],
+      timeline,
+      authorityLogins: MERGE_AUTHORITY_LOGINS,
+      truncated,
+      labels: { ready: "reviewed", hold: TRAIN_HOLD_LABEL },
+    });
+    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1 } });
+  });
+
+  it("planted (fail-closed): a timeline deeper than the page bound is still reported truncated and the evaluator REFUSES", () => {
+    let calls = 0;
+    const run = (_v: { before: string | null }) => { calls += 1; return pageJson([commitNode], 100000, true, `cur-${calls}`); };
+    const { timeline, truncated } = fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, run);
+    expect(calls).toBe(AUTHORITY_TIMELINE_MAX_PAGES);
+    expect(truncated).toBe(true);
+    const verdict = evaluateLabelAuthority({ currentLabels: ["reviewed"], timeline, authorityLogins: MERGE_AUTHORITY_LOGINS, truncated, labels: { ready: "reviewed", hold: TRAIN_HOLD_LABEL } });
+    expect(verdict).toMatchObject({ authorized: false, reason: "timeline-truncated" });
+  });
+
+  it("control: filteredCount larger than the assembled window reports truncated even when no previous page is claimed", () => {
+    const run = () => pageJson([commitNode, labeledNode("kbibelhausen", "reviewed")], 3, false, null);
+    expect(fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, run).truncated).toBe(true);
+  });
+
+  it("control: a connection that changes under the walk (filteredCount moves between pages) throws rather than stitching", () => {
+    const run = (v: { before: string | null }) => (v.before === null ? pageJson([commitNode], 5, true, "c1") : pageJson([commitNode], 6, false, null));
+    expect(() => fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, run)).toThrow(/changed during pagination/);
+  });
+
+  it("control: a page that claims a previous page without a startCursor (or with an empty page) throws", () => {
+    expect(() => fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, () => pageJson([commitNode], 5, true, null))).toThrow(/startCursor/);
+    expect(() => fetchAuthorityTimeline("studio-b-ai/bolt-wms", 2120, () => pageJson([], 5, true, "c"))).toThrow(/empty page/);
   });
 });
