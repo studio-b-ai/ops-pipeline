@@ -1,0 +1,59 @@
+name: anthropic-wif-probe
+# Workload Identity Federation probe (Kevin 9/06: "go" on federation for GitHub Actions; canon
+# brain library/decisions/2026-09-06-claude-models-in-opencode-through-the-door.md § Identity).
+# Exchanges this run's GitHub OIDC token for a short-lived Anthropic access token through the
+# federation rule named by the repo variables, then makes one 8-token Messages call on it, all in
+# one step so the access token never leaves a shell variable (no GITHUB_ENV, no step output).
+# There is NO ANTHROPIC_API_KEY anywhere in this job — that absence is the point (#464 first firing).
+# The rule matches repo:studio-b-ai/* on refs/heads/main, so dispatch this on main.
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+      ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+      ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+      ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+    steps:
+      - name: Fetch GitHub OIDC token
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const token = await core.getIDToken('https://api.anthropic.com');
+            core.setSecret(token);
+            core.exportVariable('JWT', token);
+
+      - name: Exchange, then one Messages call on the federated token (haiku, 8 tokens)
+        run: |
+          set -euo pipefail
+          RESPONSE=$(curl -sS https://api.anthropic.com/v1/oauth/token -H "content-type: application/json" --data @- <<JSON
+          {
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": "$JWT",
+            "federation_rule_id": "$ANTHROPIC_FEDERATION_RULE_ID",
+            "organization_id": "$ANTHROPIC_ORGANIZATION_ID",
+            "service_account_id": "$ANTHROPIC_SERVICE_ACCOUNT_ID",
+            "workspace_id": "$ANTHROPIC_WORKSPACE_ID"
+          }
+          JSON
+          )
+          ACCESS_TOKEN=$(jq -r '.access_token // empty' <<<"$RESPONSE")
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "exchange FAILED: $(jq -c 'del(.access_token)' <<<"$RESPONSE")"
+            exit 1
+          fi
+          echo "::add-mask::$ACCESS_TOKEN"
+          echo "exchange OK: token length ${#ACCESS_TOKEN}, expires_in=$(jq -r .expires_in <<<"$RESPONSE")s"
+          curl -sS https://api.anthropic.com/v1/messages \
+            -H "authorization: Bearer $ACCESS_TOKEN" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d '{"model":"claude-haiku-4-5-20251001","max_tokens":8,"messages":[{"role":"user","content":"reply with exactly the word ok"}]}' \
+            | jq -c '{model, reply: (.content[0].text // .error), usage}'
