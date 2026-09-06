@@ -4,6 +4,7 @@ import {
   DEPLOY_TRIGGER_GLOBS,
   MERGE_DEPLOY_DECOUPLED,
   OBSERVE_WINDOW_MS,
+  TRANSIENT_MACHINERY_LABEL,
   mergeDecoupledFromDeploy,
   classifyCaRun,
   classifyStudiobDeployments,
@@ -14,6 +15,7 @@ import {
   mergeTouchesDeployPaths,
   observeStateKey,
   observeTimeoutVerdict,
+  partitionMachineryIssues,
   pickDeployJob,
   pickLatestRun,
   type WorkflowJobLike,
@@ -276,5 +278,66 @@ describe("mergeDecoupledFromDeploy (Rule #480 — ops-pipeline#296 train wedge)"
     for (const reason of Object.values(MERGE_DEPLOY_DECOUPLED)) {
       expect(reason.length).toBeGreaterThan(20);
     }
+  });
+});
+
+/**
+ * ops-pipeline#326 — the timetable gate distinguishes machinery-transient issues from real bugs.
+ * Rule #322 both-directions AND Rule #464 "plant a known-good AND a known-bad":
+ *   - Plant one `transient`-labeled issue → it partitions into `transient` (train not held; the
+ *     caller auto-closes it as the recovery receipt).
+ *   - Plant one un-labeled machinery bug → it partitions into `holding` (train holds as today).
+ * The fail-closed direction: an issue with a missing/absent `labels` array must NEVER be treated
+ * as transient — it partitions into `holding` (a real bug looked-at through a blind read must not
+ * silently open the gate).
+ */
+describe("partitionMachineryIssues (ops-pipeline#326 transient gate)", () => {
+  const bug = { number: 100, title: "[restart-train] anomaly — real machinery bug", labels: [{ name: "restart-train" }] };
+  const transient = {
+    number: 319,
+    title: "Heritage Restart Train: Railway anchor-fetch timeout — transient, working as designed",
+    labels: [{ name: "restart-train" }, { name: TRANSIENT_MACHINERY_LABEL }],
+  };
+
+  it("known-bad control: an un-labeled machinery issue partitions into `holding` (the train HOLDS)", () => {
+    const p = partitionMachineryIssues([bug]);
+    expect(p.holding).toEqual([bug]);
+    expect(p.transient).toEqual([]);
+  });
+
+  it("known-good control: a `transient`-labeled machinery issue partitions into `transient` (the train does NOT hold)", () => {
+    const p = partitionMachineryIssues([transient]);
+    expect(p.holding).toEqual([]);
+    expect(p.transient).toEqual([transient]);
+  });
+
+  it("mixed: one real bug + one transient — the real bug still holds, the transient is closable separately", () => {
+    const p = partitionMachineryIssues([transient, bug]);
+    expect(p.holding).toEqual([bug]);
+    expect(p.transient).toEqual([transient]);
+  });
+
+  it("fail-closed: an issue with no `labels` field partitions into `holding` — a blind read never opens the gate (#322)", () => {
+    const noLabels = { number: 200, title: "[restart-train] anomaly — labels probe missing" };
+    const p = partitionMachineryIssues([noLabels]);
+    expect(p.holding).toEqual([noLabels]);
+    expect(p.transient).toEqual([]);
+  });
+
+  it("fail-closed: an issue with an empty `labels` array partitions into `holding` (same as above — no transient inference)", () => {
+    const emptyLabels = { number: 201, title: "[restart-train] anomaly — no labels applied", labels: [] };
+    const p = partitionMachineryIssues([emptyLabels]);
+    expect(p.holding).toEqual([emptyLabels]);
+    expect(p.transient).toEqual([]);
+  });
+
+  it("empty input: both buckets are empty (the not-held path — no issues to auto-close either)", () => {
+    const p = partitionMachineryIssues([]);
+    expect(p.holding).toEqual([]);
+    expect(p.transient).toEqual([]);
+  });
+
+  it("label constant is the exact GitHub label name the filer applies — never renamed casually (#412)", () => {
+    expect(TRANSIENT_MACHINERY_LABEL).toBe("transient");
   });
 });
