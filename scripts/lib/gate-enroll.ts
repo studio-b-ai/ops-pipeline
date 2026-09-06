@@ -40,7 +40,12 @@ export const MERGE_ESCALATIONS_GROUP_KEY = "merge-escalations";
 export const MERGE_ESCALATIONS_GROUP_LABEL = "merge escalations";
 export const GATE_ORIGINATOR = "pr-automerge-gate";
 
-const DECISION_LEGS: ReadonlySet<GateReceiptLeg> = new Set(["class-match", "line-cap", "named-checks", "review"]);
+// `flap-guard` (2026-09-06, bolt-wms#2120) is a DECISION, not a wait: a PR whose merge
+// label flaps against one head cannot clear itself on a later tick — the next run would
+// re-enter the same loop — so a human decides the merge (or fixes the repo's
+// label-triggered CI). Enrolling it is what makes an otherwise-silent permanent stall
+// visible.
+const DECISION_LEGS: ReadonlySet<GateReceiptLeg> = new Set(["class-match", "line-cap", "named-checks", "review", "flap-guard"]);
 
 /** True iff a refusal on this leg is a decision Kevin can make (vs a transient wait). */
 export function isDecisionLeg(leg: GateReceiptLeg): boolean {

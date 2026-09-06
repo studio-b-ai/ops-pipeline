@@ -695,6 +695,102 @@ export function postAuthorityReceipt(repo: string, prNumber: number, body: strin
   gh(["pr", "comment", String(prNumber), "--repo", repo, "--body", body]);
 }
 
+// ───────────────────── code-fix label flap circuit-breaker ─────────────────────
+//
+// WHY (bolt-wms#2120, 2026-09-06): the squasher gate's standard-repo code-fix path
+// applies `automerge:code-fix` BEFORE the merge (the B2 tripwire's trigger filter),
+// then revalidates the PR as its last act before merging. That label write is NOT
+// inert. A repo whose CI listens on `pull_request: [labeled, unlabeled]` — bolt-wms's
+// `Require review label` does exactly that — wakes a FRESH check-run on the label
+// event. `isRollupClean` then correctly reads that queued run as non-terminal
+// (fail-closed on in-flight work), the revalidate reports `merge readiness
+// regressed`, the gate aborts and REMOVES the label it just added, and the unlabel
+// event wakes another run. The gate invalidates its own revalidate.
+//
+// Each invocation is individually correct and fail-closed. What is missing is any
+// memory that this PR already burned a cycle, so a repeat invoker churns without
+// bound: bolt-wms#2120 took ~975 add/remove pairs between 06:07:55Z and 07:04:43Z,
+// driving 1,169 Actions runs in under 8 hours against a 367-run FULL-DAY baseline
+// (2026-09-05), plus ~4k API calls against a 5,000/hr PAT quota. The loop ended only
+// when that quota ran out.
+//
+// This predicate gives the gate that memory, read from the PR's OWN timeline rather
+// than any local state: count `automerge:code-fix` LABELED events since the last
+// head move. Past the threshold the gate refuses to write the label again and hands
+// the PR to a human. Per this module's doctrine it reasons from `position` (timeline
+// ORDER), never a timestamp comparison, and a truncated window fails closed.
+
+/** Adds of the merge label against ONE head before the gate stops writing it. Three
+ *  tolerates a genuine retry (a re-run after a real transient) while catching a loop
+ *  long before it can spend an Actions budget. */
+export const CODE_FIX_FLAP_THRESHOLD = 3;
+
+export type FlapVerdict =
+  | { flapping: false; addsSinceHeadMove: number }
+  /** `addsSinceHeadMove: null` = the count is UNKNOWN (truncated window), not zero. */
+  | { flapping: true; addsSinceHeadMove: number | null; detail: string };
+
+/**
+ * True iff this PR's own timeline shows the merge label being applied repeatedly
+ * against the SAME head — the signature of the self-invalidating revalidate above.
+ *
+ * Scoped deliberately to "since the last head move": a push or force-push is a new
+ * subject, and the count resets with it. That keeps a legitimately-retried PR
+ * mergeable while a stuck one stops burning CI.
+ *
+ * `truncated` fails closed (same contract as `evaluateLabelAuthority`) and is also
+ * substantively right here: >250 relevant events on one PR is itself churn evidence.
+ */
+export function codeFixLabelFlap(
+  input: { timeline: readonly AuthorityTimelineItem[]; truncated: boolean },
+  mergeLabel: string,
+  threshold: number = CODE_FIX_FLAP_THRESHOLD,
+): FlapVerdict {
+  if (!Number.isInteger(threshold) || threshold < 1) {
+    throw new Error(`codeFixLabelFlap: threshold must be a positive integer, got ${JSON.stringify(threshold)}`);
+  }
+  if (input.truncated) {
+    return {
+      flapping: true,
+      addsSinceHeadMove: null,
+      detail:
+        `the GraphQL timeline fetch was truncated (more than ${AUTHORITY_TIMELINE_PAGE_SIZE} relevant events) — ` +
+        `the number of \`${mergeLabel}\` applications against this head cannot be counted inside an incomplete ` +
+        `window, and a PR with that many label/commit events is itself churn evidence.`,
+    };
+  }
+
+  // Sort defensively: the caller's contract is chronological order, but every
+  // conclusion below depends on it, so this function does not merely trust it.
+  const ordered = [...input.timeline].sort((a, b) => a.position - b.position);
+
+  let lastHeadMove = Number.NEGATIVE_INFINITY;
+  for (const item of ordered) {
+    if (item.type === "PULL_REQUEST_COMMIT" || item.type === "HEAD_REF_FORCE_PUSHED") {
+      lastHeadMove = item.position;
+    }
+  }
+
+  const addsSinceHeadMove = ordered.filter(
+    (item) => item.type === "LABELED" && item.label === mergeLabel && item.position > lastHeadMove,
+  ).length;
+
+  if (addsSinceHeadMove >= threshold) {
+    return {
+      flapping: true,
+      addsSinceHeadMove,
+      detail:
+        `\`${mergeLabel}\` has been applied ${addsSinceHeadMove} times against the current head (threshold ` +
+        `${threshold}) with no push in between. That is the self-invalidating-revalidate loop: the label write ` +
+        `wakes a \`pull_request: [labeled]\` check-run, the fresh non-terminal run deltas the revalidate, the ` +
+        `gate removes the label, and the unlabel wakes another run. Refusing to write it again — a human decides ` +
+        `this merge, and the repo's label-triggered CI is the thing to fix.`,
+    };
+  }
+
+  return { flapping: false, addsSinceHeadMove };
+}
+
 /**
  * Formats the write-only receipt posted when a stale `train:ready` label is removed.
  * Pure (no I/O) — `evaluateTrainReady` calls this to build the body, then passes the

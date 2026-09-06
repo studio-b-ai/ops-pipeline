@@ -70,6 +70,11 @@ export type GateReceiptLeg =
   // 2026-09-06 (codex P1 on the code-fix door): the PR's head moved between the
   // gate's review read and its label writes — nothing written, next run re-evaluates.
   | "head-moved"
+  // 2026-09-06 (bolt-wms#2120): the merge label has been applied repeatedly against
+  // ONE head — the gate's own label write wakes a `pull_request: [labeled]` check-run
+  // whose non-terminal state then deltas the gate's own revalidate. A decision leg,
+  // not a wait: the loop cannot clear itself, so a human owns the outcome.
+  | "flap-guard"
   | "other";
 
 export interface GateReceiptInput {
