@@ -219,14 +219,6 @@ function addLabel(repo: string, pr: number, label: string): void {
   gh(["pr", "edit", String(pr), "--repo", repo, "--add-label", label]);
 }
 
-/** ops#190 B1 (codex pass-2 P2 fix): undo of addLabel for the abort paths — a
- *  `automerge:code-fix` label left on an UNMERGED PR would let a later HUMAN merge
- *  fire the B2 tripwire on code this gate never merged. Throws on failure; the
- *  caller treats cleanup as best-effort (log loudly, never mask the abort). */
-function removeLabel(repo: string, pr: number, label: string): void {
-  gh(["pr", "edit", String(pr), "--repo", repo, "--remove-label", label]);
-}
-
 // ───────────────────────────── independent review leg ─────────────────────────────
 
 type ReviewVerdict = "CLEAN" | "FLAG";
@@ -591,25 +583,30 @@ async function evaluate(
   // merge without the label would be INVISIBLE to the canary. Label-apply failure
   // therefore ABORTS the merge (fail-closed): an unmerged PR beats an unwatched
   // merge.
-  // Codex pass-2 P2 fix: if an abort fires AFTER the B2 label lands (revalidate
-  // delta, merge-call failure), the label must not stay behind on the unmerged PR —
-  // a later human merge would then trip B2's canary on code this gate never merged.
-  // Only a label THIS run added is removed (a pre-existing one isn't ours to pull);
-  // removal failure logs loudly but never masks the abort itself.
+  // Codex pass-2 P2 fix (SUPERSEDED by ops#345 direction 3, 2026-09-06):
+  // removing the label on an abort closed the loop into a cycle — the `unlabeled`
+  // event woke another run of `require-review-label.yml`, which was non-terminal
+  // at revalidate time, which triggered another abort, which removed the label
+  // again (~1,000 Actions runs in 57 min on bolt-wms#2120). ops#342's breaker
+  // (CODE_FIX_FLAP_THRESHOLD = 3) caps the loop at 3 cycles; this fix stops it
+  // at source. The label now STAYS on an unmerged code-fix PR after an abort —
+  // a stuck labelled PR beats an unbounded run storm. A later human merge with
+  // the stale label would fire B2's canary on code this gate never merged, but
+  // that path is a one-off human action with a visible label, not silent churn.
+  // Only a label THIS run added is logged (a pre-existing one isn't ours);
+  // removal failure was already just a loud log.
   let mustCleanCodeFixLabel = false;
   const cleanupCodeFixLabel = (context: string): void => {
     if (!mustCleanCodeFixLabel) return;
-    try {
-      removeLabel(repo, pr, CODE_FIX_MERGE_LABEL);
-      mustCleanCodeFixLabel = false;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      console.log(
-        `[warn] pr-automerge-gate ${repo}#${pr}: failed to remove '${CODE_FIX_MERGE_LABEL}' after ${context} — ` +
-          `the label is now STALE on an unmerged PR, and a later HUMAN merge would fire the B2 tripwire on code ` +
-          `this gate never merged. Remove it manually. Underlying error: ${message}`,
-      );
-    }
+    console.log(
+      `[info] pr-automerge-gate ${repo}#${pr}: ${context} — ` +
+        `label '${CODE_FIX_MERGE_LABEL}' LEFT IN PLACE on the unmerged PR ` +
+        `(ops#345 direction 3: label churn disabled; removing it would fire an ` +
+        `'unlabeled' event and re-trigger require-review-label workflows, ` +
+        `closing the loop into a cycle — bolt-wms#2120 / ops#342). ` +
+        `Remove it manually once the root cause is addressed.`,
+    );
+    mustCleanCodeFixLabel = false;
   };
 
   if (prClass === "code-fix") {
