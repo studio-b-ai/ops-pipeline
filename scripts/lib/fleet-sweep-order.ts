@@ -33,9 +33,9 @@
  *      silently dropped behind a per-repo limit (the global fanout still
  *      bounds it, and the gate's own per-input validations still hold).
  *   C. Round-robin rotation of the bugsquasher group BY REPO before capping.
- *      Each repo's bugsquasher entries are rotated by `runOffset`, THEN
- *      capped — so a repo with more than `perRepoCap` entries sees a
- *      different window every run rather than the same first N forever.
+ *      Each repo's bugsquasher entries are rotated by `runOffset * perRepoCap`,
+ *      THEN capped — so a repo with more than `perRepoCap` entries sees a
+ *      NON-OVERLAPPING window every run and every entry is reachable.
  *      The train group stays in enumeration order (Kevin's ask,
  *      all-or-nothing by construction of leg A).
  *
@@ -113,7 +113,7 @@ function rotateAndCapBugsquasher<T extends { repo: string }>(items: T[], opts: O
   }
   const result: T[] = [];
   for (const arr of byRepo.values()) {
-    const rotated = rotateArray(arr, runOffset);
+    const rotated = rotateArray(arr, runOffset * perRepoCap);
     const cap = Math.max(perRepoCap, 0);
     if (cap === 0) continue;
     for (let i = 0; i < rotated.length && i < cap; i++) result.push(rotated[i]);

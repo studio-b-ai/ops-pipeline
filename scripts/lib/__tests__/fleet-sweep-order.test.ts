@@ -138,8 +138,8 @@ describe("orderFleetSweepEntries (ops#327)", () => {
 
     const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 10, runOffset: -1 });
 
-    // -1 mod 4 → 3, so element at index 3 becomes head.
-    expect(ordered.map((e) => e.pr_number)).toEqual(["3", "0", "1", "2"]);
+    // -1 * 10 = -10, -10 mod 4 → 2, so element at index 2 becomes head.
+    expect(ordered.map((e) => e.pr_number)).toEqual(["2", "3", "0", "1"]);
   });
 
   it("control: perRepoCap of 0 evaluates only train entries — the bugsquasher group is empty (P2: train exempt from per-repo cap)", () => {
