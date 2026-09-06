@@ -981,11 +981,11 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
     expect(result.reasons.some((r) => r.includes("package manifest/lockfile"))).toBe(true);
   });
 
-  it("refuses at 151 lines (§5 plant: the cap) with failureLeg line-cap", () => {
-    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 151 });
+  it("refuses at 401 lines (§5 plant: the cap) with failureLeg line-cap", () => {
+    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 401 });
     expect(result.prClass).toBeNull();
     expect(result.failureLeg).toBe("line-cap");
-    expect(result.reasons.some((r) => r.includes("code-fix") && r.includes("151 > 150"))).toBe(true);
+    expect(result.reasons.some((r) => r.includes("code-fix") && r.includes("401 > 400"))).toBe(true);
   });
 
   it("sensitivePathPatterns still beat the code-fix class entirely", () => {
@@ -1002,8 +1002,8 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
     expect(result.failureLeg).toBeNull();
   });
 
-  it("resolves code-fix at exactly 150 lines (boundary)", () => {
-    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 150 });
+  it("resolves code-fix at exactly 400 lines (boundary)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 400 });
     expect(result.prClass).toBe("code-fix");
   });
 

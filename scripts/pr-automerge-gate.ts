@@ -132,6 +132,7 @@ const REVIEW_MAX_TOKENS = 512;
 const CODE_FIX_MERGE_LABEL = "automerge:code-fix";
 // Kevin's 2026-09-02 one-vocabulary rename: train:candidate → candidate (label-authority.ts).
 const TRAIN_CANDIDATE_LABEL = "candidate";
+const BUGSQUASHER_LABEL = "bugsquasher";
 
 // ───────────────────────────── gh helpers ─────────────────────────────
 
@@ -471,8 +472,15 @@ async function evaluate(
   // included) becomes a train CANDIDATE: label + comment, then done. Verdict
   // "candidate" is a healthy terminal outcome, not a miss.
   if (prClass === "code-fix" && repoClassFor(repo) === "train") {
+    // 2026-09-06 (Kevin, "go"): for a `bugsquasher` PR the gate applies `queued` itself,
+    // right after `candidate`, so the restart train merges it on its next tick without
+    // a human hand. The train's label authority accepts the gate's `queued` ONLY when
+    // the PR carries both `bugsquasher` and `candidate` (label-authority.ts
+    // GATE_AUTHORITY_*) — a bot `queued` on any other PR is still refused categorically.
+    const gateQueues = labels.includes(BUGSQUASHER_LABEL);
     try {
       addLabel(repo, pr, TRAIN_CANDIDATE_LABEL);
+      if (gateQueues) addLabel(repo, pr, QUEUED_LABEL);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.log(
@@ -490,7 +498,10 @@ async function evaluate(
         "",
         `Every gate leg passed (shape, line cap, safe_path_globs, built-in denylist, named checks, independent ` +
           `review CLEAN) — but this repo is TRAIN-class, where the squasher never merges. Applied ` +
-          `\`${TRAIN_CANDIDATE_LABEL}\`; a merge-authorized human decides \`${QUEUED_LABEL}\` (Rule #279).`,
+          `\`${TRAIN_CANDIDATE_LABEL}\`` +
+          (gateQueues
+            ? ` and \`${QUEUED_LABEL}\` (Kevin 2026-09-06: a \`bugsquasher\` PR that passes every leg rides the next train tick; \`hold\` still parks it).`
+            : `; a merge-authorized human decides \`${QUEUED_LABEL}\` (Rule #279).`),
         "",
         `Evaluated sha: \`${prJson.headRefOid}\`.`,
       ].join("\n"),

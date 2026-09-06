@@ -89,6 +89,21 @@ export const QUEUED_LABEL_PAIR: AuthorityLabelPair = { ready: QUEUED_LABEL, hold
 export const MERGE_AUTHORITY_LOGINS: readonly string[] = ["kbibelhausen"];
 
 /**
+ * 2026-09-06 (Kevin, "go" on the Engineer's strictness read): the ONE bot whose `queued`
+ * counts, and ONLY on a PR that currently carries every label in
+ * GATE_AUTHORITY_REQUIRED_LABELS — `candidate` is the gate's own tripwire (applied in the
+ * same gate run, after every leg passed) and `bugsquasher` marks the squasher class. Any
+ * other bot, or this bot on a PR missing either label, is still refused categorically.
+ * `hold` still wins before this is ever consulted; the staleness leg still applies after.
+ */
+export const GATE_AUTHORITY_LOGIN = "studiob-fleet-bot[bot]";
+export const GATE_AUTHORITY_REQUIRED_LABELS: readonly string[] = ["bugsquasher", "candidate"];
+
+export function isGateAuthorizedActor(actorLogin: string, currentLabels: readonly string[]): boolean {
+  return actorLogin === GATE_AUTHORITY_LOGIN && GATE_AUTHORITY_REQUIRED_LABELS.every((l) => currentLabels.includes(l));
+}
+
+/**
  * Resolves the EFFECTIVE roster `evaluateLabelAuthority` should check `actorLogin`
  * against: the intersection of `callerLogins` (if provided) with `MERGE_AUTHORITY_LOGINS`
  * — never their union. A login present ONLY in `callerLogins` (not in
@@ -293,7 +308,11 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
   // is refused even if some future misconfiguration puts a bot string inside the
   // roster passed as `authorityLogins` (doc FORBIDDEN: "ANY actorLogin ending in
   // [bot] refused categorically").
-  if (actorLogin.endsWith("[bot]")) {
+  // 2026-09-06: the ONE exception — the fleet gate's own `queued` on a PR that carries
+  // its `candidate` tripwire AND `bugsquasher` (isGateAuthorizedActor); every other bot,
+  // and this bot on any other PR, is still refused here.
+  const gateActor = isGateAuthorizedActor(actorLogin, currentLabels);
+  if (actorLogin.endsWith("[bot]") && !gateActor) {
     return {
       authorized: false,
       reason: "bot-actor",
@@ -301,7 +320,7 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
     };
   }
 
-  if (!authorityLogins.includes(actorLogin)) {
+  if (!gateActor && !authorityLogins.includes(actorLogin)) {
     return {
       authorized: false,
       reason: "unauthorized-actor",
