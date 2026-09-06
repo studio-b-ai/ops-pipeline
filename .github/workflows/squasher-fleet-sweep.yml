@@ -70,6 +70,18 @@ jobs:
       - name: Checkout (fleet registry lives here)
         uses: actions/checkout@v5
 
+      # ops#327: the ordering step invokes scripts/lib/fleet-sweep-order.ts (the
+      # pure-core / I/O-glue split matching squasher-fleet-not-the-door.ts —
+      # `queued` first fleet-wide, per-repo cap, round-robin rotation of the
+      # bugsquasher group; the test suite lives with the function).
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
       # Tokens are never passed between jobs (GitHub masks secrets in outputs) —
       # this job and the reusable gate each mint their own.
       - name: Mint fleet App installation token
@@ -93,6 +105,16 @@ jobs:
           ONLY_REPO: ${{ inputs.repo }}
           ONLY_PR: ${{ inputs.pr_number }}
           MAX_FANOUT: "20"
+          # ops#327: no single repo can crowd more than PER_REPO_CAP entries into
+          # either group (queued, bugsquasher) inside the global fanout — so one
+          # repo's backlog cannot starve the rest. 5 leaves headroom for four
+          # fleet repos to each contribute at the cap and still fit under 20.
+          PER_REPO_CAP: "5"
+          # ops#327: rotates the bugsquasher group's start position per run so
+          # a stable enumeration order (registry × `gh pr list` default) cannot
+          # pin the same PR at the tail forever. github.run_number is monotone
+          # and available on every trigger shape (scheduled + workflow_dispatch).
+          RUN_OFFSET: ${{ github.run_number }}
         run: |
           set -euo pipefail
           CONFIG=scripts/squasher-fleet.json
@@ -181,9 +203,19 @@ jobs:
           if [ "$count" -eq 0 ]; then
             echo "No open labeled PRs anywhere in the fleet this cycle (per-repo counts above are the receipt)."
           fi
-          if [ "$count" -gt "$MAX_FANOUT" ]; then
-            echo "::warning::Fanout cap hit: $count labeled PRs found, evaluating only the first $MAX_FANOUT this cycle (#331 — no silent caps; the hourly cron catches the rest)."
-            entries=$(jq -c ".[0:${MAX_FANOUT}]" <<<"$entries")
+
+          # ops#327: order for this cycle — queued (train) FIRST fleet-wide,
+          # per-repo cap inside each group, round-robin rotation of the
+          # bugsquasher group by run_number, global fanout applied last. The
+          # ordering logic (pure) + tests live in scripts/lib/fleet-sweep-order.ts.
+          # The old "first-20-in-enumeration-order" cap starved queued PRs in a
+          # stable order (issue #327 — webhook-router#915 at entry 28 of 30 was
+          # never evaluated); a per-repo cap alone can't fix that without the
+          # queued-first rule (Kevin's door word is never behind bot PRs).
+          entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-order.ts "$MAX_FANOUT" "$PER_REPO_CAP" "$RUN_OFFSET")
+          ordered_count=$(jq length <<<"$entries")
+          if [ "$ordered_count" -lt "$count" ]; then
+            echo "::warning::Fanout applied: $count labeled PRs found, $ordered_count evaluated this cycle (per-repo cap=$PER_REPO_CAP, global cap=$MAX_FANOUT, run_offset=$RUN_OFFSET; #327 — queued-first, round-robin rotation of the bugsquasher group). The hourly cron rotates the tail into subsequent windows."
           fi
           echo "entries=$entries" >> "$GITHUB_OUTPUT"
 
