@@ -147,6 +147,7 @@ import {
   type CrossRepoDisposition,
   type TwinCandidate,
   type TwinPointer,
+  twinLabelsFrom,
 } from "./lib/needs-human-crossrepo-lib.js";
 import { createAuthorizedReactorChecker } from "./lib/needs-human-authorization.js";
 import { parseProbeRouting, PROBE_MARKER } from "./lib/needs-human-probe-lib.js";
@@ -319,8 +320,14 @@ function findTwin(target: string, ownRepoShort: string, issueNumber: number): Tw
   return { kind: "not-found" };
 }
 
-function fileTwinIssue(repo: string, title: string, body: string): TwinRef {
-  const out = gh(["issue", "create", "--repo", repo, "--title", title, "--body", body]).trim();
+function fileTwinIssue(repo: string, title: string, body: string, labels: readonly string[] = []): TwinRef {
+  // Labels ride on the create call (one `--label` per label — gh accepts repeats) so the
+  // twin lands in the target's routing bucket on creation, never as an unlabeled default-
+  // pool issue (six-lens sweep, 2026-09-06). A label the target repo lacks makes gh fail
+  // loudly; that is the right verdict (the twin would otherwise be silently misrouted).
+  const args = ["issue", "create", "--repo", repo, "--title", title, "--body", body];
+  for (const l of labels) args.push("--label", l);
+  const out = gh(args).trim();
   const match = out.match(/\/issues\/(\d+)\s*$/);
   if (!match?.[1]) throw new Error(`fileTwinIssue: couldn't parse an issue number from gh's own creation output: "${out}"`);
   return { number: Number(match[1]), title, url: out };
@@ -421,6 +428,9 @@ function tryCreation(dryRun: boolean): "applied" | "would-apply" | "capped" {
 interface IssueRow {
   number: number;
   title: string;
+  /** Present when enumerated with `includeLabels: true` — the twin inherits the
+   *  routing-relevant subset (twinLabelsFrom). */
+  labels?: { name: string }[];
 }
 
 function applyDisposition(ctx: {
@@ -505,7 +515,7 @@ function applyDisposition(ctx: {
       // needs-human twin would just re-create the exact same nobody-pool problem #66 was
       // filed to fix). If this throws, execution stops here: the origin issue is
       // untouched — still labeled, no marker — safely re-evaluated fresh next run.
-      const twinCreated = fileTwinIssue(disposition.target, twinTitle, crossRepoTwinBody(ownRepo, issue.number, headline));
+      const twinCreated = fileTwinIssue(disposition.target, twinTitle, crossRepoTwinBody(ownRepo, issue.number, headline), twinLabelsFrom(issue.labels));
       console.log(`${head}  TWIN-FILE -> ${shortRepoName(disposition.target)}#${twinCreated.number} [APPLIED]`);
       // Steps (b) then (c) — receipt BEFORE label removal, mirroring
       // needs-human-router.ts's OWN route-same-repo ordering and its documented
@@ -992,7 +1002,7 @@ async function main(): Promise<void> {
 
   for (const repo of COVERED_REPOS) {
     const ownRepoShort = shortRepoName(repo);
-    const issues = listIssuesByLabel(repo, LABEL, "open").sort((a, b) => a.number - b.number);
+    const issues = listIssuesByLabel(repo, LABEL, "open", 1000, { includeLabels: true }).sort((a, b) => a.number - b.number);
     console.log("");
     console.log(`[crossrepo] ${repo}: ${issues.length} open '${LABEL}' issue(s).`);
     for (const issue of issues) {
