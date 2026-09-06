@@ -58,6 +58,7 @@
  * real watermark has already been swept.
  */
 
+import { anthropicCredentialMode } from "./lib/anthropic-credentials.js";
 import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -274,7 +275,7 @@ async function callClassifierWithRetry(anthropic: Anthropic, pr: CandidatePr): P
  * to `verdict: "unclassified"` rather than guessing or crashing (see the lib header).
  */
 function buildClassifyFn(): { classify: ClassifyFn | null; mode: "real" | "skipped" } {
-  if (!process.env.ANTHROPIC_API_KEY) return { classify: null, mode: "skipped" };
+  if (anthropicCredentialMode() === "none") return { classify: null, mode: "skipped" }; // api-key or federation (WIF 9/06)
   const anthropic = new Anthropic();
   return { classify: (pr: CandidatePr) => callClassifierWithRetry(anthropic, pr), mode: "real" };
 }
