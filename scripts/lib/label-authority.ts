@@ -311,7 +311,9 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
   // 2026-09-06: the ONE exception — the fleet gate's own `queued` on a PR that carries
   // its `candidate` tripwire AND `bugsquasher` (isGateAuthorizedActor); every other bot,
   // and this bot on any other PR, is still refused here.
-  const gateActor = isGateAuthorizedActor(actorLogin, currentLabels);
+  // The exception is `queued`-ONLY: for any other ready label (the `reviewed` human
+  // receipt, 2026-09-06 "that works") a bot actor is refused as before.
+  const gateActor = READY === TRAIN_READY_LABEL && isGateAuthorizedActor(actorLogin, currentLabels);
   if (actorLogin.endsWith("[bot]") && !gateActor) {
     return {
       authorized: false,

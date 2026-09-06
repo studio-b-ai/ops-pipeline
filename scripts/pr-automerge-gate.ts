@@ -269,6 +269,42 @@ async function independentReview(diff: string, systemPrompt: string): Promise<{ 
 
 // ───────────────────────────── main ─────────────────────────────
 
+/**
+ * 2026-09-06 (Kevin, "that works" on the Engineer's door read): the HUMAN review
+ * receipt. A `reviewed` label whose most recent LabeledEvent was applied by a
+ * merge-authorized human (MERGE_AUTHORITY_LOGINS) AFTER the head commit satisfies
+ * the independent-review leg in place of the model. Exactly the `queued` predicate
+ * with the `reviewed`/`hold` pair: `hold` wins first; a bot's label never counts (the
+ * fleet-bot exception is `queued`-only, and `reviewed` is not on its required list);
+ * a commit or force-push after the label makes it stale; a truncated timeline refuses.
+ * Returns the receipt text on success, null otherwise. Never throws: a timeline fetch
+ * failure means "no receipt" — the model review runs as before.
+ */
+const REVIEWED_LABEL = "reviewed";
+function humanReviewReceipt(repo: string, pr: number, currentLabels: string[]): string | null {
+  if (!currentLabels.includes(REVIEWED_LABEL)) return null;
+  try {
+    const { timeline, truncated } = fetchAuthorityTimeline(repo, pr);
+    const verdict = evaluateLabelAuthority({
+      currentLabels,
+      timeline,
+      authorityLogins: resolveAuthorityLogins(),
+      truncated,
+      labels: { ready: REVIEWED_LABEL, hold: "hold" },
+    });
+    if (!verdict.authorized) {
+      console.log(`[info] pr-automerge-gate ${repo}#${pr}: '${REVIEWED_LABEL}' present but not a valid human receipt (${verdict.reason}) — model review runs.`);
+      return null;
+    }
+    const receipt = `human review receipt: '${REVIEWED_LABEL}' by ${verdict.authorizingEvent.actorLogin} (timeline position ${verdict.authorizingEvent.position}, after the head) — model review skipped`;
+    console.log(`[info] pr-automerge-gate ${repo}#${pr}: ${receipt}`);
+    return receipt;
+  } catch (err) {
+    console.log(`[warn] pr-automerge-gate ${repo}#${pr}: human receipt check failed (${err instanceof Error ? err.message : String(err)}) — model review runs.`);
+    return null;
+  }
+}
+
 async function evaluate(
   repo: string,
   pr: number,
@@ -288,7 +324,17 @@ async function evaluate(
     );
   }
 
-  const prJson = fetchPr(repo, pr);
+  let prJson = fetchPr(repo, pr);
+  // 2026-09-06 (the code-fix door's first live run, sweep 34009003049): seven studiob
+  // PRs short-circuited on `mergeStateStatus=UNKNOWN` — GitHub had not recomputed
+  // mergeability after main moved minutes earlier, and every one read CLEAN again
+  // within the hour. UNKNOWN is transient, not a verdict: re-read ONCE after a short
+  // wait before treating it as not-ready. Still fail-closed if it stays UNKNOWN.
+  if (prJson.mergeStateStatus === "UNKNOWN") {
+    execFileSync("sleep", ["5"]);
+    prJson = fetchPr(repo, pr);
+    console.log(`[info] pr-automerge-gate ${repo}#${pr}: mergeStateStatus was UNKNOWN — re-read after 5s → ${prJson.mergeStateStatus}`);
+  }
   const author = prJson.author.login;
   const labels = prJson.labels.map((l) => l.name);
   const totalChangedLines = prJson.additions + prJson.deletions;
@@ -447,7 +493,17 @@ async function evaluate(
   }
 
   // ── Paid leg: independent review — every other leg already passes, class-aware prompt ──
-  const review = await independentReview(diff, reviewSystemPromptFor(prClass));
+  // 2026-09-06 (Kevin, "that works"): a `reviewed` label applied by a merge-authorized
+  // HUMAN after the head commit is the human review receipt (the 9/03 vocabulary:
+  // "`reviewed` remains a machine-readable review receipt … honored where present").
+  // It satisfies this leg in place of the model — the door's first live run showed a
+  // model FLAG has no human door otherwise (every FLAG became a hand merge; bolt#2120's
+  // FLAG carried no reason at all). Same sha-pinned, roster-human, hold-wins predicate
+  // as `queued`; a bot's `reviewed`, or one older than the head, does not count.
+  const humanReceipt = humanReviewReceipt(repo, pr, labels);
+  const review = humanReceipt
+    ? { verdict: "CLEAN" as ReviewVerdict, detail: humanReceipt }
+    : await independentReview(diff, reviewSystemPromptFor(prClass));
 
   const finalCheck = gateDecisionForClass({
     prClass,
@@ -603,6 +659,23 @@ async function evaluate(
       // the designed abort-on-delta, an operational outcome, not a gate miss (same
       // rationale as the TOCTOU catch below).
       cleanupCodeFixLabel("a revalidate abort");
+      return;
+    }
+  }
+
+  // ── Human receipt revalidate (codex P2 on the reviewed-receipt PR): the receipt was
+  // read before the paid-leg window; a `reviewed` removed and re-added by a non-roster
+  // actor in that window keeps the label NAME while the authorizing event changes
+  // (the sha pin cannot see a label swap). Re-run the SAME predicate on fresh labels as
+  // the last read before the merge; any change aborts this cycle (Rules #109/#161).
+  if (humanReceipt) {
+    const freshLabels = fetchPr(repo, pr).labels.map((l) => l.name);
+    if (!humanReviewReceipt(repo, pr, freshLabels)) {
+      console.log(
+        `[no-op] pr-automerge-gate ${repo}#${pr}: the '${REVIEWED_LABEL}' human receipt no longer holds at merge time — ` +
+          `merge ABORTED this cycle (the next scheduled/triggered run re-evaluates; the model review runs if the receipt is gone).`,
+      );
+      cleanupCodeFixLabel("a human-receipt revalidate abort");
       return;
     }
   }
@@ -1077,7 +1150,14 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   // ── Independent review leg (doc §3.1 step 5) — sha-pinned diff, same fail-closed
   // contract as the squasher gate's `independentReview` (exactly CLEAN or FLAG). ──
   const diff = fetchDiffBySha(repo, prJson.baseRefName, prJson.headRefOid);
-  const review = await independentReview(diff, TRAIN_READY_REVIEW_SYSTEM);
+  // 2026-09-06 (Kevin, "that works"): the human review receipt (`reviewed`, roster
+  // human, after the head) satisfies this leg here too — ops-pipeline#332 showed the
+  // queued path re-running the model and refusing on the same FLAG, leaving no door
+  // but a hand merge. Same predicate as the class-mode gate (humanReviewReceipt).
+  const humanReceipt = humanReviewReceipt(repo, pr, currentLabels);
+  const review = humanReceipt
+    ? { verdict: "CLEAN" as ReviewVerdict, detail: humanReceipt }
+    : await independentReview(diff, TRAIN_READY_REVIEW_SYSTEM);
   if (review.verdict !== "CLEAN") {
     const detail = `independent review verdict ${review.verdict}: ${review.detail}`;
     logTrainGateLine(repo, pr, "refused", detail);
@@ -1142,6 +1222,17 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
       `${revalidateVerdict.reason}: ${revalidateVerdict.detail}) — aborting this cycle, ` +
       `not retrying (Rules #109/#161); a same-cycle stale-label removal is deliberately NOT ` +
       `attempted here — that side effect is left to the next gate cycle's normal early-branch handling`;
+    logTrainGateLine(repo, pr, "refused", detail);
+    return { outcome: "refused", detail };
+  }
+
+  // ── Human receipt revalidate (codex P2 on the reviewed-receipt PR): same reason as
+  // (b) above — a `reviewed` removed and re-added by a non-roster actor in the paid-leg
+  // window keeps the label NAME; re-run the receipt predicate on the fresh labels. ──
+  if (humanReceipt && !humanReviewReceipt(repo, pr, [...after.labels])) {
+    const detail =
+      `revalidate: the '${REVIEWED_LABEL}' human receipt no longer holds at merge time — aborting this cycle, ` +
+      `not retrying (Rules #109/#161); the next run re-evaluates (the model review runs if the receipt is gone)`;
     logTrainGateLine(repo, pr, "refused", detail);
     return { outcome: "refused", detail };
   }
