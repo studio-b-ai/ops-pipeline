@@ -478,6 +478,20 @@ async function evaluate(
     // the PR carries both `bugsquasher` and `candidate` (label-authority.ts
     // GATE_AUTHORITY_*) — a bot `queued` on any other PR is still refused categorically.
     const gateQueues = labels.includes(BUGSQUASHER_LABEL);
+    // Codex P1 on the door PR: the review above read ONE head (prJson.headRefOid); a
+    // commit pushed between that read and these label writes would otherwise get a
+    // `queued` the train's staleness leg cannot see (it only looks for commits AFTER
+    // the LabeledEvent). Re-read the head right before writing; if it moved, write
+    // nothing — the next scheduled run re-evaluates the new head from scratch.
+    const headNow = gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"]).trim();
+    if (headNow !== prJson.headRefOid) {
+      console.log(
+        `[wait] pr-automerge-gate ${repo}#${pr}: head moved during the gate run (reviewed ${prJson.headRefOid}, ` +
+          `now ${headNow}) — no '${TRAIN_CANDIDATE_LABEL}'/'${QUEUED_LABEL}' written; the next scheduled run re-evaluates.`,
+      );
+      console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "head-moved", reasons: [`reviewed ${prJson.headRefOid}, now ${headNow}`] }));
+      return;
+    }
     try {
       addLabel(repo, pr, TRAIN_CANDIDATE_LABEL);
       if (gateQueues) addLabel(repo, pr, QUEUED_LABEL);

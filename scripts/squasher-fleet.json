@@ -1,12 +1,12 @@
 {
-  "_comment": "ops#250 — squasher fleet sweep registry (docs/plans/2026-08-31-ops250-squasher-fleet-sweep.md §2.3). Per-repo gate inputs migrated VERBATIM from the retired per-repo caller workflows (extracted from each repo's origin/main, 2026-08-31). This file is enumeration + gate inputs ONLY — it is NOT class policy: repoClassFor() in scripts/lib/automerge-classify.ts stays the source of truth for train-class/code-fix partitioning. `train: true` = the retired caller had a train_ready leg; the sweep then also enumerates open `queued` PRs for that repo (train invocations pass ONLY train_ready — required_checks/enabled_classes never apply in train mode). Absent optional fields fall back to the reusable gate's own defaults (enabled_classes is written explicitly because the sweep passes inputs positionally — an empty string would OVERRIDE the workflow_call default, not invoke it). 2026-09-06 (Kevin 'go'): code-fix enabled with safe_path_globs on bolt-wms (src/**), studiob (packages/api/src/**) and studiob-price-sync (src/** \u2014 extensions/** deliberately OUTSIDE: the checkout extension is customer-facing); asthetik-trade-theme and asthetik-portal stay docs-comment because a storefront/portal change without a QA receipt is Kevin's hand (#475); the code-fix line cap is 400 (automerge-classify.ts).",
+  "_comment": "ops#250 — squasher fleet sweep registry (docs/plans/2026-08-31-ops250-squasher-fleet-sweep.md §2.3). Per-repo gate inputs migrated VERBATIM from the retired per-repo caller workflows (extracted from each repo's origin/main, 2026-08-31). This file is enumeration + gate inputs ONLY — it is NOT class policy: repoClassFor() in scripts/lib/automerge-classify.ts stays the source of truth for train-class/code-fix partitioning. `train: true` = the retired caller had a train_ready leg; the sweep then also enumerates open `queued` PRs for that repo (train invocations pass ONLY train_ready — required_checks/enabled_classes never apply in train mode). Absent optional fields fall back to the reusable gate's own defaults (enabled_classes is written explicitly because the sweep passes inputs positionally — an empty string would OVERRIDE the workflow_call default, not invoke it). 2026-09-06 (Kevin 'go'): code-fix enabled with safe_path_globs on bolt-wms (src/**), studiob (packages/api/src/**) and studiob-price-sync (src/** \u2014 extensions/** deliberately OUTSIDE: the checkout extension is customer-facing); asthetik-trade-theme and asthetik-portal stay docs-comment because a storefront/portal change without a QA receipt is Kevin's hand (#475); the code-fix line cap is 400 (automerge-classify.ts); required_checks name each repo's substantive CI job(s) (codex P2 on the door PR: an empty list leaves the named-checks leg fail-closed and the class inert).",
   "repos": [
     {
       "repo": "studio-b-ai/bolt-wms",
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
       "safe_path_globs": "src/**",
-      "required_checks": "",
+      "required_checks": "Client — TypeScript + Build,Server — TypeScript + Tests",
       "train": true
     },
     {
@@ -14,7 +14,7 @@
       "enabled_classes": "docs-comment,code-fix",
       "sensitive_path_patterns": "",
       "safe_path_globs": "packages/api/src/**",
-      "required_checks": "",
+      "required_checks": "Build + boot + probe,tsc --noEmit (SDK drift guard) (api)",
       "train": false
     },
     {
@@ -22,7 +22,7 @@
       "enabled_classes": "docs-comment,code-fix",
       "sensitive_path_patterns": "",
       "safe_path_globs": "src/**",
-      "required_checks": "",
+      "required_checks": "Extension bundle + type baseline",
       "train": true
     },
     {

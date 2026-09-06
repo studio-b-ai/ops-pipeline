@@ -67,6 +67,9 @@ export type GateReceiptLeg =
   | "review"
   | "held"
   | "queued"
+  // 2026-09-06 (codex P1 on the code-fix door): the PR's head moved between the
+  // gate's review read and its label writes — nothing written, next run re-evaluates.
+  | "head-moved"
   | "other";
 
 export interface GateReceiptInput {
