@@ -432,8 +432,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
         pageInfo { hasPreviousPage }
         nodes {
           __typename
-          ... on LabeledEvent { label { name } actor { login } createdAt }
-          ... on UnlabeledEvent { label { name } actor { login } }
+          ... on LabeledEvent { label { name } actor { __typename login } createdAt }
+          ... on UnlabeledEvent { label { name } actor { __typename login } }
         }
       }
     }
@@ -484,6 +484,23 @@ interface GraphQLTimelineResponse {
  * non-merge outcome, exactly as the existing `fetchPr`/`fetchDiffBySha` already let
  * `gh` failures propagate to their caller.
  */
+/**
+ * 2026-09-06 (live, studiob#642/#666): GitHub's GraphQL names a GitHub-App actor
+ * `Bot:studiob-fleet-bot` — WITHOUT the `[bot]` suffix REST shows — so every
+ * `login.endsWith("[bot]")` check in this file (the categorical bot refusal AND the
+ * gate's own `queued` exception) was blind to GraphQL bot actors: the fleet gate's
+ * `queued` on #642 fell through to the roster check and was refused as an
+ * "unauthorized-actor" instead of matching GATE_AUTHORITY_LOGIN. Normalize at the
+ * ONE place the timeline is read: a `Bot` actor's login carries the `[bot]` suffix
+ * downstream, exactly as REST would spell it. Pure; tested both ways.
+ */
+export function normalizeActorLogin(actor: { __typename?: string | null; login?: string | null } | null | undefined): string | undefined {
+  const login = actor?.login;
+  if (typeof login !== "string" || login.length === 0) return undefined;
+  if (actor?.__typename === "Bot" && !login.endsWith("[bot]")) return `${login}[bot]`;
+  return login;
+}
+
 export function fetchAuthorityTimeline(repo: string, prNumber: number): { timeline: AuthorityTimelineItem[]; truncated: boolean } {
   const [owner, name] = repo.split("/");
   if (!owner || !name) {
@@ -608,7 +625,7 @@ export function fetchAuthorityTimeline(repo: string, prNumber: number): { timeli
     return {
       type,
       label: node.label?.name ?? undefined,
-      actorLogin: node.actor?.login ?? undefined,
+      actorLogin: normalizeActorLogin(node.actor),
       position: index,
       createdAt: node.createdAt ?? undefined,
     };

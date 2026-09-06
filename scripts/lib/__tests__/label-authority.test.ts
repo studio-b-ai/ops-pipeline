@@ -12,6 +12,7 @@ import {
   HOLD_LABEL,
   QUEUED_LABEL_PAIR,
   evaluateLabelAuthority,
+  normalizeActorLogin,
   type AuthorityInput,
   type AuthorityTimelineItem,
   type AuthoritySnapshot,
@@ -46,6 +47,43 @@ function baseAuthorityInput(overrides: Partial<AuthorityInput> = {}): AuthorityI
     ...overrides,
   };
 }
+
+// 2026-09-06 (live, studiob#642/#666): GraphQL names a GitHub-App actor `Bot:studiob-fleet-bot`
+// without the `[bot]` suffix REST shows — every `[bot]` check downstream was blind to it.
+describe("normalizeActorLogin", () => {
+  it("suffixes a GraphQL Bot actor's login with [bot] (the REST spelling every check expects)", () => {
+    expect(normalizeActorLogin({ __typename: "Bot", login: "studiob-fleet-bot" })).toBe("studiob-fleet-bot[bot]");
+    expect(normalizeActorLogin({ __typename: "Bot", login: "studiob-fleet-bot" })).toBe(GATE_AUTHORITY_LOGIN);
+  });
+  it("leaves an already-suffixed Bot login and a User login unchanged", () => {
+    expect(normalizeActorLogin({ __typename: "Bot", login: "github-actions[bot]" })).toBe("github-actions[bot]");
+    expect(normalizeActorLogin({ __typename: "User", login: "kbibelhausen" })).toBe("kbibelhausen");
+    expect(normalizeActorLogin({ login: "kbibelhausen" })).toBe("kbibelhausen");
+  });
+  it("returns undefined for a missing or empty login", () => {
+    expect(normalizeActorLogin(null)).toBeUndefined();
+    expect(normalizeActorLogin({ __typename: "Bot" })).toBeUndefined();
+    expect(normalizeActorLogin({ __typename: "User", login: "" })).toBeUndefined();
+  });
+  it("end to end: the gate's GraphQL-spelled queued (with bugsquasher + candidate) is authorized once normalized", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: [TRAIN_READY_LABEL, ...GATE_AUTHORITY_REQUIRED_LABELS],
+        timeline: [commitAt(0), labeledBy(normalizeActorLogin({ __typename: "Bot", login: "studiob-fleet-bot" }) as string, 1)],
+      }),
+    );
+    expect(verdict.authorized).toBe(true);
+  });
+  it("negative control: the UN-normalized GraphQL spelling is refused (the exact live failure)", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: [TRAIN_READY_LABEL, ...GATE_AUTHORITY_REQUIRED_LABELS],
+        timeline: [commitAt(0), labeledBy("studiob-fleet-bot", 1)],
+      }),
+    );
+    expect(verdict.authorized).toBe(false);
+  });
+});
 
 describe("evaluateLabelAuthority", () => {
   // ───── 2026-09-06 (Kevin "that works"): the HUMAN review receipt — the `reviewed`/`hold` pair ─────
