@@ -33,12 +33,15 @@ on:
         required: true
         type: string
     secrets:
+      # Optional since 9/06 (Workload Identity Federation): the probe federates from the CALLER's
+      # OIDC identity; a caller may still pass the legacy key during its own migration.
       ANTHROPIC_API_KEY:
-        required: true
+        required: false
 
 permissions:
   contents: read
   issues: write
+  id-token: write   # WIF — the caller job must grant this too
 
 # One probe at a time per issue: a label re-add racing a slow first run must not
 # double-comment. The script's marker dedup is the durable guard; this is the
@@ -66,11 +69,18 @@ jobs:
         working-directory: scripts
         run: npm ci || npm install
 
+      - name: "Anthropic federated token (keyless, Kevin 9/06 — the caller job grants id-token write)"
+        uses: ./.github/actions/anthropic-federated-token
+        with:
+          rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+
       - name: Run needs-human probe
         working-directory: scripts
         env:
           GH_TOKEN: ${{ github.token }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PROBE_REPO: ${{ inputs.repo }}
           PROBE_ISSUE: ${{ inputs.issue_number }}
         run: npx tsx needs-human-probe.ts

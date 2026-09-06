@@ -52,6 +52,7 @@ permissions:
   pull-requests: write
   checks: read
   actions: read
+  id-token: write   # WIF (Kevin 9/06) — the reusable gate federates its review leg
 
 concurrency:
   group: train-ready-sweep-${{ github.repository }}
@@ -117,7 +118,7 @@ jobs:
       pr_number: ${{ matrix.pr_number }}
       train_ready: true
     secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # ANTHROPIC_API_KEY no longer passed (WIF, 9/06) — the gate federates from this run's OIDC identity.
       # ops#250: the reusable gate now REQUIRES the fleet App pair — it merges on
       # a studiob-fleet-bot installation token so merge events trigger the target
       # repo's tripwire/push-to-main workflows (github.token merges are

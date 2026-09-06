@@ -1,0 +1,73 @@
+name: "Anthropic federated token"
+description: >-
+  Keyless Anthropic auth for a GitHub Actions job (Workload Identity Federation, Kevin 9/06 "go").
+  Fetches the run's GitHub OIDC token into a file, keeps it fresh in the background (GitHub JWTs
+  live ~5 minutes; the SDK re-reads the file on every refresh and each exchange must present a
+  new jti), and exports the five ANTHROPIC_* federation variables so `new Anthropic()` federates
+  with no ANTHROPIC_API_KEY anywhere. The caller job needs `permissions: id-token: write`.
+  Canon: brain library/decisions/2026-09-06-claude-models-in-opencode-through-the-door.md.
+inputs:
+  rule_id:
+    description: "Federation rule id (fdrl_…) — pass vars.ANTHROPIC_FEDERATION_RULE_ID"
+    required: true
+  organization_id:
+    description: "Anthropic organization id — pass vars.ANTHROPIC_ORGANIZATION_ID"
+    required: true
+  service_account_id:
+    description: "Target service account (svac_…) — pass vars.ANTHROPIC_SERVICE_ACCOUNT_ID"
+    required: true
+  workspace_id:
+    description: "Workspace the rule is enabled in (wrkspc_…) — pass vars.ANTHROPIC_WORKSPACE_ID"
+    required: true
+  audience:
+    description: "OIDC audience the rule matches"
+    required: false
+    default: "https://api.anthropic.com"
+runs:
+  using: "composite"
+  steps:
+    - name: Fetch GitHub OIDC token
+      uses: actions/github-script@v8
+      env:
+        WIF_AUDIENCE: ${{ inputs.audience }}
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+          const file = path.join(process.env.RUNNER_TEMP, 'anthropic-jwt');
+          const token = await core.getIDToken(process.env.WIF_AUDIENCE);
+          core.setSecret(token);
+          fs.writeFileSync(file, token, { mode: 0o600 });
+          core.exportVariable('ANTHROPIC_IDENTITY_TOKEN_FILE', file);
+
+    - name: Export federation variables and keep the identity token fresh
+      shell: bash
+      env:
+        WIF_RULE_ID: ${{ inputs.rule_id }}
+        WIF_ORG_ID: ${{ inputs.organization_id }}
+        WIF_SVAC_ID: ${{ inputs.service_account_id }}
+        WIF_WORKSPACE_ID: ${{ inputs.workspace_id }}
+        WIF_AUDIENCE: ${{ inputs.audience }}
+      run: |
+        set -euo pipefail
+        for v in WIF_RULE_ID WIF_ORG_ID WIF_SVAC_ID WIF_WORKSPACE_ID; do
+          [ -n "${!v}" ] || { echo "::error::anthropic-federated-token: input for $v is empty — set the org/repo variable"; exit 1; }
+        done
+        {
+          echo "ANTHROPIC_FEDERATION_RULE_ID=$WIF_RULE_ID"
+          echo "ANTHROPIC_ORGANIZATION_ID=$WIF_ORG_ID"
+          echo "ANTHROPIC_SERVICE_ACCOUNT_ID=$WIF_SVAC_ID"
+          echo "ANTHROPIC_WORKSPACE_ID=$WIF_WORKSPACE_ID"
+        } >> "$GITHUB_ENV"
+        # Background refresher: a new GitHub JWT every 4 minutes (they expire at ~5), written
+        # atomically so the SDK's re-read on refresh always finds a fresh, never-exchanged jti.
+        # Survives this step; dies with the job.
+        F="$ANTHROPIC_IDENTITY_TOKEN_FILE"
+        nohup bash -c '
+          while true; do
+            sleep 240
+            curl -sS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$WIF_AUDIENCE" | jq -r .value > "$0.tmp" \
+              && mv "$0.tmp" "$0"
+          done' "$F" >/dev/null 2>&1 &
+        echo "anthropic-federated-token: federation env exported (rule $WIF_RULE_ID, workspace $WIF_WORKSPACE_ID); refresher running"

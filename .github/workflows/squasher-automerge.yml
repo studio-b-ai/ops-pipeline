@@ -93,8 +93,11 @@ on:
         type: boolean
         default: false
     secrets:
+      # Optional since 9/06 (Workload Identity Federation): the review leg federates from the
+      # caller's OIDC identity (the caller job grants id-token write); a caller may still pass
+      # the legacy key during its own migration.
       ANTHROPIC_API_KEY:
-        required: true
+        required: false
       FLEET_APP_ID:
         required: true
       FLEET_APP_PRIVATE_KEY:
@@ -149,11 +152,18 @@ jobs:
           echo "::error::Fleet App token mint returned an empty token — refusing to evaluate (a github.token fallback would re-arm the Rule #38 event suppression this design exists to kill; see ops#250)."
           exit 1
 
+      - name: "Anthropic federated token (keyless, Kevin 9/06 — the caller job grants id-token write)"
+        uses: ./.github/actions/anthropic-federated-token
+        with:
+          rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+
       - name: Run pr-automerge-gate
         working-directory: scripts
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GATE_REPO: ${{ inputs.repo }}
           GATE_PR_NUMBER: ${{ inputs.pr_number }}
           GATE_ENABLED_CLASSES: ${{ inputs.enabled_classes }}

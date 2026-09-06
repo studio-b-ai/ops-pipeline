@@ -65,6 +65,7 @@ on:
 # loud rather than quietly operating under the wrong identity.
 permissions:
   contents: read
+  id-token: write   # WIF (Kevin 9/06) — keyless Anthropic auth
 
 concurrency:
   group: shipped-ledger
@@ -136,12 +137,19 @@ jobs:
       # -- GitHub Actions context property access on an unpopulated context evaluates to
       # `null`/falsy rather than erroring, and `||` short-circuits before evaluating it once
       # `event_name == 'schedule'` is already true.
+      - name: "Anthropic federated token (keyless, Kevin 9/06 — the caller job grants id-token write)"
+        uses: ./.github/actions/anthropic-federated-token
+        with:
+          rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+
       - name: "Run shipped-ledger worker"
         id: run_worker
         working-directory: scripts
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           SINCE_INPUT: ${{ inputs.since }}
           APPLY_MODE: ${{ (github.event_name == 'schedule' || inputs.apply) && 'true' || 'false' }}
         run: |

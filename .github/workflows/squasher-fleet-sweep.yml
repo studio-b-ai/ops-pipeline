@@ -54,6 +54,7 @@ on:
 # App token.
 permissions:
   contents: read
+  id-token: write   # WIF (Kevin 9/06) — the reusable gate federates its review leg
 
 concurrency:
   group: squasher-fleet-sweep
@@ -205,7 +206,7 @@ jobs:
       required_checks: ${{ matrix.required_checks }}
       train_ready: ${{ matrix.train_ready }}
     secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      # ANTHROPIC_API_KEY no longer passed (WIF, 9/06) — the gate federates from this run's OIDC identity.
       FLEET_APP_ID: ${{ secrets.FLEET_APP_ID }}
       FLEET_APP_PRIVATE_KEY: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
       SEAT_INBOX_TOKEN: ${{ secrets.SEAT_INBOX_TOKEN }}

@@ -26,6 +26,7 @@
  * block or spam the escalation surface.
  */
 
+import { requireAnthropicCredentials } from "./lib/anthropic-credentials.js";
 import Anthropic from "@anthropic-ai/sdk";
 import { execFileSync } from "node:child_process";
 import { requireEnv } from "./lib/config.js";
@@ -69,7 +70,7 @@ function fetchFile(repo: string, path: string): string | null {
 }
 
 async function main(): Promise<void> {
-  requireEnv("ANTHROPIC_API_KEY");
+  requireAnthropicCredentials(); // api-key or federation (lib/anthropic-credentials, WIF 9/06)
   const repo = requireEnv("PROBE_REPO");
   const issueNumber = Number(requireEnv("PROBE_ISSUE"));
   if (!Number.isInteger(issueNumber) || issueNumber <= 0) {

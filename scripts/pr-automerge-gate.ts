@@ -82,6 +82,7 @@
  * Secrets: GH_TOKEN (gh CLI auth), ANTHROPIC_API_KEY (independent review leg).
  */
 
+import { anthropicClient } from "./lib/anthropic-credentials.js";
 import { execFileSync } from "node:child_process";
 import Anthropic from "@anthropic-ai/sdk";
 import {
@@ -232,7 +233,7 @@ type ReviewVerdict = "CLEAN" | "FLAG";
 
 async function independentReview(diff: string, systemPrompt: string): Promise<{ verdict: ReviewVerdict; detail: string }> {
   try {
-    const client = new Anthropic(); // resolves ANTHROPIC_API_KEY from env
+    const client = anthropicClient(); // api-key or federation (lib/anthropic-credentials, WIF 9/06)
     const response = await client.messages.create({
       model: REVIEW_MODEL,
       max_tokens: REVIEW_MAX_TOKENS,
