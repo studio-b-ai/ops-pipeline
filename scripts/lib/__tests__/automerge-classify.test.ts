@@ -1282,6 +1282,20 @@ describe("codeFixRevalidateDeltas ignores label-woken re-runs of already-clean, 
     expect(codeFixRevalidateDeltas(noRollup, fresh, OPTS).some((d) => d.includes("merge readiness regressed"))).toBe(true);
   });
 
+  it("known-GOOD (the MEASURED #2120 shape, bolt-wms#2166): the woken run went terminal-CANCELLED within seconds (concurrency cancel-in-progress) — ZERO deltas", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run conclusion, not a Postgres enum
+    const cancelledNow: RollupItem = { name: "Require review label", status: "COMPLETED", conclusion: "CANCELLED", completedAt: "2026-09-06T06:08:05Z" };
+    const fresh = freshWith([...ORIGINAL_ROLLUP, cancelledNow, queued("Require review label", "2026-09-06T06:08:06Z")]);
+    expect(codeFixRevalidateDeltas(original, fresh, OPTS)).toEqual([]);
+  });
+
+  it("known-BAD: a CANCELLED re-run of a REQUIRED check still regresses readiness", () => {
+    // pg-enum-drift-exempt: GitHub Actions check-run conclusion, not a Postgres enum
+    const cancelledRequired: RollupItem = { name: "Server — TypeScript + Tests", status: "COMPLETED", conclusion: "CANCELLED", completedAt: "2026-09-06T06:08:05Z" };
+    const fresh = freshWith([...ORIGINAL_ROLLUP, cancelledRequired]);
+    expect(codeFixRevalidateDeltas(original, fresh, OPTS).some((d) => d.includes("merge readiness regressed"))).toBe(true);
+  });
+
   it("control: a terminal FAILURE of the woken check is never filtered — the fresh rollup judges it", () => {
     const failedNow: RollupItem = { name: "Require review label", status: "COMPLETED", conclusion: "FAILURE", completedAt: "2026-09-06T06:09:00Z" };
     const fresh = freshWith([...ORIGINAL_ROLLUP, failedNow]);
@@ -1290,9 +1304,12 @@ describe("codeFixRevalidateDeltas ignores label-woken re-runs of already-clean, 
 
   it("unit: withoutLabelWokenReruns keeps terminal, required, unkeyed, and no-clean-original entries; drops only the exempt shape", () => {
     const unkeyedQueued: RollupItem = { status: "QUEUED", conclusion: null };
-    const fresh = [...ORIGINAL_ROLLUP, queued("Require review label"), queued("Server — TypeScript + Tests"), queued("brand-new-check"), unkeyedQueued];
+    // pg-enum-drift-exempt: GitHub Actions check-run conclusion, not a Postgres enum
+    const cancelledExempt: RollupItem = { name: "Require review label", status: "COMPLETED", conclusion: "CANCELLED", completedAt: "2026-09-06T06:08:05Z" };
+    const fresh = [...ORIGINAL_ROLLUP, queued("Require review label"), cancelledExempt, queued("Server — TypeScript + Tests"), queued("brand-new-check"), unkeyedQueued];
     const kept = withoutLabelWokenReruns(fresh, ORIGINAL_ROLLUP, OPTS);
-    expect(kept).toHaveLength(fresh.length - 1);
+    expect(kept).toHaveLength(fresh.length - 2);
+    expect(kept).not.toContain(cancelledExempt);
     expect(kept.some((i) => i.name === "Require review label" && i.status === "QUEUED")).toBe(false);
     expect(kept.some((i) => i.name === "Server — TypeScript + Tests" && i.status === "QUEUED")).toBe(true);
     expect(kept.some((i) => i.name === "brand-new-check")).toBe(true);

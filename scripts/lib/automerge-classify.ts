@@ -1007,11 +1007,11 @@ export function isRollupClean(
  * in-flight entry blocks, latest terminal wins, ties must ALL be SUCCESS).
  */
 /**
- * Drop from a FRESH rollup every NON-TERMINAL entry whose name was TERMINAL + CLEAN in
- * the ORIGINAL (pre-label) snapshot and is not a required check. Everything else — a
- * required check in any state, a non-terminal entry with no clean original under the
- * same name, an unkeyed entry, and every terminal entry — passes through untouched, so
- * `isRollupClean` still judges them. With no original rollup (older callers) nothing is
+ * Drop from a FRESH rollup every NON-TERMINAL or terminal-CANCELLED entry whose name was
+ * TERMINAL + CLEAN in the ORIGINAL (pre-label) snapshot and is not a required check.
+ * Everything else — a required check in any state, any entry with no clean original
+ * under the same name, an unkeyed entry, and every other terminal entry (SUCCESS,
+ * FAILURE, …) — passes through untouched, so `isRollupClean` still judges them. With no original rollup (older callers) nothing is
  * exempt (the pre-2026-09-06 behaviour). Exported for the planted tests.
  */
 export function withoutLabelWokenReruns(
@@ -1026,13 +1026,20 @@ export function withoutLabelWokenReruns(
     const key = rollupKey(item, index);
     if (key.startsWith("named:") && isTerminal(item) && isItemClean(item, opts.sanctionedSkips)) cleanBefore.add(key);
   });
+  // Exempt shapes under an exempt name: NON-TERMINAL (queued / in progress) and
+  // terminal-CANCELLED. The CANCELLED leg is the measured #2120 shape (bolt-wms#2166:
+  // 851 of 852 woken runs were CANCELLED within seconds by the workflow's own
+  // `concurrency: cancel-in-progress: true`, so a non-terminal-only filter would not have
+  // broken the loop). A cancellation is a supersession, not a verdict; FAILURE and every
+  // other unclean terminal conclusion still regress readiness.
   return fresh.filter((item, index) => {
-    if (isTerminal(item)) return true;
     const key = rollupKey(item, index);
     if (!key.startsWith("named:")) return true;
     const name = key.slice("named:".length);
     if (required.has(name)) return true;
-    return !cleanBefore.has(key);
+    if (!cleanBefore.has(key)) return true;
+    if (!isTerminal(item)) return false;
+    return !(item.status === "COMPLETED" && item.conclusion === "CANCELLED");
   });
 }
 
