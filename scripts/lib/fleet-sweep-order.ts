@@ -28,15 +28,16 @@
  *      behind bot PRs — the reusable gate refuses a train-mode invocation
  *      for a repo whose registry entry is train:false, so mis-tagged
  *      `queued` entries are rejected at the gate, not the sort.
- *   B. Per-repo cap inside the global fanout. No single repo can consume
- *      more than `perRepoCap` slots in either group, so one repo's backlog
- *      cannot crowd the rest. Groups are capped independently: a repo with
- *      one `queued` PR and five bugsquasher PRs contributes 1 + min(5, cap).
- *   C. Round-robin rotation of the bugsquasher group by `runOffset`. The
- *      train group stays in enumeration order (Kevin's ask, all-or-nothing
- *      by construction of leg A); the bugsquasher group rotates by
- *      `runOffset % length` so a stable enumeration order cannot pin the
- *      same PR at the tail forever. The caller passes GitHub's run number.
+ *   B. Per-repo cap inside the bugsquasher group only. The train group is
+ *      exempt from per-repo capping — Kevin's door-word label is never
+ *      silently dropped behind a per-repo limit (the global fanout still
+ *      bounds it, and the gate's own per-input validations still hold).
+ *   C. Round-robin rotation of the bugsquasher group BY REPO before capping.
+ *      Each repo's bugsquasher entries are rotated by `runOffset * perRepoCap`,
+ *      THEN capped — so a repo with more than `perRepoCap` entries sees a
+ *      NON-OVERLAPPING window every run and every entry is reachable.
+ *      The train group stays in enumeration order (Kevin's ask,
+ *      all-or-nothing by construction of leg A).
  *
  * Both directions per Rule #322: the "planted" test asserts the queued PR
  * that was starved (webhook-router#915 at entry 28 of 30, five repos with
@@ -76,8 +77,9 @@ export interface OrderOptions {
 
 /**
  * Returns entries ordered for this cycle's fanout: every queued (train)
- * entry first, then bugsquasher entries; per-repo capped inside each group;
- * bugsquasher group rotated by `runOffset`; total capped at `maxFanout`.
+ * entry first (no per-repo cap — Kevin's door word is never silently
+ * dropped), then bugsquasher entries per-repo rotated then capped.
+ * Total bounded at `maxFanout`.
  *
  * Pure — no I/O, no mutation of the input array. Order-stability inside a
  * repo is preserved (`gh pr list` returns newest first by default; we do not
@@ -87,20 +89,22 @@ export function orderFleetSweepEntries(entries: FleetSweepEntry[], opts: OrderOp
   const trainEntries = entries.filter((e) => e.train_ready);
   const bugsquasherEntries = entries.filter((e) => !e.train_ready);
 
-  const cappedTrain = capPerRepo(trainEntries, opts.perRepoCap);
-  const cappedBugsq = capPerRepo(bugsquasherEntries, opts.perRepoCap);
-  const rotatedBugsq = rotateArray(cappedBugsq, opts.runOffset);
+  // Train group: NO per-repo cap — Kevin's door-word label is never
+  // silently dropped behind a per-repo limit (the global fanout still
+  // bounds it, and the gate's own per-input validations still hold).
+  const rotatedBugsq = rotateAndCapBugsquasher(bugsquasherEntries, opts);
 
-  return [...cappedTrain, ...rotatedBugsq].slice(0, opts.maxFanout);
+  return [...trainEntries, ...rotatedBugsq].slice(0, opts.maxFanout);
 }
 
 /**
- * Groups by `repo` in first-appearance order, keeps at most `cap` entries
- * per group, then flattens back — the group ordering is stable so callers
- * with e.g. registry order in the input get registry order out.
+ * Per-repo rotate-then-cap for the bugsquasher group: groups by repo in
+ * first-appearance order, rotates each repo's entries by `runOffset`, then
+ * takes at most `perRepoCap` from each — so a repo with more than the cap
+ * sees a DIFFERENT window every run rather than the same entries forever.
  */
-function capPerRepo<T extends { repo: string }>(items: T[], cap: number): T[] {
-  if (cap <= 0) return [];
+function rotateAndCapBugsquasher<T extends { repo: string }>(items: T[], opts: OrderOptions): T[] {
+  const { perRepoCap, runOffset } = opts;
   const byRepo = new Map<string, T[]>();
   for (const item of items) {
     const arr = byRepo.get(item.repo) ?? [];
@@ -109,7 +113,10 @@ function capPerRepo<T extends { repo: string }>(items: T[], cap: number): T[] {
   }
   const result: T[] = [];
   for (const arr of byRepo.values()) {
-    for (let i = 0; i < arr.length && i < cap; i++) result.push(arr[i]);
+    const rotated = rotateArray(arr, runOffset * perRepoCap);
+    const cap = Math.max(perRepoCap, 0);
+    if (cap === 0) continue;
+    for (let i = 0; i < rotated.length && i < cap; i++) result.push(rotated[i]);
   }
   return result;
 }

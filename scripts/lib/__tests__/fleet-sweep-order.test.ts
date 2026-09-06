@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { orderFleetSweepEntries, type FleetSweepEntry } from "../fleet-sweep-order.js";
 
-// ops#327 — squasher fleet sweep starvation. Both directions per Rule #322:
-// the "planted" tests reproduce the exact starvation from the issue body
-// (webhook-router#915 at position 28 of 30, sliced off every cycle) and
-// prove the ordering fix evaluates it in the first cycle; the "control"
-// tests assert the shape the fix must not disturb.
+// ops#327 / ops#341 P1+P2 — squasher fleet sweep starvation.
+// P1: rotate per-repo BEFORE capping — a repo's 6th+ bugsquasher entries
+//   see a different window every run (the old shape rotated AFTER capping,
+//   so rotation only reordered the same first N entries forever).
+// P2: exempt the train group from per-repo capping — Kevin's door-word
+//   label is never silently dropped behind a per-repo limit (the global
+//   fanout still bounds it).
 
 function mkTrain(repo: string, pr: string): FleetSweepEntry {
   return {
@@ -51,33 +53,36 @@ describe("orderFleetSweepEntries (ops#327)", () => {
     // #915 must be present, and at position 0 (queued-first, fleet-wide).
     expect(ordered[0]).toEqual(mkTrain("studio-b-ai/webhook-router", "915"));
     expect(ordered.some((e) => e.pr_number === "915" && e.train_ready)).toBe(true);
-    // No repo occupies more than the per-repo cap.
+    // No repo occupies more than the per-repo cap IN THE BUGSQUASHER GROUP.
+    // Train group is exempt from per-repo cap (P2); Kevin's door word is never
+    // silently dropped behind a per-repo limit.
     for (const repo of new Set(entries.map((e) => e.repo))) {
-      const trainCount = ordered.filter((e) => e.repo === repo && e.train_ready).length;
       const bugsqCount = ordered.filter((e) => e.repo === repo && !e.train_ready).length;
-      expect(trainCount).toBeLessThanOrEqual(5);
       expect(bugsqCount).toBeLessThanOrEqual(5);
     }
     // Global cap holds.
     expect(ordered.length).toBeLessThanOrEqual(20);
   });
 
-  it("planted (stable-order starvation): rotation by runOffset moves the tail entries into the window on subsequent runs", () => {
-    // 30 bugsquasher PRs in one repo, per-repo cap of 30 so the cap does
-    // not itself do the rotation's job — proves the rotation contributes.
-    const entries: FleetSweepEntry[] = Array.from({ length: 30 }, (_, i) =>
+  it("planted (P1 per-repo rotation-before-cap): a repo with 13 bugsquasher PRs at perRepoCap=5 covers all 13 across consecutive runs", () => {
+    // The old shape rotated AFTER capping: `runOffset` reordered the same
+    // first-5 entries forever and the 6th+ were permanently starved.
+    // Rotating each repo's entries BEFORE capping fixes it — across
+    // ⌈13/5⌉ = 3 offsets the union covers all 13 entries.
+    const entries: FleetSweepEntry[] = Array.from({ length: 13 }, (_, i) =>
       mkBugsq("studio-b-ai/webhook-router", `${900 + i}`),
     );
 
-    const runA = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 30, runOffset: 0 });
-    const runB = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 30, runOffset: 20 });
+    const covered = new Set<string>();
+    for (let offset = 0; offset < 3; offset++) {
+      const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 5, runOffset: offset });
+      // Each run gets at most 5 per repo (global fanout is 20 but only one repo).
+      expect(ordered.length).toBeLessThanOrEqual(5);
+      for (const e of ordered) covered.add(e.pr_number);
+    }
 
-    // Run A evaluates 900..919; run B (offset 20) evaluates 920..929 then 900..909.
-    // The union covers every entry across two runs — no PR is stably starved.
-    const covered = new Set<string>([...runA.map((e) => e.pr_number), ...runB.map((e) => e.pr_number)]);
-    for (let i = 0; i < 30; i++) expect(covered.has(`${900 + i}`)).toBe(true);
-    // And the two runs' first entries are different — the order actually moved.
-    expect(runA[0].pr_number).not.toBe(runB[0].pr_number);
+    // All 13 entries were covered across the three rotations.
+    for (let i = 0; i < 13; i++) expect(covered.has(`${900 + i}`)).toBe(true);
   });
 
   it("control: a small input (train + bugsquasher, all under per-repo cap and fanout) is returned exactly in queued-first order", () => {
@@ -133,16 +138,18 @@ describe("orderFleetSweepEntries (ops#327)", () => {
 
     const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 10, runOffset: -1 });
 
-    // -1 mod 4 → 3, so element at index 3 becomes head.
-    expect(ordered.map((e) => e.pr_number)).toEqual(["3", "0", "1", "2"]);
+    // -1 * 10 = -10, -10 mod 4 → 2, so element at index 2 becomes head.
+    expect(ordered.map((e) => e.pr_number)).toEqual(["2", "3", "0", "1"]);
   });
 
-  it("control: perRepoCap of 0 evaluates no bugsquasher entries — a stop-the-world kill switch", () => {
+  it("control: perRepoCap of 0 evaluates only train entries — the bugsquasher group is empty (P2: train exempt from per-repo cap)", () => {
     const entries: FleetSweepEntry[] = [mkBugsq("studio-b-ai/bolt-wms", "1"), mkTrain("studio-b-ai/bolt-wms", "2")];
 
     const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 0, runOffset: 0 });
 
-    expect(ordered).toEqual([]);
+    // Train entries survive perRepoCap=0 (Kevin's door word is never dropped).
+    // Bugsquasher entries are 0-capped.
+    expect(ordered).toEqual([mkTrain("studio-b-ai/bolt-wms", "2")]);
   });
 
   it("control: maxFanout cap applies to the queued-first ordering (queued fills first, bugsquasher takes what remains)", () => {
@@ -156,6 +163,18 @@ describe("orderFleetSweepEntries (ops#327)", () => {
 
     // Queued fills first (8 queued, capped to 5).
     expect(ordered.length).toBe(5);
+    expect(ordered.every((e) => e.train_ready)).toBe(true);
+  });
+
+  it("planted (P2 train exempt from per-repo cap): a repo with 8 queued PRs at perRepoCap=2 still contributes all 8 (global fanout bounds them)", () => {
+    const entries: FleetSweepEntry[] = Array.from({ length: 8 }, (_, i) =>
+      mkTrain("studio-b-ai/repo-a", `t${i}`),
+    );
+    // maxFanout=5, perRepoCap=2 — the old shape would cap at 2 per repo
+    // and silently drop Kevin's door word for t2..t7. With P2, all 8 train
+    // entries flow through and the global fanout takes the first 5.
+    const ordered = orderFleetSweepEntries(entries, { maxFanout: 5, perRepoCap: 2, runOffset: 0 });
+    expect(ordered.map((e) => e.pr_number)).toEqual(["t0", "t1", "t2", "t3", "t4"]);
     expect(ordered.every((e) => e.train_ready)).toBe(true);
   });
 
