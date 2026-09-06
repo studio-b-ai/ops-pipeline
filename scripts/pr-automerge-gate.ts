@@ -637,7 +637,7 @@ async function evaluate(
     // identical path (Rule #109).
     const fresh = fetchPr(repo, pr);
     const revalidateDeltas = codeFixRevalidateDeltas(
-      { headRefOid: prJson.headRefOid, authorLogin: author, labels },
+      { headRefOid: prJson.headRefOid, authorLogin: author, labels, statusCheckRollup: prJson.statusCheckRollup },
       {
         headRefOid: fresh.headRefOid,
         authorLogin: fresh.author.login,

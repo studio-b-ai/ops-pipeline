@@ -3,6 +3,7 @@ import {
   classifyDiffFile,
   classifyPrDiffClass,
   codeFixRevalidateDeltas,
+  withoutLabelWokenReruns,
   compileSafePathGlob,
   evaluateMergeReadiness,
   gateDecision,
@@ -1221,5 +1222,81 @@ describe("codeFixRevalidateDeltas", () => {
     // `tests` too, which never reported on the fresh read. Isolates the named leg.
     const deltas = codeFixRevalidateDeltas(ORIGINAL, fresh(), { ...OPTS, requiredChecks: ["build", "tests"] });
     expect(deltas.some((d) => d.includes("named checks regressed") && d.includes("'tests' never reported"))).toBe(true);
+  });
+});
+
+
+// ─────────────────── the label-flap loop (bolt-wms#2120, 2026-09-06; ops#342's mechanism) ───────────────────
+// The gate's own `automerge:code-fix` write wakes `require-review-label.yml` (triggered on
+// `labeled`/`unlabeled`); that QUEUED run made `isRollupClean` false at revalidate on
+// EVERY pass, the abort pulled the label, the `unlabeled` event woke another run —
+// ~1,000 Actions runs in 57 min. Both verdicts planted (Rules #322/#471): the exact
+// #2120 shape must return ZERO deltas (the non-default, known-GOOD), and a queued
+// REQUIRED check or a check with no clean original must still regress.
+describe("codeFixRevalidateDeltas ignores label-woken re-runs of already-clean, non-required checks (bolt-wms#2120)", () => {
+  const MERGE_LABEL = "automerge:code-fix";
+  const NO_SKIPS: ReadonlySet<string> = new Set();
+  // pg-enum-drift-exempt: GitHub Actions check-run status/conclusion fields, not a Postgres enum
+  const ok = (name: string, at = "2026-09-06T05:00:00Z"): RollupItem => ({ name, status: "COMPLETED", conclusion: "SUCCESS", completedAt: at });
+  const queued = (name: string, at = "2026-09-06T06:08:00Z"): RollupItem => ({ name, status: "QUEUED", conclusion: null, startedAt: at });
+  const ORIGINAL_ROLLUP: RollupItem[] = [ok("Client — TypeScript + Build"), ok("Server — TypeScript + Tests"), ok("Require review label")];
+  const OPTS = { mergeLabel: MERGE_LABEL, sanctionedSkips: NO_SKIPS, requiredChecks: ["Client — TypeScript + Build", "Server — TypeScript + Tests"] };
+  const original = { headRefOid: "a56887c", authorLogin: "kbibelhausen", labels: ["reviewed", "bugsquasher"], statusCheckRollup: ORIGINAL_ROLLUP };
+  const freshWith = (rollup: RollupItem[]) => ({
+    headRefOid: "a56887c",
+    authorLogin: "kbibelhausen",
+    labels: ["reviewed", "bugsquasher", MERGE_LABEL],
+    state: "OPEN",
+    isDraft: false,
+    mergeStateStatus: "CLEAN",
+    statusCheckRollup: rollup,
+  });
+
+  it("known-GOOD (the #2120 shape): the label write woke a QUEUED 'Require review label' whose prior run was SUCCESS and which is not required — ZERO deltas", () => {
+    const fresh = freshWith([...ORIGINAL_ROLLUP, queued("Require review label")]);
+    expect(codeFixRevalidateDeltas(original, fresh, OPTS)).toEqual([]);
+  });
+
+  it("known-BAD: a QUEUED re-run of a REQUIRED check still regresses readiness", () => {
+    const fresh = freshWith([...ORIGINAL_ROLLUP, queued("Server — TypeScript + Tests")]);
+    const deltas = codeFixRevalidateDeltas(original, fresh, OPTS);
+    expect(deltas.some((d) => d.includes("merge readiness regressed"))).toBe(true);
+  });
+
+  it("known-BAD: a QUEUED check with no terminal-clean original under its name still regresses readiness", () => {
+    const fresh = freshWith([...ORIGINAL_ROLLUP, queued("brand-new-check")]);
+    const deltas = codeFixRevalidateDeltas(original, fresh, OPTS);
+    expect(deltas.some((d) => d.includes("merge readiness regressed"))).toBe(true);
+  });
+
+  it("known-BAD: a check that was FAILING in the original and is now QUEUED still regresses (only a clean prior run is exempt)", () => {
+    const failedBefore: RollupItem = { name: "Require review label", status: "COMPLETED", conclusion: "FAILURE", completedAt: "2026-09-06T05:00:00Z" };
+    const orig = { ...original, statusCheckRollup: [ok("Client — TypeScript + Build"), ok("Server — TypeScript + Tests"), failedBefore] };
+    const fresh = freshWith([...orig.statusCheckRollup, queued("Require review label")]);
+    expect(codeFixRevalidateDeltas(orig, fresh, OPTS).some((d) => d.includes("merge readiness regressed"))).toBe(true);
+  });
+
+  it("control: without an original rollup (older callers) nothing is exempt — the pre-fix behaviour", () => {
+    const fresh = freshWith([...ORIGINAL_ROLLUP, queued("Require review label")]);
+    const { statusCheckRollup: _omit, ...noRollup } = original;
+    expect(codeFixRevalidateDeltas(noRollup, fresh, OPTS).some((d) => d.includes("merge readiness regressed"))).toBe(true);
+  });
+
+  it("control: a terminal FAILURE of the woken check is never filtered — the fresh rollup judges it", () => {
+    const failedNow: RollupItem = { name: "Require review label", status: "COMPLETED", conclusion: "FAILURE", completedAt: "2026-09-06T06:09:00Z" };
+    const fresh = freshWith([...ORIGINAL_ROLLUP, failedNow]);
+    expect(codeFixRevalidateDeltas(original, fresh, OPTS).some((d) => d.includes("merge readiness regressed"))).toBe(true);
+  });
+
+  it("unit: withoutLabelWokenReruns keeps terminal, required, unkeyed, and no-clean-original entries; drops only the exempt shape", () => {
+    const unkeyedQueued: RollupItem = { status: "QUEUED", conclusion: null };
+    const fresh = [...ORIGINAL_ROLLUP, queued("Require review label"), queued("Server — TypeScript + Tests"), queued("brand-new-check"), unkeyedQueued];
+    const kept = withoutLabelWokenReruns(fresh, ORIGINAL_ROLLUP, OPTS);
+    expect(kept).toHaveLength(fresh.length - 1);
+    expect(kept.some((i) => i.name === "Require review label" && i.status === "QUEUED")).toBe(false);
+    expect(kept.some((i) => i.name === "Server — TypeScript + Tests" && i.status === "QUEUED")).toBe(true);
+    expect(kept.some((i) => i.name === "brand-new-check")).toBe(true);
+    expect(kept).toContain(unkeyedQueued);
+    expect(withoutLabelWokenReruns(fresh, undefined, OPTS)).toBe(fresh);
   });
 });
