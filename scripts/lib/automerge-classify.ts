@@ -1006,6 +1006,43 @@ export function isRollupClean(
  * Supersession semantics are the same as isRollupClean's (grouped by name, any
  * in-flight entry blocks, latest terminal wins, ties must ALL be SUCCESS).
  */
+/**
+ * Drop from a FRESH rollup every NON-TERMINAL or terminal-CANCELLED entry whose name was
+ * TERMINAL + CLEAN in the ORIGINAL (pre-label) snapshot and is not a required check.
+ * Everything else — a required check in any state, any entry with no clean original
+ * under the same name, an unkeyed entry, and every other terminal entry (SUCCESS,
+ * FAILURE, …) — passes through untouched, so `isRollupClean` still judges them. With no original rollup (older callers) nothing is
+ * exempt (the pre-2026-09-06 behaviour). Exported for the planted tests.
+ */
+export function withoutLabelWokenReruns(
+  fresh: RollupItem[],
+  original: RollupItem[] | undefined,
+  opts: { sanctionedSkips: ReadonlySet<string>; requiredChecks: string[] },
+): RollupItem[] {
+  if (!original || original.length === 0) return fresh;
+  const required = new Set(opts.requiredChecks);
+  const cleanBefore = new Set<string>();
+  original.forEach((item, index) => {
+    const key = rollupKey(item, index);
+    if (key.startsWith("named:") && isTerminal(item) && isItemClean(item, opts.sanctionedSkips)) cleanBefore.add(key);
+  });
+  // Exempt shapes under an exempt name: NON-TERMINAL (queued / in progress) and
+  // terminal-CANCELLED. The CANCELLED leg is the measured #2120 shape (bolt-wms#2166:
+  // 851 of 852 woken runs were CANCELLED within seconds by the workflow's own
+  // `concurrency: cancel-in-progress: true`, so a non-terminal-only filter would not have
+  // broken the loop). A cancellation is a supersession, not a verdict; FAILURE and every
+  // other unclean terminal conclusion still regress readiness.
+  return fresh.filter((item, index) => {
+    const key = rollupKey(item, index);
+    if (!key.startsWith("named:")) return true;
+    const name = key.slice("named:".length);
+    if (required.has(name)) return true;
+    if (!cleanBefore.has(key)) return true;
+    if (!isTerminal(item)) return false;
+    return !(item.status === "COMPLETED" && item.conclusion === "CANCELLED");
+  });
+}
+
 export function requiredChecksSatisfied(
   rollup: RollupItem[],
   requiredNames: string[],
@@ -1115,7 +1152,7 @@ export interface RevalidateSnapshot {
  *    (a human pulling `bugsquasher`, a `train:hold`-style stop label landing) is.
  */
 export function codeFixRevalidateDeltas(
-  original: Pick<RevalidateSnapshot, "headRefOid" | "authorLogin" | "labels">,
+  original: Pick<RevalidateSnapshot, "headRefOid" | "authorLogin" | "labels"> & Partial<Pick<RevalidateSnapshot, "statusCheckRollup">>,
   fresh: RevalidateSnapshot,
   opts: { mergeLabel: string; sanctionedSkips: ReadonlySet<string>; requiredChecks: string[] },
 ): string[] {
@@ -1128,10 +1165,24 @@ export function codeFixRevalidateDeltas(
     deltas.push(`author changed: ${original.authorLogin} → ${fresh.authorLogin}`);
   }
 
+  // 2026-09-06 (the bolt-wms#2120 label-flap loop, ops#342's mechanism): the gate's own
+  // `automerge:code-fix` label write wakes any repo workflow triggered on
+  // `pull_request: [labeled, unlabeled]` (bolt-wms / studiob / webhook-router
+  // `require-review-label.yml`). That fresh run is non-terminal at revalidate time, so
+  // the readiness leg regressed on EVERY code-fix pass, the abort removed the label, the
+  // `unlabeled` event woke another run, and the loop burned ~1,000 Actions runs in 57 min
+  // — the gate invalidated its own revalidate. The revalidate now ignores a fresh
+  // NON-TERMINAL entry when (a) the original snapshot held a TERMINAL, CLEAN entry under
+  // the same name, and (b) that name is not a required check — i.e. the only thing that
+  // changed is that the gate's own label woke a re-run of a check that was already green.
+  // Required checks (`opts.requiredChecks`) are never exempt: they must be terminal-clean
+  // on the FRESH rollup (the named-checks leg below still runs unfiltered). A check that
+  // was NOT terminal-clean before, or that is required, still regresses readiness.
+  const readinessRollup = withoutLabelWokenReruns(fresh.statusCheckRollup, original.statusCheckRollup, opts);
   const readiness = evaluateMergeReadiness({
     state: fresh.state,
     isDraft: fresh.isDraft,
-    ciClean: isRollupClean(fresh.statusCheckRollup, opts.sanctionedSkips),
+    ciClean: isRollupClean(readinessRollup, opts.sanctionedSkips),
     mergeStateStatus: fresh.mergeStateStatus,
   });
   if (!readiness.ready) {
