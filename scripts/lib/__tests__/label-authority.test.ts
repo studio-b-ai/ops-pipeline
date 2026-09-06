@@ -48,6 +48,54 @@ function baseAuthorityInput(overrides: Partial<AuthorityInput> = {}): AuthorityI
 }
 
 describe("evaluateLabelAuthority", () => {
+  // ───── 2026-09-06 (Kevin "that works"): the HUMAN review receipt — the `reviewed`/`hold` pair ─────
+
+  it("authorizes a roster human's `reviewed` applied after the head (the review receipt)", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: ["reviewed", "bugsquasher"],
+        timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "reviewed")],
+        labels: { ready: "reviewed", hold: TRAIN_HOLD_LABEL },
+      }),
+    );
+    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1 } });
+  });
+
+  it("the fleet bot's `reviewed` never counts — the gate exception is `queued`-only, even with bugsquasher + candidate", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: ["reviewed", ...GATE_AUTHORITY_REQUIRED_LABELS],
+        timeline: [commitAt(0), labeledBy(GATE_AUTHORITY_LOGIN, 1, "reviewed")],
+        labels: { ready: "reviewed", hold: TRAIN_HOLD_LABEL },
+      }),
+    );
+    expect(verdict.authorized).toBe(false);
+    expect((verdict as { reason: string }).reason).toBe("bot-actor");
+  });
+
+  it("a `reviewed` older than the head is stale (a commit after it)", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: ["reviewed"],
+        timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "reviewed"), commitAt(2)],
+        labels: { ready: "reviewed", hold: TRAIN_HOLD_LABEL },
+      }),
+    );
+    expect(verdict.authorized).toBe(false);
+  });
+
+  it("`hold` still wins over a valid `reviewed`", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: ["reviewed", TRAIN_HOLD_LABEL],
+        timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "reviewed")],
+        labels: { ready: "reviewed", hold: TRAIN_HOLD_LABEL },
+      }),
+    );
+    expect(verdict.authorized).toBe(false);
+    expect((verdict as { reason: string }).reason).toBe("hold-present");
+  });
+
   // ───── 2026-09-06: the gate's own `queued` (Kevin "go") — both verdicts planted (#471) ─────
 
   it("authorizes the fleet bot's queued when the PR carries bugsquasher + candidate (the gate's tripwire)", () => {
