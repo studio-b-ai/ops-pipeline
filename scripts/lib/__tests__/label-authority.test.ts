@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   formatStaleLabelRemovalReceipt,
   hasAuthoritySnapshotDrifted,
+  GATE_AUTHORITY_LOGIN,
+  GATE_AUTHORITY_REQUIRED_LABELS,
   MERGE_AUTHORITY_LOGINS,
   resolveAuthorityLogins,
   TRAIN_HOLD_LABEL,
@@ -46,6 +48,61 @@ function baseAuthorityInput(overrides: Partial<AuthorityInput> = {}): AuthorityI
 }
 
 describe("evaluateLabelAuthority", () => {
+  // ───── 2026-09-06: the gate's own `queued` (Kevin "go") — both verdicts planted (#471) ─────
+
+  it("authorizes the fleet bot's queued when the PR carries bugsquasher + candidate (the gate's tripwire)", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: [TRAIN_READY_LABEL, ...GATE_AUTHORITY_REQUIRED_LABELS],
+        timeline: [commitAt(0), labeledBy(GATE_AUTHORITY_LOGIN, 1)],
+      }),
+    );
+    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: GATE_AUTHORITY_LOGIN, position: 1 } });
+  });
+
+  it("still refuses the fleet bot's queued when `candidate` is missing (no gate tripwire)", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: [TRAIN_READY_LABEL, "bugsquasher"],
+        timeline: [commitAt(0), labeledBy(GATE_AUTHORITY_LOGIN, 1)],
+      }),
+    );
+    expect(verdict.authorized).toBe(false);
+    expect((verdict as { reason: string }).reason).toBe("bot-actor");
+  });
+
+  it("still refuses any OTHER bot even with both labels present", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: [TRAIN_READY_LABEL, ...GATE_AUTHORITY_REQUIRED_LABELS],
+        timeline: [commitAt(0), labeledBy("github-actions[bot]", 1)],
+      }),
+    );
+    expect(verdict.authorized).toBe(false);
+    expect((verdict as { reason: string }).reason).toBe("bot-actor");
+  });
+
+  it("the gate's queued is still stale when a commit lands after it", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: [TRAIN_READY_LABEL, ...GATE_AUTHORITY_REQUIRED_LABELS],
+        timeline: [commitAt(0), labeledBy(GATE_AUTHORITY_LOGIN, 1), commitAt(2)],
+      }),
+    );
+    expect(verdict.authorized).toBe(false);
+  });
+
+  it("`hold` still wins over the gate's queued", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: [TRAIN_READY_LABEL, TRAIN_HOLD_LABEL, ...GATE_AUTHORITY_REQUIRED_LABELS],
+        timeline: [commitAt(0), labeledBy(GATE_AUTHORITY_LOGIN, 1)],
+      }),
+    );
+    expect(verdict.authorized).toBe(false);
+    expect((verdict as { reason: string }).reason).toBe("hold-present");
+  });
+
   // ───── Positive baseline + negative controls (Rule #322) ─────
 
   it("authorizes when train:ready was labeled by a roster actor with no later commit/force-push", () => {

@@ -428,7 +428,14 @@ const TEST_ONLY_LINE_CAP = 40;
 // legs the others don't have: an allowlist-primary safe_path_globs requirement, a
 // built-in non-overridable denylist backstop, and a per-repo named-checks
 // requirement (`requiredChecksSatisfied`) — plus the same paid independent review.
-const CODE_FIX_LINE_CAP = 150;
+// 2026-09-06 (Kevin, "go" on the Engineer's strictness read): 150 → 400. Of the 19
+// verified-ready PRs on his queue that night, 8 were over 150 and every one had been
+// read by a reviewer AND an adversarial verifier without a single disagreement — the
+// cap was doing work the paid second-model review already does. The class still
+// requires safe_path_globs + the denylist + named checks + review CLEAN; a customer-
+// facing surface without a QA receipt stays a human's call by NOT being in any
+// repo's safe_path_globs (theme/portal excluded; price-sync's extensions/** excluded).
+const CODE_FIX_LINE_CAP = 400;
 
 // Allowlist, not a denylist — same rationale as CLEAN_LEGACY_STATES/CLEAN_CONCLUSIONS
 // above: only these path shapes count as CI infrastructure, so an unrecognized
