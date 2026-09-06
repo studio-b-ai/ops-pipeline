@@ -20,7 +20,11 @@
  * (both legs, the WINDOW_BLOCKED re-dispatch law, the #269/#448 timeout ladder) lives in
  * scripts/lib/restart-train-fire.ts — read its header first. RUNG 1 (ops-pipeline#172) added two
  * things on top of rung 0's dry-run scheduling, both gated behind `--post` like everything else
- * this worker writes:
+ * this worker writes. ops-pipeline#326 (2026-09-06 patch): the machinery-issue hold check now
+ * partitions on the `transient` label — an issue the filer labeled `transient` at open time (a
+ * Railway timeout, boot burst, or #208/#298-class blip) does NOT hold the train; it auto-closes
+ * on the next `checkHold`-passing tick as the recovery receipt (#358). A real machinery bug (no
+ * `transient` label) still holds as today (#161/#165 unchanged).
  *
  *   (1) Leg A kills v1's D1 defect in ticket assembly: `train:ready` authority now comes from
  *       GitHub-attributed GraphQL timeline events (label-authority.ts), never a parseable comment
@@ -181,11 +185,13 @@ import {
   mergeTouchesDeployPaths,
   observeStateKey,
   observeTimeoutVerdict,
+  partitionMachineryIssues,
   pickDeployJob,
   pickLatestRun,
   TRAIN_IN_FLIGHT_LABEL,
   TRAIN_READY_LABEL,
   TRAIN_HOLD_LABEL,
+  TRANSIENT_MACHINERY_LABEL,
   type CaRunClassification,
   type StudiobDeployClassification,
   type WorkflowJobLike,
@@ -257,18 +263,63 @@ async function checkHold(target: { repo: string; number: number }): Promise<{ he
   if (holdLabeled) return { held: true, reason: `${TRAIN_HOLD_LABEL} label on --target` };
   // Rung 3: any open restart-train machinery issue = the train is locked pending a human
   // diagnosis (#161/#165 — closing the issue releases it). The probe fails CLOSED: an unknown
-  // lock state must never fire a merge.
+  // lock state must never fire a merge. ops-pipeline#326: an issue ALSO carrying the
+  // `transient` label at filing (Railway timeout, boot burst, a #208/#298-class blip) is
+  // partitioned OUT of the hold set — it doesn't hold the train and is auto-closed on this
+  // same not-held tick (see autoCloseTransientMachineryIssues below). `includeLabels: true` is
+  // REQUIRED for the partition to see the transient label; without it every issue looks
+  // un-labeled and every transient blip holds as before (fail-closed direction of #322).
   let machineryOpen: IssueRef[];
   try {
-    machineryOpen = listIssuesByLabel(MACHINERY_REPO, MACHINERY_LABEL, "open");
+    machineryOpen = listIssuesByLabel(MACHINERY_REPO, MACHINERY_LABEL, "open", 1000, { includeLabels: true });
   } catch {
     return { held: true, reason: "machinery-issue probe failed — fail-closed (#161)" };
   }
-  if (machineryOpen.length > 0) {
-    const first = machineryOpen[0];
+  const { holding } = partitionMachineryIssues(machineryOpen);
+  if (holding.length > 0) {
+    const first = holding[0];
     return { held: true, reason: `open restart-train machinery issue: ops-pipeline#${first.number} — ${first.title}` };
   }
   return { held: false, reason: "" };
+}
+
+/**
+ * Auto-closes open machinery issues carrying the `transient` label (ops-pipeline#326).
+ *
+ * Fires when THIS scheduled run passes `checkHold` without a real-bug machinery issue — the fact
+ * that the run reached checkHold IS the recovery signal for any prior transient failure of the
+ * same workflow (#358: escalate once at ~3 fails, again only on recovery). Structurally #165
+ * auto-reconcile: the open transient issue IS the condition, the condition cleared, so the
+ * PRODUCER (this worker) closes it. `--post` gates the close (mirrors resolveStuckObserveIssues);
+ * every failure is non-fatal (logged, never thrown) — a subsequent close failure must not
+ * escalate this tick or hold the train (there is no real machinery bug left to hold on).
+ */
+async function autoCloseTransientMachineryIssues(post: boolean, nowIso: string): Promise<void> {
+  if (!post) return;
+  let openIssues: IssueRef[];
+  try {
+    openIssues = listIssuesByLabel(MACHINERY_REPO, MACHINERY_LABEL, "open", 1000, { includeLabels: true });
+  } catch (err) {
+    console.log(
+      `[restart-train] transient auto-close: probe failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+  const { transient } = partitionMachineryIssues(openIssues);
+  for (const issue of transient) {
+    try {
+      closeIssue(
+        MACHINERY_REPO,
+        issue.number,
+        `Auto-closed by restart-train at ${nowIso} (ops-pipeline#326): the next scheduled run reached checkHold without a real-bug machinery issue — the transient failure recovered per design (#358 escalate once at ~3 fails, again only on recovery). Re-open by hand if this was NOT the recovery you expected (the \`${TRANSIENT_MACHINERY_LABEL}\` label at filing declares "the filer knows"; strip it to make this issue a hard hold).`,
+      );
+      console.log(`[restart-train] transient auto-close: closed ops-pipeline#${issue.number} — ${issue.title}`);
+    } catch (err) {
+      console.log(
+        `[restart-train] transient auto-close: could not close ops-pipeline#${issue.number} (non-fatal, retries next tick): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 }
 
 // ───────────────────────────── fact-builders ─────────────────────────────
@@ -1555,6 +1606,13 @@ async function main(): Promise<void> {
     await postHeldIfNotDuped(target, hold.reason, flags.post);
     return;
   }
+
+  // ops-pipeline#326: not-held means every open machinery issue on ops-pipeline is either
+  // absent or `transient`-labeled (a Railway timeout / boot burst / #208/#298-class blip the
+  // FILER already labeled as by-design). Reaching this line IS the recovery signal for those
+  // — close them as the auto-reconcile receipt (#165), same design as resolveStuckObserveIssues
+  // for the observe phase. Non-fatal on failure; a real bug still holds via checkHold above.
+  await autoCloseTransientMachineryIssues(flags.post, flags.now);
 
   const rawCalendarComments = await fetchCalendarComments();
   // Replay clamp (see clampCommentsToNow's doc): no fact from after `now` may be parsed.
