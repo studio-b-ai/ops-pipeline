@@ -18,7 +18,9 @@
  *      gate), ci-infra (<=40 lines, every file a declarative `.github/{workflows,
  *      actions}/**.y(a)ml` path, no src/**, no dependency/migration files), or
  *      test-only (<=40 lines, every file a test file/setup, zero src/** RUNTIME
- *      files, no dependency/migration files), or code-fix (<=150 lines, runtime
+ *      files, no dependency/migration files), or code-fix (<=400 lines — the live
+ *      CODE_FIX_LINE_CAP in automerge-classify.ts; this line read 150 until
+ *      2026-09-06 and had been stale since the cap moved, runtime
  *      paths allowed — guarded instead by leg 7's allowlist/denylist/named-checks;
  *      ops#190 B1, resolves LAST so the longer-proven classes always win). A
  *      mixed-shape diff (e.g. a workflow file AND a test file together) satisfies
@@ -113,6 +115,8 @@ import {
   postAuthorityReceipt,
   formatStaleLabelRemovalReceipt,
   hasAuthoritySnapshotDrifted,
+  codeFixLabelFlap,
+  type FlapVerdict,
   QUEUED_LABEL,
   HOLD_LABEL,
   QUEUED_LABEL_PAIR,
@@ -613,6 +617,52 @@ async function evaluate(
   };
 
   if (prClass === "code-fix") {
+    // ── Flap circuit-breaker (bolt-wms#2120, 2026-09-06). The label write below is
+    // not inert: on a repo whose CI listens on `pull_request: [labeled, unlabeled]`
+    // it wakes a fresh check-run, whose non-terminal state `isRollupClean` correctly
+    // refuses, which deltas the revalidate below, which removes the label, which
+    // wakes ANOTHER run. Every pass through that is individually fail-closed and
+    // correct — what the gate lacks is memory that this PR already burned a cycle.
+    // Read that memory off the PR's OWN timeline before writing the label again.
+    // See `codeFixLabelFlap` for the incident numbers.
+    //
+    // On a refusal the guard deliberately leaves any PRE-EXISTING merge label in
+    // place rather than tidying it away: the `unlabeled` event is the OTHER half of
+    // the loop, so removing it here would light exactly the CI run this guard exists
+    // to stop. A stale label on an unmerged PR is the safe residue — a later human
+    // merge then fires the B2 tripwire, which is the watched outcome we want anyway.
+    let flap: FlapVerdict;
+    try {
+      flap = codeFixLabelFlap(fetchAuthorityTimeline(repo, pr), CODE_FIX_MERGE_LABEL);
+    } catch (err) {
+      // The timeline is this guard's only instrument; an unreadable one means the
+      // guard is blind, and a blind guard must not wave the label write through
+      // (Rule #322 — an oracle that cannot answer produces no positives).
+      const message = err instanceof Error ? err.message : String(err);
+      flap = {
+        flapping: true,
+        addsSinceHeadMove: null,
+        detail: `the authority timeline could not be read, so the flap guard is blind — refusing the label write rather than risking the loop. Underlying error: ${message}`,
+      };
+    }
+    if (flap.flapping) {
+      console.log(
+        `[no-op] pr-automerge-gate ${repo}#${pr}: code-fix passed every leg but the flap guard REFUSED the ` +
+          `'${CODE_FIX_MERGE_LABEL}' write — merge ABORTED and NOT retried (Rules #109/#161). ${flap.detail}`,
+      );
+      console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "flap-guard", reasons: [flap.detail] }));
+      await enrollGateRefusal({
+        repo,
+        pr,
+        headSha: prJson.headRefOid,
+        leg: "flap-guard",
+        reasons: [flap.detail],
+        additions: prJson.additions,
+        deletions: prJson.deletions,
+      });
+      return;
+    }
+
     const labelPreexisting = labels.includes(CODE_FIX_MERGE_LABEL);
     try {
       addLabel(repo, pr, CODE_FIX_MERGE_LABEL);
