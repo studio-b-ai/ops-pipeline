@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -53,7 +53,6 @@ describe("readState", () => {
   });
 
   it("survives corrupt JSON — returns empty sentinel, never throws", () => {
-    const { writeFileSync } = await import("node:fs");
     const path = stateFilePath("corrupt", tmpDir);
     writeFileSync(path, "{not json", "utf-8");
     const s = readState("corrupt", tmpDir);
@@ -61,21 +60,28 @@ describe("readState", () => {
   });
 
   it("survives missing count field — defaults to 0", () => {
-    writeState({ shift_id: SHIFT_ID, defects: [], last_updated: NOW } as DefectState, "partial", tmpDir);
+    const path = stateFilePath("partial", tmpDir);
+    writeFileSync(path, JSON.stringify({ shift_id: SHIFT_ID, defects: [], last_updated: NOW }), "utf-8");
     const s = readState("partial", tmpDir);
     expect(s.count).toBe(0);
   });
 
   it("filters invalid defect entries", () => {
-    writeState(
-      {
+    const path = stateFilePath("mixed", tmpDir);
+    writeFileSync(
+      path,
+      JSON.stringify({
         shift_id: SHIFT_ID,
         count: 2,
-        defects: [{ at: NOW, description: "valid" }, { not_a_defect: true }, { at: NOW }, { description: "no-at" }],
+        defects: [
+          { at: NOW, description: "valid" },
+          { not_a_defect: true },
+          { at: NOW },
+          { description: "no-at" },
+        ],
         last_updated: NOW,
-      },
-      "mixed",
-      tmpDir,
+      }),
+      "utf-8",
     );
     const s = readState("mixed", tmpDir);
     expect(s.defects).toHaveLength(1);
