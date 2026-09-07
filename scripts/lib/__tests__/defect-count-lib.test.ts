@@ -48,8 +48,10 @@ describe("readState", () => {
 
   it("sanitises seat names for the file path", () => {
     const p = stateFilePath("my seat/here", tmpDir);
-    expect(p).not.toContain("/");
-    expect(p).not.toContain(" ");
+    const base = p.split("/").pop()!;
+    expect(base).not.toContain("/");
+    expect(base).not.toContain(" ");
+    expect(base).toBe("my_seat_here.json");
   });
 
   it("survives corrupt JSON — returns empty sentinel, never throws", () => {
