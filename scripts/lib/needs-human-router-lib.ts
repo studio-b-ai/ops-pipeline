@@ -247,3 +247,39 @@ export function recallDisposition(input: RecallDecisionInput): RecallDisposition
   if (input.hasReceiptMarker && input.hasAuthorizedDisapproval) return { kind: "close-rejected" };
   return { kind: "none" };
 }
+
+
+/**
+ * Repo → lane-manager seat, the SEED the pr-watch producer also carries
+ * (webhook-router `src/bugsquasher/seat-owner.ts` REPO_LANE_MANAGER; the real registry is
+ * LANES.md). 2026-09-06 (Kevin: "go on 1 and 2" — the staff-bug read): of 35 issues this
+ * router "auto-routed to this repo's lane backlog", 29 carried NO `lane:*` label, so they
+ * landed in nobody's queue and 17 were never touched again. Every route now ALSO applies
+ * `lane:<seat>` — the label IS the queue (the sweep's `never_prefixes: lane:` keeps the
+ * chip off it, and the seat's shift reads it). Unknown repo → no lane label (the receipt
+ * still posts; the issue stays in the repo's own backlog, as before).
+ */
+export const REPO_LANE_MANAGER: Readonly<Record<string, string>> = {
+  "studio-b-ai/ops-pipeline": "mechanic",
+  "studio-b-ai/claude-config-plane": "mechanic",
+  "studio-b-ai/claude-hooks": "mechanic",
+  "studio-b-ai/client-asthetik": "mechanic",
+  "studio-b-ai/acuops-pipeline": "mechanic",
+  "studio-b-ai/webhook-router": "engineer",
+  "studio-b-ai/bolt-wms": "engineer",
+  "studio-b-ai/studiob": "engineer",
+  "studio-b-ai/studiob-price-sync": "engineer",
+  "studio-b-ai/asthetik-trade-theme": "engineer",
+  "studio-b-ai/asthetik-portal": "engineer",
+};
+
+export const LANE_LABEL_COLOR = "0E8A16";
+
+export function laneLabelFor(repoFullName: string): string | null {
+  const seat = REPO_LANE_MANAGER[repoFullName];
+  return seat ? `lane:${seat}` : null;
+}
+
+export function laneLabelDescription(seat: string): string {
+  return `owned by the ${seat} seat's lane backlog (needs-human router, 2026-09-06)`;
+}

@@ -13,6 +13,8 @@ import {
   summarizeDispositions,
   TRUSTED_MARKER_AUTHOR,
   type RouterDecisionInput,
+  laneLabelFor,
+  REPO_LANE_MANAGER,
 } from "../needs-human-router-lib.js";
 
 const ALLOWLIST = new Set(["studio-b-ai/bolt-wms", "studio-b-ai/studiob", "studio-b-ai/studiob-price-sync", "studio-b-ai/webhook-router", "studio-b-ai/asthetik-trade-theme"]);
@@ -242,5 +244,25 @@ describe("summarizeDispositions (Rule #465 — always all six kinds, including z
       "hold-cross-repo": 1,
       "no-probe": 1,
     });
+  });
+});
+
+
+describe("laneLabelFor (2026-09-06 — every route carries the seat's lane label)", () => {
+  it("known-GOOD: the five router-allowlisted repos all resolve to lane:engineer (the seat that reads those queues)", () => {
+    for (const r of ["bolt-wms", "studiob", "studiob-price-sync", "webhook-router", "asthetik-trade-theme"]) {
+      expect(laneLabelFor(`studio-b-ai/${r}`)).toBe("lane:engineer");
+    }
+    expect(laneLabelFor("studio-b-ai/ops-pipeline")).toBe("lane:mechanic");
+  });
+
+  it("known-BAD: an unmapped repo gets no lane label (the receipt still posts; nothing is invented — Rule #294)", () => {
+    expect(laneLabelFor("studio-b-ai/unmapped-repo")).toBeNull();
+    expect(laneLabelFor("")).toBeNull();
+  });
+
+  it("control: every mapped seat is a canonical rail slug", () => {
+    const seats = new Set(Object.values(REPO_LANE_MANAGER));
+    for (const s of seats) expect(["mechanic", "engineer", "dispatcher", "controller", "publicity", "desk", "roundhouse", "general-counsel", "pricing"]).toContain(s);
   });
 });

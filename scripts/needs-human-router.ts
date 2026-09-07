@@ -57,6 +57,9 @@ import {
   summarizeDispositions,
   type Reactor,
   type RouterDisposition,
+  laneLabelFor,
+  laneLabelDescription,
+  LANE_LABEL_COLOR,
 } from "./lib/needs-human-router-lib.js";
 
 const LABEL = "needs-human";
@@ -125,10 +128,12 @@ const isAuthorizedReactor = createAuthorizedReactorChecker();
 
 // ───────────────────────────── receipts ─────────────────────────────
 
-function routeReceipt(probeTrailerUnparsed = false): string {
+function routeReceipt(probeTrailerUnparsed = false, laneLabel: string | null = null): string {
   const lines = [
     ROUTE_RECEIPT_MARKER,
-    "🧭 **Auto-routed to this repo's lane backlog** — the probe comment above is the pre-brief.",
+    laneLabel
+      ? `🧭 **Auto-routed to the \`${laneLabel}\` backlog** — the probe comment above is the pre-brief; the label is the seat's queue.`
+      : "🧭 **Auto-routed to this repo's lane backlog** — the probe comment above is the pre-brief.",
     "",
     "React 👎 here to have the next sweep close this as rejected, or just close it.",
     "",
@@ -337,12 +342,21 @@ async function logMainOutcome(
       // WORK"). ensureLabel is idempotent (`--force`) and runs before addLabel so a caller repo
       // that doesn't yet carry the label bootstraps it on first use.
       const probeTrailerUnparsed = disposition.probeTrailerUnparsed === true;
+      // 2026-09-06 (Kevin "go on 1 and 2"): the route ALSO applies `lane:<seat>` — the label
+      // is the queue. 29 of 35 routed issues had none and sat in nobody's backlog. Applied
+      // AFTER the receipt + label removal (same partial-failure reasoning as above: a failure
+      // here leaves a routed, receipted issue that the next run's recall pass can re-label).
+      const laneLabel = laneLabelFor(repo);
       const result = tryApply(() => {
-        commentIssue(repo, issue.number, routeReceipt(probeTrailerUnparsed));
+        commentIssue(repo, issue.number, routeReceipt(probeTrailerUnparsed, laneLabel));
         removeLabel(repo, issue.number, LABEL);
         if (probeTrailerUnparsed) {
           ensureLabel(repo, PROBE_TRAILER_UNPARSED_LABEL, PROBE_TRAILER_UNPARSED_DESCRIPTION, PROBE_TRAILER_UNPARSED_COLOR);
           addLabel(repo, issue.number, PROBE_TRAILER_UNPARSED_LABEL);
+        }
+        if (laneLabel) {
+          ensureLabel(repo, laneLabel, laneLabelDescription(laneLabel.slice("lane:".length)), LANE_LABEL_COLOR);
+          addLabel(repo, issue.number, laneLabel);
         }
       }, dryRun);
       const describe = probeTrailerUnparsed
