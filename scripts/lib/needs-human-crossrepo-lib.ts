@@ -285,3 +285,25 @@ export function crossRepoRecallDisposition(input: CrossRepoRecallDecisionInput):
   if (input.hasCrossRepoRouteReceipt && input.hasAuthorizedDisapproval) return { kind: "close-rejected" };
   return { kind: "none" };
 }
+
+
+/** Labels a cross-repo twin inherits from its origin issue (ops-pipeline, 2026-09-06 —
+ *  the six-lens backlog sweep found twins filed with ZERO labels: theme#586 and
+ *  price-sync#163 carry `bug` + `zoom-intake` + `P1`, their bolt-wms twins carried
+ *  nothing, so a real bug became an unlabeled default-pool issue and vanished from the
+ *  `bug` count). Routing-relevant labels travel; routing-STATE labels do not:
+ *  `needs-human` (the twin is the human path's OUTPUT, not another input), `lane:*`
+ *  (the target repo's own lane manager routes it), `underway`/`candidate`/`queued`/
+ *  `reviewed`/`hold` (train state), `veto`/`wontfix` (a decision on the origin). */
+const TWIN_LABEL_ALLOW = new Set(["bug", "enhancement", "zoom-intake", "P0", "P1", "P2", "P3"]);
+
+export function twinLabelsFrom(originLabels: ReadonlyArray<{ name?: string | null } | string> | null | undefined): string[] {
+  if (!originLabels) return [];
+  const out: string[] = [];
+  for (const l of originLabels) {
+    const name = typeof l === "string" ? l : l?.name;
+    if (typeof name !== "string" || name.length === 0) continue;
+    if (TWIN_LABEL_ALLOW.has(name) && !out.includes(name)) out.push(name);
+  }
+  return out;
+}

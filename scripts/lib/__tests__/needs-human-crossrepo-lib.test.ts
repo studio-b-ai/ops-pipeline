@@ -13,6 +13,7 @@ import {
   type CrossRepoDecisionInput,
   type CrossRepoRecallDecisionInput,
   type TwinCandidate,
+  twinLabelsFrom,
 } from "../needs-human-crossrepo-lib.js";
 
 const ALLOWLIST = new Set([
@@ -305,5 +306,26 @@ describe("crossRepoRecallDisposition — post-routing 👎 pass (mirrors needs-h
     expect(crossRepoRecallDisposition(recallBase({ hasCrossRepoRouteReceipt: true, hasAuthorizedDisapproval: true }))).toEqual({
       kind: "close-rejected",
     });
+  });
+});
+
+
+describe("twinLabelsFrom (2026-09-06 — twins inherit the origin's routing labels)", () => {
+  it("known-GOOD (the live theme#586 / price-sync#163 shape): bug + zoom-intake + P1 travel to the twin", () => {
+    expect(twinLabelsFrom([{ name: "bug" }, { name: "zoom-intake" }, { name: "P1" }, { name: "needs-human" }])).toEqual(["bug", "zoom-intake", "P1"]);
+  });
+
+  it("known-BAD: routing-STATE labels never travel (needs-human, lane:*, train state, decisions)", () => {
+    expect(twinLabelsFrom([{ name: "needs-human" }, { name: "lane:engineer" }, { name: "queued" }, { name: "reviewed" }, { name: "underway" }, { name: "candidate" }, { name: "hold" }, { name: "veto" }, { name: "wontfix" }])).toEqual([]);
+  });
+
+  it("control: no labels / undefined / empty names → [] (an unlabeled origin files an unlabeled twin, as before)", () => {
+    expect(twinLabelsFrom(undefined)).toEqual([]);
+    expect(twinLabelsFrom([])).toEqual([]);
+    expect(twinLabelsFrom([{ name: "" }, { name: null }])).toEqual([]);
+  });
+
+  it("control: accepts plain strings and de-duplicates", () => {
+    expect(twinLabelsFrom(["bug", "bug", "P2"])).toEqual(["bug", "P2"]);
   });
 });
