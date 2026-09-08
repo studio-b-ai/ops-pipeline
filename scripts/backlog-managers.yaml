@@ -1,3 +1,9 @@
+# 2026-09-06 (Engineer, six-lens backlog sweep finding 3): managers repointed from the retired
+# C-suite titles (CTO/COO/CMO/CoS) to the LIVE roster (Mechanic/Engineer/Dispatcher/Publicity),
+# per webhook-router src/bugsquasher/seat-owner.ts REPO_LANE_MANAGER and the 9/03 seat folds.
+# The four aggregate issues (ops#157 CTO · #166 COO · #169 CMO · #170 CoS = 242 findings,
+# refreshed daily for 18-20 days) had no consumer because no seat answers to those names;
+# the Dispatcher's /yard reads the re-titled ones. Close the four old aggregates on merge.
 # backlog-managers.yaml — ops-pipeline#136 (backlog-staleness leg, LANES rule 17 fleet
 # instrument, CTO seat → CoS, Kevin word 2026-08-16). Consumed by
 # scripts/backlog-staleness-worker.ts (read-only — this file is committed config, never
@@ -18,39 +24,39 @@
 
 repos:
   - repo: "studio-b-ai/ops-pipeline"
-    manager: "CTO"
+    manager: "Mechanic"
   - repo: "studio-b-ai/webhook-router"
-    manager: "CTO"
+    manager: "Engineer"
   - repo: "studio-b-ai/client-asthetik"
-    manager: "CTO"
+    manager: "Mechanic"
     note: "Acumatica lane"
   - repo: "studio-b-ai/acuops-pipeline"
-    manager: "CTO"
+    manager: "Mechanic"
   - repo: "studio-b-ai/acudev"
-    manager: "CTO"
+    manager: "Mechanic"
   - repo: "studio-b-ai/clients"
-    manager: "CTO"
+    manager: "Mechanic"
   - repo: "studio-b-ai/bolt-wms"
-    manager: "COO"
+    manager: "Engineer"
     shared: true
     note: "multi-lane repo (Pricing · Wayfair · CD · Zoom Workspace · Procurement Hub …); the COO is the largest owner and routes the rest (CoS remap 2026-08-16); one `next` per lane is legitimate → multi-next not evaluated"
   - repo: "studio-b-ai/studiob"
-    manager: "CTO"
+    manager: "Engineer"
     shared: true
     note: "studiob-api/gateway = fleet (CTO); zoom-intake questions belong to the Zoom Workspace lane (CTO-managed) — CoS remap 2026-08-16"
   - repo: "studio-b-ai/brain"
-    manager: "CoS"
+    manager: "Dispatcher"
     note: "the vault — CoS remap 2026-08-16"
   - repo: "studio-b-ai/studiob-price-sync"
-    manager: "CMO"
+    manager: "Engineer"
     note: "Shopify lane"
   - repo: "studio-b-ai/asthetik-trade-theme"
-    manager: "CMO"
+    manager: "Engineer"
     note: "Shopify lane"
   - repo: "studio-b-ai/asthetik-portal"
-    manager: "COO"
+    manager: "Engineer"
   - repo: "studio-b-ai/asthetik-marketing"
-    manager: "CMO"
+    manager: "Publicity"
 
 thresholds:
   p0p1_days: 2
