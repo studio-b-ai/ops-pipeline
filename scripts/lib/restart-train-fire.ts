@@ -385,3 +385,62 @@ export function formatObserveNote(nowIso: string, repo: string, number: number, 
 export function observeStateKey(repo: string, number: number, sha: string, phase: string): string {
   return `observe :: ${repo}#${number} @ ${sha} :: ${phase}`;
 }
+
+// ───────────────────────────── transient-machinery-issue gate (ops-pipeline#326) ─────────────────────────────
+
+/**
+ * GitHub label the FILER adds to a machinery issue whose root cause is a transient / by-design
+ * blip (Railway timeout, boot burst, a #208/#298-class network flake) rather than a real bug.
+ * ops-pipeline#326 (Engineer 2026-09-05): an issue carrying this label does NOT hold the train
+ * via `checkHold` and is auto-closed on the next green scheduled run (the recovery IS the
+ * receipt — #358 escalate once at ~3 fails, again only on recovery). A real machinery bug
+ * (no `transient` label) still holds as today (#161/#165).
+ *
+ * The filer knows: the bug-squasher's abort path (see webhook-router `bugsquasher/agent-prompt.ts`)
+ * or a human filer applies this label at issue-open time; this worker never adds it. Live example:
+ * ops-pipeline#319 ("Heritage Restart Train: Railway anchor-fetch timeout … — transient, working
+ * as designed") held the train from 04:57Z until Kevin closed it by hand at 19:1xZ, blocking two
+ * queued studiob PRs.
+ */
+export const TRANSIENT_MACHINERY_LABEL = "transient";
+
+/** Minimal shape `partitionMachineryIssues` needs — matches github-issues.ts's `IssueRef`. */
+export interface MachineryIssueForPartition {
+  number: number;
+  title: string;
+  labels?: { name: string }[];
+}
+
+export interface MachineryIssuePartition<T extends MachineryIssueForPartition> {
+  /** Real machinery bugs — every one of these HOLDS the train (#161/#165 unchanged). */
+  holding: T[];
+  /** Transient-labeled blips — do NOT hold; the caller auto-closes them on this same tick. */
+  transient: T[];
+}
+
+/**
+ * Split an open machinery-issue set into (real-bug, transient) buckets. Pure: caller supplies
+ * the fully-listed `IssueRef[]` (with `includeLabels: true` — the transient bit is a LABEL, not
+ * a title token, and every other classification here refuses to key off untrusted text). An
+ * issue lacking a labels array is treated as "no `transient` label" and therefore HELD — the
+ * unknown-label case is the fail-closed direction: a missing labels field must never silently
+ * make a real bug look transient.
+ *
+ * Rule #322 both-directions: `holding` filters the "real bug ⇒ hold" verdict; `transient`
+ * filters the "blip ⇒ don't hold + auto-close" verdict. Both are non-empty in the mixed case
+ * (one real bug + one transient), and callers key their behavior off `holding.length > 0`, not
+ * the combined count.
+ */
+export function partitionMachineryIssues<T extends MachineryIssueForPartition>(
+  issues: T[],
+): MachineryIssuePartition<T> {
+  const holding: T[] = [];
+  const transient: T[] = [];
+  for (const issue of issues) {
+    const labels = issue.labels ?? [];
+    const isTransient = labels.some((l) => l.name === TRANSIENT_MACHINERY_LABEL);
+    if (isTransient) transient.push(issue);
+    else holding.push(issue);
+  }
+  return { holding, transient };
+}
