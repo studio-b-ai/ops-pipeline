@@ -321,26 +321,32 @@ describe("probeShipEngineApiKey", () => {
   });
 });
 
-// ── real credentials.manifest.yaml (#291): both new ShipEngine entries load correctly ────────
+// ── real credentials.manifest.yaml — ShipEngine placeholder registration (ops-pipeline#323) ──
+//
+// The shipengine-production / shipengine-sandbox entries stay COMMENTED OUT until the #134 Set 2
+// rotation sitting lands the ShipEngine keys in the "Studio B Infrastructure" 1P vault under
+// verified field names (the seeded op_ref paths were best-guess and probed PROBE_FAILED live
+// 2026-09-05, ops#323). Mirrors the LMMI_REPO_PAT / NODE_AUTH_TOKEN / cloudflare-cf-token-mgmt
+// precedent above them: the commented block IS the durable registration; when the credential
+// exists in 1P the block gets uncommented and this test flips to assert an active entry.
 
-describe("real credentials.manifest.yaml — shipengine entries", () => {
+describe("real credentials.manifest.yaml — shipengine entries (registered, not active)", () => {
   const manifestPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "credentials.manifest.yaml");
 
-  it("both shipengine-production and shipengine-sandbox parse with type=shipengine-api-key, non_expiring=true, recorded_expiry=null", () => {
+  it("neither shipengine-production nor shipengine-sandbox is an ACTIVE parsed entry (both stay commented out until #134 Set 2 lands the keys in 1P)", () => {
     const doc = parseYaml(readFileSync(manifestPath, "utf-8")) as { credentials?: Array<Record<string, unknown>> };
     const items = doc.credentials ?? [];
-    const prod = items.find((i) => i.name === "shipengine-production");
-    const sandbox = items.find((i) => i.name === "shipengine-sandbox");
-    expect(prod).toBeDefined();
-    expect(sandbox).toBeDefined();
-    for (const item of [prod, sandbox]) {
-      expect(item?.type).toBe("shipengine-api-key");
-      expect(item?.non_expiring).toBe(true);
-      expect(item?.recorded_expiry).toBeNull();
-      expect(typeof item?.op_ref).toBe("string");
-      expect((item?.op_ref as string)?.startsWith("op://Studio B Infrastructure/shipengine/")).toBe(true);
-    }
-    expect(prod?.op_ref).toBe("op://Studio B Infrastructure/shipengine/production_key");
-    expect(sandbox?.op_ref).toBe("op://Studio B Infrastructure/shipengine/sandbox_key");
+    expect(items.find((i) => i.name === "shipengine-production")).toBeUndefined();
+    expect(items.find((i) => i.name === "shipengine-sandbox")).toBeUndefined();
+  });
+
+  it("the commented placeholder block still NAMES both entries + their op_ref shape, so the manifest remains a durable registration record (mirrors LMMI_REPO_PAT / NODE_AUTH_TOKEN / cloudflare-cf-token-mgmt)", () => {
+    const raw = readFileSync(manifestPath, "utf-8");
+    // The block's identity + both credential names + both op_ref paths must survive as commented text.
+    expect(raw).toMatch(/#\s+──\s+ShipEngine API keys/);
+    expect(raw).toMatch(/#\s+- name:\s+shipengine-production/);
+    expect(raw).toMatch(/#\s+- name:\s+shipengine-sandbox/);
+    expect(raw).toContain('op://Studio B Infrastructure/shipengine/production_key');
+    expect(raw).toContain('op://Studio B Infrastructure/shipengine/sandbox_key');
   });
 });
