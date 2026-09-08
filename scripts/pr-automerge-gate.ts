@@ -329,15 +329,35 @@ async function evaluate(
   }
 
   let prJson = fetchPr(repo, pr);
-  // 2026-09-06 (the code-fix door's first live run, sweep 34009003049): seven studiob
-  // PRs short-circuited on `mergeStateStatus=UNKNOWN` — GitHub had not recomputed
-  // mergeability after main moved minutes earlier, and every one read CLEAN again
-  // within the hour. UNKNOWN is transient, not a verdict: re-read ONCE after a short
-  // wait before treating it as not-ready. Still fail-closed if it stays UNKNOWN.
+  // 2026-09-06 / hardened 2026-09-08: UNKNOWN is transient — GitHub recomputes
+  // mergeability after main moves. A single 5s retry proved insufficient at scale
+  // (25 of 48 PRs still UNKNOWN after a main merge, Engineer finding 2026-09-07
+  // 23:19Z). Re-read up to 3 times at 20s intervals when CI is already green
+  // (GitHub's recompute is seconds; CI-red PRs are not mergeable regardless).
+  // Still fail-closed if it stays UNKNOWN after all retries.
   if (prJson.mergeStateStatus === "UNKNOWN") {
-    execFileSync("sleep", ["5"]);
-    prJson = fetchPr(repo, pr);
-    console.log(`[info] pr-automerge-gate ${repo}#${pr}: mergeStateStatus was UNKNOWN — re-read after 5s → ${prJson.mergeStateStatus}`);
+    const unkCiClean = isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo));
+    if (unkCiClean) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        execFileSync("sleep", ["20"]);
+        prJson = fetchPr(repo, pr);
+        console.log(
+          `[info] pr-automerge-gate ${repo}#${pr}: mergeStateStatus was UNKNOWN — ` +
+            `re-read ${attempt}/3 after 20s → ${prJson.mergeStateStatus}`,
+        );
+        if (prJson.mergeStateStatus !== "UNKNOWN") break;
+      }
+      if (prJson.mergeStateStatus === "UNKNOWN") {
+        console.log(
+          `[wait] pr-automerge-gate ${repo}#${pr}: mergeStateStatus still UNKNOWN after 3 re-reads (60s total) — fail-closed`,
+        );
+      }
+    } else {
+      console.log(
+        `[info] pr-automerge-gate ${repo}#${pr}: mergeStateStatus is UNKNOWN but CI not clean — ` +
+          `skipping re-read (UNKNOWN + !ciClean = unmergeable either way)`,
+      );
+    }
   }
   const author = prJson.author.login;
   const labels = prJson.labels.map((l) => l.name);
