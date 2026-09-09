@@ -57,7 +57,7 @@ permissions:
   id-token: write   # WIF (Kevin 9/06) — the reusable gate federates its review leg
 
 concurrency:
-  group: squasher-fleet-sweep
+  group: squasher-fleet-sweep-${{ inputs.repo || 'scheduled' }}
   cancel-in-progress: false
 
 jobs:
