@@ -982,11 +982,11 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
     expect(result.reasons.some((r) => r.includes("package manifest/lockfile"))).toBe(true);
   });
 
-  it("refuses at 401 lines (§5 plant: the cap) with failureLeg line-cap", () => {
-    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 401 });
+  it("refuses at 801 lines (code-fix additions-only cap) (§5 plant: the cap) with failureLeg line-cap", () => {
+    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 801 });
     expect(result.prClass).toBeNull();
     expect(result.failureLeg).toBe("line-cap");
-    expect(result.reasons.some((r) => r.includes("code-fix") && r.includes("401 > 400"))).toBe(true);
+    expect(result.reasons.some((r) => r.includes("code-fix") && r.includes("801 > 800"))).toBe(true);
   });
 
   it("sensitivePathPatterns still beat the code-fix class entirely", () => {
@@ -1003,9 +1003,23 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
     expect(result.failureLeg).toBeNull();
   });
 
-  it("resolves code-fix at exactly 400 lines (boundary)", () => {
-    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 400 });
+  it("resolves code-fix at exactly 800 lines (boundary)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 800 });
     expect(result.prClass).toBe("code-fix");
+  });
+
+  // 2026-09-09 Kevin "widen": code-fix cap uses additions only (not deletions).
+  it("code-fix: additions 500 + deletions 1,600 = total 2,100 but resolves (additions only)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 2100, additions: 500 });
+    expect(result.prClass).toBe("code-fix");
+    expect(result.failureLeg).toBeNull();
+  });
+
+  it("code-fix: additions 900 + deletions 0 = total 900 refuses (additions > 800)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 900, additions: 900 });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("line-cap");
+    expect(result.reasons.some((r) => r.includes("code-fix") && r.includes("additions 900 > 800"))).toBe(true);
   });
 
   // ───── Precedence: code-fix resolves LAST, existing classes stay byte-identical ─────
