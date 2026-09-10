@@ -377,6 +377,8 @@ async function evaluate(
   const author = prJson.author.login;
   const labels = prJson.labels.map((l) => l.name);
   const totalChangedLines = prJson.additions + prJson.deletions;
+  // 2026-09-09 Kevin 'widen': the code-fix cap counts additions only (deletions of dead code are not risk).
+  const codeFixLines = prJson.additions;
   const ciClean = isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo));
 
   // ── Leg "ci-rollup" (cheap, no diff fetch, no API spend): state + non-draft + CI +
@@ -453,7 +455,7 @@ async function evaluate(
   const files: GateFile[] = reconcileFileClasses(authoritativePaths, parsed);
 
   // ── Leg "class-match"/"line-cap": resolve the PR-level diff class ──
-  const classification = classifyPrDiffClass({ files, totalChangedLines, sensitivePathPatterns, safePathGlobs });
+  const classification = classifyPrDiffClass({ files, totalChangedLines, additions: codeFixLines, sensitivePathPatterns, safePathGlobs });
   if (classification.prClass === null) {
     const leg: GateReceiptLeg = classification.failureLeg ?? "other";
     console.log(`[wait] pr-automerge-gate ${repo}#${pr}: no diff class resolved (${leg}) — ` + classification.reasons.join("; "));

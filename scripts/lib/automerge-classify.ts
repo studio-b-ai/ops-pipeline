@@ -435,7 +435,7 @@ const TEST_ONLY_LINE_CAP = 40;
 // requires safe_path_globs + the denylist + named checks + review CLEAN; a customer-
 // facing surface without a QA receipt stays a human's call by NOT being in any
 // repo's safe_path_globs (theme/portal excluded; price-sync's extensions/** excluded).
-const CODE_FIX_LINE_CAP = 400;
+const CODE_FIX_LINE_CAP = 800; // 2026-09-09 Kevin 'widen': counts ADDITIONS only (see evalCodeFix) — a 1,600-line dead-code deletion is not a big change
 
 // Allowlist, not a denylist — same rationale as CLEAN_LEGACY_STATES/CLEAN_CONCLUSIONS
 // above: only these path shapes count as CI infrastructure, so an unrecognized
@@ -673,7 +673,8 @@ function evalTestOnly(files: GateFile[], totalChangedLines: number): CandidateEv
  * needs the live statusCheckRollup, which classification doesn't see — the runner
  * evaluates it as its own gate leg after class resolution.
  */
-function evalCodeFix(files: GateFile[], totalChangedLines: number, safePathGlobs: string[] | undefined): CandidateEval {
+function evalCodeFix(files: GateFile[], totalChangedLines: number, safePathGlobs: string[] | undefined, additions?: number): CandidateEval {
+  const effectiveLines = additions !== undefined ? additions : totalChangedLines;
   const shapeReasons: string[] = [];
 
   const compiled = (safePathGlobs ?? []).map(compileSafePathGlob).filter((re): re is RegExp => re !== null);
@@ -697,7 +698,7 @@ function evalCodeFix(files: GateFile[], totalChangedLines: number, safePathGlobs
   }
 
   const shapeOk = shapeReasons.length === 0;
-  return { prClass: "code-fix", shapeOk, lineCapOk: totalChangedLines <= CODE_FIX_LINE_CAP, cap: CODE_FIX_LINE_CAP, shapeReasons };
+  return { prClass: "code-fix", shapeOk, lineCapOk: effectiveLines <= CODE_FIX_LINE_CAP, cap: CODE_FIX_LINE_CAP, shapeReasons };
 }
 
 export interface ClassifyPrDiffClassInput {
@@ -707,6 +708,13 @@ export interface ClassifyPrDiffClassInput {
    *  file existed. */
   files: GateFile[];
   totalChangedLines: number;
+  /** ops#371 (2026-09-09 Kevin 'widen'): code-fix line cap counts ADDITIONS only
+   *  (a 1,600-line dead-code deletion is not a big change). Other classes ignore
+   *  this — they keep using totalChangedLines. Omitted/undefined = the code-fix
+   *  class uses totalChangedLines (backward-compatible with every caller that
+   *  doesn't pass it). Callers that collect PR json via `gh pr view --json
+   *  additions,deletions,…` pass `additions: prJson.additions`. */
+  additions?: number;
   /** Caller-supplied regex sources (matched against each file's path) for paths this
    *  repo considers sensitive enough to require a human regardless of shape/line-cap
    *  fit — e.g. a repo whose "Require review label" branch-protection gate is NOT
@@ -758,7 +766,7 @@ export interface ClassifyPrDiffClassResult {
  * longest-proven class gets first refusal.
  */
 export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPrDiffClassResult {
-  const { files, totalChangedLines, sensitivePathPatterns, safePathGlobs } = input;
+  const { files, totalChangedLines, sensitivePathPatterns, additions, safePathGlobs } = input;
 
   if (files.length === 0) {
     return { prClass: null, failureLeg: "class-match", reasons: ["no changed files"] };
@@ -804,7 +812,7 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
   // trim to nothing still gets the inert-reason diagnostic (opt-in-but-broken),
   // and the runner's [config] note covers the enabled-with-zero-globs case.
   if (safePathGlobs && safePathGlobs.length > 0) {
-    candidates.push(evalCodeFix(files, totalChangedLines, safePathGlobs));
+    candidates.push(evalCodeFix(files, totalChangedLines, safePathGlobs, additions));
   }
 
   const fullMatch = candidates.find((c) => c.shapeOk && c.lineCapOk);
@@ -820,7 +828,9 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
       continue;
     }
     anyShapeMatched = true;
-    reasons.push(`${c.prClass}: totalChangedLines ${totalChangedLines} > ${c.cap}`);
+    const effective = c.prClass === "code-fix" && additions !== undefined ? additions : totalChangedLines;
+    const metricName = c.prClass === "code-fix" && additions !== undefined ? "additions" : "totalChangedLines";
+    reasons.push(`${c.prClass}: ${metricName} ${effective} > ${c.cap}`);
   }
 
   return { prClass: null, failureLeg: anyShapeMatched ? "line-cap" : "class-match", reasons };
