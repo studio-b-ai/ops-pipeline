@@ -80,6 +80,30 @@
       "safe_path_globs": "",
       "required_checks": "",
       "train": false
+    },
+    {
+      "repo": "studio-b-ai/brain",
+      "enabled_classes": "docs-comment",
+      "sensitive_path_patterns": "scripts/lanes-row-edit.py,(^|/)(LANES|QUEUE|SHIPPED)\\.md",
+      "safe_path_globs": "",
+      "required_checks": "",
+      "train": false
+    },
+    {
+      "repo": "studio-b-ai/claude-config-plane",
+      "enabled_classes": "docs-comment",
+      "sensitive_path_patterns": "(^|/)(settings\\.json|shift-runner/|config-push/|bin/)",
+      "safe_path_globs": "",
+      "required_checks": "",
+      "train": false
+    },
+    {
+      "repo": "studio-b-ai/roundhouse",
+      "enabled_classes": "docs-comment",
+      "sensitive_path_patterns": "",
+      "safe_path_globs": "",
+      "required_checks": "",
+      "train": false
     }
   ]
 }
