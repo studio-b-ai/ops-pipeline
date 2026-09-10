@@ -127,6 +127,8 @@ import {
 
 const REVIEW_MODEL = "claude-sonnet-5";
 const REVIEW_MAX_TOKENS = 512;
+const REVIEW_VOTE_COUNT = 3;
+const REVIEW_QUALIFIED_VOTES = 2; // 2-of-3 (ops#371, Kevin "widen" 2026-09-09)
 
 // ops#190 B1 label vocabulary (doc §4.1/§4.2). CODE_FIX_MERGE_LABEL is applied
 // BEFORE the merge in standard repos — it is the B2 post-merge tripwire's workflow
@@ -261,6 +263,27 @@ async function independentReview(diff: string, systemPrompt: string): Promise<{ 
     const message = err instanceof Error ? err.message : String(err);
     return { verdict: "FLAG", detail: `review API error (fail-closed): ${message}` };
   }
+}
+
+// ops#371 (Kevin "widen" 2026-09-09): 2-of-3 independent reviewer vote.
+// Runs REVIEW_VOTE_COUNT parallel calls to the review model; the leg passes
+// (CLEAN) when at least REVIEW_QUALIFIED_VOTES individual reviews return CLEAN.
+// A 2-of-3 FLAG still routes to Kevin. The receipt detail carries the per-vote
+// breakdown (e.g. "votes: CLEAN,FLAG,CLEAN"). Rule #322: publish both known-good
+// and known-bad controls before trusting the vote.
+async function independentReviewVote(diff: string, systemPrompt: string): Promise<{ verdict: ReviewVerdict; detail: string }> {
+  const results = await Promise.all(
+    Array.from({ length: REVIEW_VOTE_COUNT }, () => independentReview(diff, systemPrompt)),
+  );
+
+  const cleanCount = results.filter((r) => r.verdict === "CLEAN").length;
+  const votes = results.map((r) => r.verdict).join(",");
+  const detail = results.map((r) => `${r.verdict}: ${r.detail}`).join(" | ");
+
+  if (cleanCount >= REVIEW_QUALIFIED_VOTES) {
+    return { verdict: "CLEAN", detail: `votes: ${votes} (${cleanCount}/${REVIEW_VOTE_COUNT} CLEAN)` };
+  }
+  return { verdict: "FLAG", detail: `votes: ${votes} (${cleanCount}/${REVIEW_VOTE_COUNT} CLEAN — ${REVIEW_QUALIFIED_VOTES} needed) — ${detail}` };
 }
 
 // ───────────────────────────── main ─────────────────────────────
@@ -519,7 +542,7 @@ async function evaluate(
   const humanReceipt = humanReviewReceipt(repo, pr, labels);
   const review = humanReceipt
     ? { verdict: "CLEAN" as ReviewVerdict, detail: humanReceipt }
-    : await independentReview(diff, reviewSystemPromptFor(prClass));
+    : await independentReviewVote(diff, reviewSystemPromptFor(prClass));
 
   const finalCheck = gateDecisionForClass({
     prClass,
@@ -1224,7 +1247,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   const humanReceipt = humanReviewReceipt(repo, pr, currentLabels);
   const review = humanReceipt
     ? { verdict: "CLEAN" as ReviewVerdict, detail: humanReceipt }
-    : await independentReview(diff, TRAIN_READY_REVIEW_SYSTEM);
+    : await independentReviewVote(diff, TRAIN_READY_REVIEW_SYSTEM);
   if (review.verdict !== "CLEAN") {
     const detail = `independent review verdict ${review.verdict}: ${review.detail}`;
     logTrainGateLine(repo, pr, "refused", detail);
