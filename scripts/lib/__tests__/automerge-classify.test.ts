@@ -881,6 +881,137 @@ describe("repoClassFor (ops#190 B1 — the train-repo partition)", () => {
   });
 });
 
+describe("classifyPrDiffClass — vault-doc class (Mechanic leg B, 2026-09-11)", () => {
+  function files(paths: string[], fileClass: GateFile["fileClass"] = "code"): GateFile[] {
+    return paths.map((path) => ({ path, fileClass }));
+  }
+
+  // ───── Negative controls first (Rule #322) ─────
+
+  it("rejects a non-.md file inside an allowlisted directory", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/decisions/notes.txt"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).not.toBe("vault-doc");
+  });
+
+  it("rejects a .md file inside a denylisted directory (scripts/)", () => {
+    const result = classifyPrDiffClass({
+      files: files(["scripts/tool.md"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).not.toBe("vault-doc");
+  });
+
+  it("rejects LANES.md (denylist)", () => {
+    const result = classifyPrDiffClass({
+      files: files(["LANES.md"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).not.toBe("vault-doc");
+  });
+
+  it("rejects a .md file outside any allowlisted directory", () => {
+    const result = classifyPrDiffClass({
+      files: files(["README.md"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).not.toBe("vault-doc");
+  });
+
+  it("rejects a .github/** file (denylist)", () => {
+    const result = classifyPrDiffClass({
+      files: files([".github/workflows/something.md"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).not.toBe("vault-doc");
+  });
+
+  it("rejects a mixed diff — vault doc + non-vault file", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/decisions/foo.md", "README.md"]),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).not.toBe("vault-doc");
+  });
+
+  it("exceeds line cap (200) → fails line-cap", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/decisions/big-doc.md"]),
+      totalChangedLines: 201,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("line-cap");
+    expect(result.reasons.some((r) => r.includes("vault-doc") && r.includes("totalChangedLines"))).toBe(true);
+  });
+
+  it("exactly at line cap (200) passes line-cap", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/decisions/big-doc.md"]),
+      totalChangedLines: 200,
+    });
+    expect(result.prClass).toBe("vault-doc");
+  });
+
+  // ───── Positives ─────
+
+  it("resolves vault-doc for a library/decisions/*.md file", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/decisions/2026-09-10-some-decision.md"]),
+      totalChangedLines: 15,
+    });
+    expect(result.prClass).toBe("vault-doc");
+  });
+
+  it("resolves vault-doc for a library/architecture/*.md file", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/architecture/2026-09-01-design.md"]),
+      totalChangedLines: 42,
+    });
+    expect(result.prClass).toBe("vault-doc");
+  });
+
+  it("resolves vault-doc for a seats/*.md file", () => {
+    const result = classifyPrDiffClass({
+      files: files(["seats/Mechanic.md"]),
+      totalChangedLines: 80,
+    });
+    expect(result.prClass).toBe("vault-doc");
+  });
+
+  it("resolves vault-doc for a coldstarts/*.md file", () => {
+    const result = classifyPrDiffClass({
+      files: files(["coldstarts/2026-08-04-cto-seat-reentry.md"]),
+      totalChangedLines: 120,
+    });
+    expect(result.prClass).toBe("vault-doc");
+  });
+
+  it("resolves vault-doc for multiple vault doc files when all qualify", () => {
+    const result = classifyPrDiffClass({
+      files: files([
+        "library/decisions/a.md",
+        "library/architecture/b.md",
+      ]),
+      totalChangedLines: 30,
+    });
+    expect(result.prClass).toBe("vault-doc");
+  });
+
+  // ───── Priority — vault-doc beats ci-infra when both would match ─────
+  // (vault-doc is evaluated second, before ci-infra)
+
+  it("vault-doc takes priority over ci-infra for a qualifying vault doc", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/decisions/notes.md"]),
+      totalChangedLines: 15,
+    });
+    expect(result.prClass).toBe("vault-doc");
+    expect(result.prClass).not.toBe("ci-infra");
+  });
+});
+
 describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
   function files(paths: string[], fileClass: GateFile["fileClass"] = "code"): GateFile[] {
     return paths.map((path) => ({ path, fileClass }));

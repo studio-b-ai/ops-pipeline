@@ -15,14 +15,16 @@
  *   2. the PR's file set resolves to EXACTLY ONE PR-level diff class
  *      (`classifyPrDiffClass` — scripts/lib/automerge-classify.ts): docs-comment
  *      (<=10 lines, every file doc|comment-only, unchanged from the original #279
- *      gate), ci-infra (<=40 lines, every file a declarative `.github/{workflows,
- *      actions}/**.y(a)ml` path, no src/**, no dependency/migration files), or
- *      test-only (<=40 lines, every file a test file/setup, zero src/** RUNTIME
- *      files, no dependency/migration files), or code-fix (<=400 lines — the live
- *      CODE_FIX_LINE_CAP in automerge-classify.ts; this line read 150 until
- *      2026-09-06 and had been stale since the cap moved, runtime
- *      paths allowed — guarded instead by leg 7's allowlist/denylist/named-checks;
- *      ops#190 B1, resolves LAST so the longer-proven classes always win). A
+ *      gate), vault-doc (<=200 lines, every file a vault doc under
+ *      library/decisions|architecture|seats|coldstarts, .md only, scripts/ /
+ *      .github/ / LANES.md denied), ci-infra (<=40 lines, every file a declarative
+ *      `.github/{workflows,actions}/**.y(a)ml` path, no src/**, no
+ *      dependency/migration files), or test-only (<=40 lines, every file a test
+ *      file/setup, zero src/** RUNTIME files, no dependency/migration files), or
+ *      code-fix (<=800 lines — the live CODE_FIX_LINE_CAP in
+ *      automerge-classify.ts; runtime paths allowed — guarded instead by leg 7's
+ *      allowlist/denylist/named-checks; ops#190 B1, resolves LAST so the
+ *      longer-proven classes always win). A
  *      mixed-shape diff (e.g. a workflow file AND a test file together) satisfies
  *      no candidate and resolves to `null` — never a partial/best-effort merge
  *      across classes.
@@ -79,7 +81,7 @@
  * retries are how one failure becomes a compounded one).
  *
  * Usage: tsx pr-automerge-gate.ts --repo <org/repo> --pr <n>
- *   [--enabled-classes docs-comment,ci-infra,test-only,code-fix]
+ *   [--enabled-classes docs-comment,ci-infra,test-only,code-fix,vault-doc]
  *   [--sensitive-path <regex>]... [--safe-path-glob <glob>]... [--required-check <name>]...
  * Secrets: GH_TOKEN (gh CLI auth), ANTHROPIC_API_KEY (independent review leg).
  */

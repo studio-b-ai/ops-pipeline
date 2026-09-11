@@ -413,12 +413,12 @@ const CLEAN_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL"]);
 // evaluated after it, so every existing docs-comment decision is byte-identical to
 // before.
 
-export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only" | "code-fix";
+export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only" | "code-fix" | "vault-doc";
 
 // The single canonical enumeration of valid classes — both the runner's CLI parsing
 // (--enabled-classes validation) and gateDecisionForClass's own runtime guard import
 // this SAME array, so the two can never drift out of sync with each other.
-export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only", "code-fix"];
+export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only", "code-fix", "vault-doc"];
 
 const DOCS_COMMENT_LINE_CAP = MAX_CHANGED_LINES; // 10, unchanged
 const CI_INFRA_LINE_CAP = 40;
@@ -436,6 +436,51 @@ const TEST_ONLY_LINE_CAP = 40;
 // facing surface without a QA receipt stays a human's call by NOT being in any
 // repo's safe_path_globs (theme/portal excluded; price-sync's extensions/** excluded).
 const CODE_FIX_LINE_CAP = 800; // 2026-09-09 Kevin 'widen': counts ADDITIONS only (see evalCodeFix) — a 1,600-line dead-code deletion is not a big change
+
+// ───────────────────────────── vault-doc class (Mechanic leg B, 2026-09-11) ─────────────────────────────
+//
+// A narrow class scoped to the brain vault repo's documentation content directories.
+// Distinct from docs-comment: docs-comment is catch-all doc/comment (≤10 lines, any path);
+// vault-doc is vault-specific .md content (≤200 lines, allowlist-only paths). It is
+// evaluated BEFORE ci-infra/test-only/code-fix so narrow vault doc changes that exceed
+// the docs-comment 10-line cap still auto-classify without human friction, while a
+// broader doc change that touches non-allowlisted paths still falls to a human.
+//
+// Allowlist: library/decisions/**, library/architecture/**, seats/**, coldstarts/**
+// Denylist: scripts/**, .github/**, LANES.md
+// File extension: .md only (non-.md files inside allowlisted dirs do NOT qualify)
+const VAULT_DOC_LINE_CAP = 200;
+
+const VAULT_DOC_ALLOWLIST_PATTERNS = [
+  /^library\/decisions\//,
+  /^library\/architecture\//,
+  /^seats\//,
+  /^coldstarts\//,
+];
+
+const VAULT_DOC_DENYLIST_PATTERNS = [
+  /^scripts\//,
+  /^\.github\//,
+  /^LANES\.md$/,
+];
+
+function isVaultDocPath(path: string): boolean {
+  if (!/\.md$/i.test(path)) return false;
+  if (VAULT_DOC_DENYLIST_PATTERNS.some((re) => re.test(path))) return false;
+  return VAULT_DOC_ALLOWLIST_PATTERNS.some((re) => re.test(path));
+}
+
+function evalVaultDoc(files: GateFile[], totalChangedLines: number): CandidateEval {
+  const nonVaultDoc = files.filter((f) => !isVaultDocPath(f.path));
+  const shapeOk = nonVaultDoc.length === 0;
+  return {
+    prClass: "vault-doc",
+    shapeOk,
+    lineCapOk: totalChangedLines <= VAULT_DOC_LINE_CAP,
+    cap: VAULT_DOC_LINE_CAP,
+    shapeReasons: shapeOk ? [] : [`vault-doc: non-vault-doc file(s): ${nonVaultDoc.map((f) => f.path).join(", ")}`],
+  };
+}
 
 // Allowlist, not a denylist — same rationale as CLEAN_LEGACY_STATES/CLEAN_CONCLUSIONS
 // above: only these path shapes count as CI infrastructure, so an unrecognized
@@ -800,6 +845,7 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
 
   const candidates: CandidateEval[] = [
     evalDocsComment(files, totalChangedLines),
+    evalVaultDoc(files, totalChangedLines),
     evalCiInfra(files, totalChangedLines),
     evalTestOnly(files, totalChangedLines),
   ];

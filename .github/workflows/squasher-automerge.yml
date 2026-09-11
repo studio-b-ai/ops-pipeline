@@ -68,7 +68,7 @@ on:
         required: true
         type: string
       enabled_classes:
-        description: "Comma-separated diff classes this caller opts into (docs-comment,ci-infra,test-only,code-fix). Default: docs-comment only — the original #279 gate's scope, unchanged for callers that don't set this. code-fix additionally requires safe_path_globs + required_checks below (empty ⇒ the class is inert, fail-closed)."
+        description: "Comma-separated diff classes this caller opts into (docs-comment,ci-infra,test-only,code-fix,vault-doc). Default: docs-comment only — the original #279 gate's scope, unchanged for callers that don't set this. code-fix additionally requires safe_path_globs + required_checks below (empty ⇒ the class is inert, fail-closed). vault-doc is vault-repo documentation content (library/decisions, library/architecture, seats, coldstarts; .md only; scripts/.github/LANES.md denied)."
         required: false
         type: string
         default: "docs-comment"
