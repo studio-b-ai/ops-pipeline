@@ -1331,3 +1331,94 @@ describe("codeFixRevalidateDeltas ignores label-woken re-runs of already-clean, 
     expect(withoutLabelWokenReruns(fresh, undefined, OPTS)).toBe(fresh);
   });
 });
+
+describe("classifyPrDiffClass — vault-doc class (brain#239 doc 4 leg B, 2026-09-10)", () => {
+  function files(paths: string[]): GateFile[] {
+    return paths.map((path) => ({ path, fileClass: "doc" }));
+  }
+
+  // ───── Negative controls first (Rule #322), then the known-good plant (#471) ─────
+
+  it("known-GOOD: a decisions doc rides (the fail-closed gate's non-default verdict — #471)", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/decisions/2026-09-11-example-ruling.md"]),
+      totalChangedLines: 120,
+    });
+    expect(result.prClass).toBe("vault-doc");
+    expect(result.failureLeg).toBeNull();
+    expect(result.reasons).toEqual([]);
+  });
+
+  it("known-GOOD: multi-file mixed vault trees still ride (decisions + seats + coldstarts)", () => {
+    const result = classifyPrDiffClass({
+      files: files([
+        "library/decisions/2026-09-11-a.md",
+        "seats/registrar.md",
+        "coldstarts/2026-09-11-example.md",
+        "capabilities/foo.md",
+        "library/architecture/2026-09-11-b.md",
+      ]),
+      totalChangedLines: 800,
+    });
+    expect(result.prClass).toBe("vault-doc");
+    expect(result.failureLeg).toBeNull();
+  });
+
+  it("known-BAD: a vault-doc PR that ALSO touches scripts/ must bounce (the §5 planted known-bad)", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/decisions/2026-09-11-a.md", "scripts/deploy.ts"]),
+      totalChangedLines: 20,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("vault-doc") && r.includes("denylist"))).toBe(true);
+  });
+
+  it("known-BAD: a LANES.md touch in the same PR refuses (registry files are a meta-change)", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/decisions/2026-09-11-a.md", "LANES.md"]),
+      totalChangedLines: 20,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("vault-doc") && r.includes("denylist"))).toBe(true);
+  });
+
+  it("known-BAD: .github/ touch refuses", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/decisions/2026-09-11-a.md", ".github/workflows/ci.yml"]),
+      totalChangedLines: 20,
+    });
+    // The .yml under .github/workflows/ shape-matches ci-infra for one file, but the
+    // mixed set fails that candidate too; the vault-doc denylist is what names it.
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("vault-doc") && r.includes("denylist"))).toBe(true);
+  });
+
+  it("negative control: a non-vault path (a source file) keeps the class null", () => {
+    const result = classifyPrDiffClass({
+      files: files(["library/decisions/2026-09-11-a.md", "src/lib/order-notes.ts"]),
+      totalChangedLines: 20,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("vault-doc") && r.includes("outside vault allowlist"))).toBe(true);
+  });
+
+  it("line cap: 1000 lines rides, 1001 bounces (the cap is a leg, and it fires)", () => {
+    const at = classifyPrDiffClass({ files: files(["library/decisions/2026-09-11-a.md"]), totalChangedLines: 1000 });
+    expect(at.prClass).toBe("vault-doc");
+    const over = classifyPrDiffClass({ files: files(["library/decisions/2026-09-11-a.md"]), totalChangedLines: 1001 });
+    expect(over.prClass).toBeNull();
+    expect(over.failureLeg).toBe("line-cap");
+    expect(over.reasons.some((r) => r.includes("vault-doc") && r.includes("1000"))).toBe(true);
+  });
+
+  it("control: library/rules/ is NOT in vault-doc's allowlist (a rule change is a policy change)", () => {
+    // fileClass "code" keeps it OUT of docs-comment so the only candidate that could
+    // claim it is vault-doc — and vault-doc refuses it (library/rules/ not allowlisted).
+    const result = classifyPrDiffClass({
+      files: files(["library/rules/999-example.md"]).map((f) => ({ ...f, fileClass: "code" as const })),
+      totalChangedLines: 5,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("vault-doc") && r.includes("outside vault allowlist"))).toBe(true);
+  });
+});

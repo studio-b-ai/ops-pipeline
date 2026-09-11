@@ -18,19 +18,21 @@
  *      gate), ci-infra (<=40 lines, every file a declarative `.github/{workflows,
  *      actions}/**.y(a)ml` path, no src/**, no dependency/migration files), or
  *      test-only (<=40 lines, every file a test file/setup, zero src/** RUNTIME
- *      files, no dependency/migration files), or code-fix (<=400 lines — the live
- *      CODE_FIX_LINE_CAP in automerge-classify.ts; this line read 150 until
- *      2026-09-06 and had been stale since the cap moved, runtime
- *      paths allowed — guarded instead by leg 7's allowlist/denylist/named-checks;
- *      ops#190 B1, resolves LAST so the longer-proven classes always win). A
- *      mixed-shape diff (e.g. a workflow file AND a test file together) satisfies
- *      no candidate and resolves to `null` — never a partial/best-effort merge
- *      across classes.
+ *      files, no dependency/migration files), vault-doc (<=1000 lines, every file
+ *      in the vault's text trees — library/decisions, library/architecture, seats/,
+ *      capabilities/, coldstarts/*.md, scratchpad/ — with ZERO denylist hits:
+ *      scripts/, .github/, LANES.md, QUEUE.md, SHIPPED.md; scoped to brain), or
+ *      code-fix (<=800 lines — the live CODE_FIX_LINE_CAP in automerge-classify.ts;
+ *      runtime paths allowed — guarded instead by leg 7's allowlist/denylist/
+ *      named-checks; ops#190 B1, resolves LAST so the longer-proven classes always
+ *      win). A mixed-shape diff (e.g. a workflow file AND a test file together)
+ *      satisfies no candidate and resolves to `null` — never a partial/best-effort
+ *      merge across classes.
  *   3. the resolved class is in THIS CALLER's `--enabled-classes` set (defaults to
  *      `docs-comment` ONLY — a caller that never passes `--enabled-classes` gets
  *      EXACTLY the original #279 gate's scope, unchanged; opting into ci-infra/
- *      test-only is an explicit per-repo choice, not a side effect of this file
- *      changing).
+ *      test-only/vault-doc/code-fix is an explicit per-repo choice, not a side
+ *      effect of this file changing).
  *   4. author === kbibelhausen
  *   5. label `bugsquasher` present
  *   6. independent review: the ENTIRE raw diff is sent to Claude Sonnet 5, with a
@@ -79,7 +81,7 @@
  * retries are how one failure becomes a compounded one).
  *
  * Usage: tsx pr-automerge-gate.ts --repo <org/repo> --pr <n>
- *   [--enabled-classes docs-comment,ci-infra,test-only,code-fix]
+ *   [--enabled-classes docs-comment,ci-infra,test-only,vault-doc,code-fix]
  *   [--sensitive-path <regex>]... [--safe-path-glob <glob>]... [--required-check <name>]...
  * Secrets: GH_TOKEN (gh CLI auth), ANTHROPIC_API_KEY (independent review leg).
  */

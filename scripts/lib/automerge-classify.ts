@@ -413,12 +413,12 @@ const CLEAN_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL"]);
 // evaluated after it, so every existing docs-comment decision is byte-identical to
 // before.
 
-export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only" | "code-fix";
+export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only" | "vault-doc" | "code-fix";
 
 // The single canonical enumeration of valid classes — both the runner's CLI parsing
 // (--enabled-classes validation) and gateDecisionForClass's own runtime guard import
 // this SAME array, so the two can never drift out of sync with each other.
-export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only", "code-fix"];
+export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only", "vault-doc", "code-fix"];
 
 const DOCS_COMMENT_LINE_CAP = MAX_CHANGED_LINES; // 10, unchanged
 const CI_INFRA_LINE_CAP = 40;
@@ -436,6 +436,50 @@ const TEST_ONLY_LINE_CAP = 40;
 // facing surface without a QA receipt stays a human's call by NOT being in any
 // repo's safe_path_globs (theme/portal excluded; price-sync's extensions/** excluded).
 const CODE_FIX_LINE_CAP = 800; // 2026-09-09 Kevin 'widen': counts ADDITIONS only (see evalCodeFix) — a 1,600-line dead-code deletion is not a big change
+
+// brain#239 doc 4 leg B (2026-09-10): vault-doc — the fleet's highest-volume, lowest-risk
+// PR. Text-only (decisions, architecture, seats, coldstarts, scratchpad exports) with a
+// BROAD allowlist and a narrow, fail-closed denylist. Any denylist hit (scripts/, .github/,
+// LANES.md) in the same PR → refused, even if every file matches the allowlist. The class
+// is intrinsically scoped to studio-b-ai/brain (no other repo has these path trees).
+const VAULT_DOC_LINE_CAP = 1000;
+
+// vault-doc allowlist: the markdown/plain-text content trees the policy names by
+// letter (brain#239 doc 4 leg B). Deliberately EXACT — library/rules/ is NOT here
+// (a rule change is a POLICY change, one of the six Kevin-only reasons), and neither
+// are the other library/* trees the policy did not name. Adding a tree here widens
+// what auto-merges; that is a policy change, not a classifier tweak.
+const VAULT_DOC_PATTERNS: RegExp[] = [
+  /^library\/decisions\//,
+  /^library\/architecture\//,
+  /^seats\//,
+  /^capabilities\//,
+  /^coldstarts\/[^/]*\.md$/,
+  // "scratchpad exports" (policy) — vault-scope scratchpad mirrors. If the vault's
+  // scratchpad export tree is named differently this pattern is a no-op (it fails
+  // closed by simply never matching), never an over-match.
+  /^scratchpad\//,
+];
+
+// vault-doc denylist: touch ANY of these in the same PR and the class refuses — the
+// allowlist alone is not enough; a cold-start-seed commit that also edits LANES.md or
+// a script is a meta-change, not a vault-doc. LANES/QUEUE/SHIPPED are the shared
+// registry files a stales-tree commit can silently revert (#460 class).
+const VAULT_DOC_DENYLIST: RegExp[] = [
+  /(^|\/)scripts\//,
+  /(^|\/)\.github\//,
+  /(^|\/)LANES\.md$/,
+  /(^|\/)QUEUE\.md$/,
+  /(^|\/)SHIPPED\.md$/,
+];
+
+function isVaultDocPath(path: string): boolean {
+  return VAULT_DOC_PATTERNS.some((re) => re.test(path));
+}
+
+function vaultDocDenylistHits(path: string): string[] {
+  return VAULT_DOC_DENYLIST.filter((d) => d.test(path)).map((d) => d.toString());
+}
 
 // Allowlist, not a denylist — same rationale as CLEAN_LEGACY_STATES/CLEAN_CONCLUSIONS
 // above: only these path shapes count as CI infrastructure, so an unrecognized
@@ -656,6 +700,38 @@ function evalTestOnly(files: GateFile[], totalChangedLines: number): CandidateEv
 }
 
 /**
+ * brain#239 doc 4 leg B (2026-09-10): the vault-doc candidate — allowlist AND denylist,
+ * both required. Legs:
+ * - EVERY changed file matches ≥1 vault-doc allowlist pattern (library/decisions,
+ *   library/architecture, seats/, capabilities/, coldstarts/*.md, scratchpad/);
+ * - ZERO files hit the vault-doc denylist (scripts/, .github/, LANES.md, QUEUE.md,
+ *   SHIPPED.md) — a denylist hit refuses the PR even when every file also matched
+ *   the allowlist (denylist beats allowlist, same as code-fix);
+ * - ≤1000 changed lines.
+ *
+ * Evaluated AFTER test-only and BEFORE code-fix, so the narrower classes keep first
+ * refusal and code-fix only sees what vault-doc refused. Unlike code-fix this class
+ * needs NO caller-supplied globs: its scope is intrinsic to the vault repo.
+ */
+function evalVaultDoc(files: GateFile[], totalChangedLines: number): CandidateEval {
+  const nonVaultFiles = files.filter((f) => !isVaultDocPath(f.path));
+  const denyHits = files
+    .map((f) => ({ path: f.path, hits: vaultDocDenylistHits(f.path) }))
+    .filter((f) => f.hits.length > 0);
+  const shapeReasons: string[] = [];
+  if (nonVaultFiles.length > 0) {
+    shapeReasons.push(`vault-doc: file(s) outside vault allowlist: ${nonVaultFiles.map((f) => f.path).join(", ")}`);
+  }
+  if (denyHits.length > 0) {
+    shapeReasons.push(
+      `vault-doc: denylist hit(s): ${denyHits.map((f) => `${f.path} (${f.hits.join(", ")})`).join(", ")}`,
+    );
+  }
+  const shapeOk = shapeReasons.length === 0;
+  return { prClass: "vault-doc", shapeOk, lineCapOk: totalChangedLines <= VAULT_DOC_LINE_CAP, cap: VAULT_DOC_LINE_CAP, shapeReasons };
+}
+
+/**
  * ops#190 B1 (doc §4.1): the code-fix candidate — allowlist-PRIMARY. Legs, all
  * required:
  * - a non-empty compiled `safePathGlobs` set (empty/absent ⇒ the class is INERT
@@ -748,14 +824,14 @@ export interface ClassifyPrDiffClassResult {
 }
 
 /**
- * Resolves which (if any) of the THREE mutually-exclusive PR-level diff classes a
- * PR's file set qualifies for. Exactly one class per PR: a diff spanning two
- * classes' file shapes (e.g. a workflow file AND a test file together) satisfies
- * NEITHER candidate's "every file matches" requirement and resolves to `prClass:
- * null` — never a best-effort partial match, and never two classes at once.
+ * Resolves which (if any) of the PR-level diff classes a PR's file set qualifies
+ * for. Exactly one class per PR: a diff spanning two classes' file shapes (e.g. a
+ * workflow file AND a test file together) satisfies NEITHER candidate's "every file
+ * matches" requirement and resolves to `prClass: null` — never a best-effort partial
+ * match, and never two classes at once.
  *
- * Candidates are evaluated in priority order [docs-comment, ci-infra, test-only] and
- * the FIRST fully-qualifying one (shape AND line cap) wins — in practice at most one
+ * Candidates are evaluated in priority order [docs-comment, ci-infra, test-only,
+ * vault-doc] (+ code-fix when globs are supplied) and the FIRST fully-qualifying one
  * candidate can ever fully qualify for a given file set, since the three shape rules
  * are mutually exclusive by construction (docs-comment requires content-classified
  * doc|comment-only; ci-infra requires `.github/{workflows,actions}/**.y(a)ml` paths;
@@ -802,8 +878,9 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
     evalDocsComment(files, totalChangedLines),
     evalCiInfra(files, totalChangedLines),
     evalTestOnly(files, totalChangedLines),
+    evalVaultDoc(files, totalChangedLines),
   ];
-  // LAST on purpose (B1): the widest class only ever picks up what the narrower,
+  // Code-fix LAST on purpose (B1): the widest class only ever picks up what the narrower,
   // longer-proven classes refused — existing resolutions stay byte-identical.
   // And it joins the candidate set ONLY when the caller supplied at least one
   // safe-path glob (codex B1 pass-1 P2): a caller that never opted in must get
