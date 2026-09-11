@@ -83,7 +83,7 @@
     },
     {
       "repo": "studio-b-ai/brain",
-      "enabled_classes": "docs-comment",
+      "enabled_classes": "docs-comment,vault-doc",
       "sensitive_path_patterns": "scripts/lanes-row-edit.py,(^|/)(LANES|QUEUE|SHIPPED)\\.md",
       "safe_path_globs": "",
       "required_checks": "",
