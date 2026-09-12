@@ -1,0 +1,5 @@
+[{"InventoryID": "INV-001", "LastCost": 12.50, "QuantityOnHand": 240},
+ {"InventoryID": "INV-002", "LastCost": 8.75, "QuantityOnHand": 1000},
+ {"InventoryID": "INV-003", "LastCost": 0, "QuantityOnHand": 500},
+ {"InventoryID": "INV-004", "LastCost": 22.00, "QuantityOnHand": 0},
+ {"InventoryID": "INV-005", "LastCost": 5.00, "QuantityOnHand": 50}]
