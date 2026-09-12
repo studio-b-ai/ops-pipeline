@@ -1,12 +1,12 @@
 {
-  "_comment": "ops#250 \u2014 squasher fleet sweep registry (docs/plans/2026-08-31-ops250-squasher-fleet-sweep.md \u00a72.3). Per-repo gate inputs migrated VERBATIM from the retired per-repo caller workflows (extracted from each repo's origin/main, 2026-08-31). This file is enumeration + gate inputs ONLY \u2014 it is NOT class policy: repoClassFor() in scripts/lib/automerge-classify.ts stays the source of truth for train-class/code-fix partitioning. `train: true` = the retired caller had a train_ready leg; the sweep then also enumerates open `queued` PRs for that repo (train invocations pass ONLY train_ready \u2014 required_checks/enabled_classes never apply in train mode). Absent optional fields fall back to the reusable gate's own defaults (enabled_classes is written explicitly because the sweep passes inputs positionally \u2014 an empty string would OVERRIDE the workflow_call default, not invoke it). 2026-09-06 (Kevin 'go'): code-fix enabled with safe_path_globs on bolt-wms (src/**), studiob (packages/api/src/**) and studiob-price-sync (src/** \u2014 extensions/** deliberately OUTSIDE: the checkout extension is customer-facing); asthetik-trade-theme and asthetik-portal stay docs-comment because a storefront/portal change without a QA receipt is Kevin's hand (#475); the code-fix line cap is 400 (automerge-classify.ts); required_checks name each repo's substantive CI job(s) (codex P2 on the door PR: an empty list leaves the named-checks leg fail-closed and the class inert). 2026-09-09 (Kevin 'widen', Engineer sitting \u2014 the 46-PR pile-up read: 32 of 46 would have auto-merged under these rules): safe_path_globs widened to scripts/** + docs/** (bolt-wms, studiob, price-sync, webhook-router), studiob to packages/*/src/**; test-only + ci-infra enabled where missing; asthetik-trade-theme gets code-fix on theme paths (a merge only syncs the STAGING theme \u2014 the live push stays a Kevin door, #352/#475); asthetik-portal stays without code-fix (Railway auto-deploys main = live, #475); ops-pipeline stays without code-fix (the door must not auto-edit itself); price-sync extensions/** stays out (customer-facing checkout).",
+  "_comment": "ops#250 — squasher fleet sweep registry (docs/plans/2026-08-31-ops250-squasher-fleet-sweep.md §2.3). Per-repo gate inputs migrated VERBATIM from the retired per-repo caller workflows (extracted from each repo's origin/main, 2026-08-31). This file is enumeration + gate inputs ONLY — it is NOT class policy: repoClassFor() in scripts/lib/automerge-classify.ts stays the source of truth for train-class/code-fix partitioning. `train: true` = the retired caller had a train_ready leg; the sweep then also enumerates open `queued` PRs for that repo (train invocations pass ONLY train_ready — required_checks/enabled_classes never apply in train mode). Absent optional fields fall back to the reusable gate's own defaults (enabled_classes is written explicitly because the sweep passes inputs positionally — an empty string would OVERRIDE the workflow_call default, not invoke it). 2026-09-06 (Kevin 'go'): code-fix enabled with safe_path_globs on bolt-wms (src/**), studiob (packages/api/src/**) and studiob-price-sync (src/** — extensions/** deliberately OUTSIDE: the checkout extension is customer-facing); asthetik-trade-theme and asthetik-portal stay docs-comment because a storefront/portal change without a QA receipt is Kevin's hand (#475); the code-fix line cap is 400 (automerge-classify.ts); required_checks name each repo's substantive CI job(s) (codex P2 on the door PR: an empty list leaves the named-checks leg fail-closed and the class inert). 2026-09-09 (Kevin 'widen', Engineer sitting — the 46-PR pile-up read: 32 of 46 would have auto-merged under these rules): safe_path_globs widened to scripts/** + docs/** (bolt-wms, studiob, price-sync, webhook-router), studiob to packages/*/src/**; test-only + ci-infra enabled where missing; asthetik-trade-theme gets code-fix on theme paths (a merge only syncs the STAGING theme — the live push stays a Kevin door, #352/#475); asthetik-portal stays without code-fix (Railway auto-deploys main = live, #475); ops-pipeline stays without code-fix (the door must not auto-edit itself); price-sync extensions/** stays out (customer-facing checkout). 2026-09-12 (Kevin 'I want to see all these PRs merged if they're legit and safe' — TP sitting, the org sweep read: 16 green fleet-internal PRs waiting ≈490h across 8 repos, 0 touching a #97 surface/secret/rulebook): the RELEASE leg (`train: true` = the `queued` label door, F1 word: release) is flipped on for claude-config-plane + brain and added for radio, lightsout, client-asthetik at docs-comment squasher scope — the release leg ignores classes anyway; these three earn code-fix only after their own required_checks are named. Library/product/2026-09-12-merge-train-defect-org-sweep.md in the brain is the baseline the next sweep must beat.",
   "repos": [
     {
       "repo": "studio-b-ai/bolt-wms",
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
       "safe_path_globs": "src/**,scripts/**,docs/**",
-      "required_checks": "Client \u2014 TypeScript + Build,Server \u2014 TypeScript + Tests",
+      "required_checks": "Client — TypeScript + Build,Server — TypeScript + Tests",
       "train": true
     },
     {
@@ -87,7 +87,7 @@
       "sensitive_path_patterns": "scripts/lanes-row-edit.py,(^|/)(LANES|QUEUE|SHIPPED)\\.md",
       "safe_path_globs": "",
       "required_checks": "",
-      "train": false
+      "train": true
     },
     {
       "repo": "studio-b-ai/claude-config-plane",
@@ -95,7 +95,7 @@
       "sensitive_path_patterns": "(^|/)(settings\\.json|shift-runner/shifts\\.yaml|config-push/)",
       "safe_path_globs": "bin/**,shift-runner/**,skills/**",
       "required_checks": "",
-      "train": false
+      "train": true
     },
     {
       "repo": "studio-b-ai/roundhouse",
@@ -112,6 +112,24 @@
       "safe_path_globs": "",
       "required_checks": "",
       "train": false
+    },
+    {
+      "repo": "studio-b-ai/radio",
+      "enabled_classes": "docs-comment",
+      "sensitive_path_patterns": "^\\.github/actions/",
+      "train": true
+    },
+    {
+      "repo": "studio-b-ai/lightsout",
+      "enabled_classes": "docs-comment",
+      "sensitive_path_patterns": "^\\.github/actions/",
+      "train": true
+    },
+    {
+      "repo": "studio-b-ai/client-asthetik",
+      "enabled_classes": "docs-comment",
+      "sensitive_path_patterns": "^\\.github/actions/",
+      "train": true
     }
   ]
 }
