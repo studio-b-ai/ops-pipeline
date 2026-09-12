@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { GITHUB_LABEL_DESCRIPTION_MAX, assertLabelDescription, isTransientGhFailure, withGhRetry } from "../github-issues.js";
+import {
+  GITHUB_LABEL_DESCRIPTION_MAX,
+  assertLabelDescription,
+  isTransientGhFailure,
+  isUnsearchableRepoFailure,
+  withGhRetry,
+} from "../github-issues.js";
 
 const SCRIPTS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -88,6 +94,71 @@ describe("isTransientGhFailure", () => {
     ["non-Error throw", "something went wrong"],
   ])("NOT transient: %s", (_name, err) => {
     expect(isTransientGhFailure(err)).toBe(false);
+  });
+});
+
+/**
+ * The stderr shape GitHub Search's per-repo 422 "cannot be searched" verdict rides on. This
+ * is the EXACT text `gh search issues` relays from the API when the repository has nothing
+ * the search index can serve (a repo with no indexable content yet, or search-index outage
+ * for that specific repo). Distinct from a transient 5xx: retrying is guaranteed to fail
+ * the same way, and unlike a search-side 422 for "bad query syntax", this one names the
+ * repository as the cause and is stable across runs. Both-directions positive control
+ * (Rule #322): the predicate must recognize the real error AND must NOT swallow the
+ * failure classes that would otherwise ride the same 422 status code.
+ */
+describe("isUnsearchableRepoFailure", () => {
+  const REAL_STDERR =
+    'Invalid search query "( needs-human-crossrepo in:comments ) repo:studio-b-ai/webhook-router type:issue".\n' +
+    "The listed users and repositories cannot be searched either because the resources do not exist or you do not have permission to view them.";
+
+  it.each([
+    ["the real stderr from run 34706311555 (webhook-router)", ghError(REAL_STDERR)],
+    ["the same message with the API JSON wrapping (mcp__github__search_issues shape)", new Error(REAL_STDERR)],
+  ])("unsearchable: %s", (_name, err) => {
+    expect(isUnsearchableRepoFailure(err)).toBe(true);
+  });
+
+  it.each([
+    ["HTTP 502 (transient 5xx — must NOT be treated as unsearchable, retry is what fixes it)", ghError("gh: Bad Gateway (HTTP 502)")],
+    ["HTTP 422 label-too-long (different 422 class — mutation validation)", ghError("gh: Validation Failed (HTTP 422)")],
+    ["HTTP 404 (isOrgMember's not-a-member contract)", ghError("gh: Not Found (HTTP 404)")],
+    ["HTTP 403 auth/rate-limit", ghError("gh: Resource not accessible by integration (HTTP 403)")],
+    ["a bad-syntax search 422 (query malformed, not repo unsearchable)", ghError('Invalid search query "foo bar baz". The search is limited to 256 characters.')],
+    ["plain error with no search shape", new Error("Unexpected token in JSON at position 0")],
+    ["non-Error throw", "something went wrong"],
+  ])("NOT unsearchable: %s", (_name, err) => {
+    expect(isUnsearchableRepoFailure(err)).toBe(false);
+  });
+});
+
+/**
+ * The recall-pass search in needs-human-crossrepo.ts must degrade to `[]` — with a loud
+ * warning line — on the specific unsearchable-repo 422 (a persistent per-repo state, not
+ * a fleet outage), while ANY other failure class still propagates loudly so the #358
+ * consecutive-failure escalation still fires (the exact contract the surrounding
+ * withGhRetry retry layer establishes for enumeration reads). Structural guard: the
+ * catch must reference `isUnsearchableRepoFailure` AND rethrow the residual on the
+ * non-matching branch — a bare `catch { return []; }` would silently swallow every
+ * failure and re-open the Rule #456 quiet-channel shape codex review pass 3 P1 closed.
+ */
+describe("needs-human-crossrepo recall search tolerates unsearchable repos without swallowing real failures", () => {
+  const sweepSrc = readFileSync(join(SCRIPTS_DIR, "needs-human-crossrepo.ts"), "utf8");
+
+  it("imports isUnsearchableRepoFailure from the shared github-issues seam", () => {
+    expect(sweepSrc).toMatch(/isUnsearchableRepoFailure/);
+  });
+
+  it("catches ONLY the unsearchable-repo failure — every other error is rethrown", () => {
+    // The recall search catch must inspect `isUnsearchableRepoFailure(err)` and rethrow
+    // on the non-matching branch. This scan is deliberately loose about layout but STRICT
+    // about the pair-of-tokens presence within a small window near the recall search's
+    // own retry label (so the assertion binds to the RIGHT catch, not some unrelated one).
+    const recallAt = sweepSrc.indexOf("label: `recall search ${repo}`");
+    expect(recallAt).toBeGreaterThan(-1);
+    const window = sweepSrc.slice(recallAt, recallAt + 800);
+    expect(window).toMatch(/isUnsearchableRepoFailure\(/);
+    expect(window).toMatch(/throw err/);
   });
 });
 
