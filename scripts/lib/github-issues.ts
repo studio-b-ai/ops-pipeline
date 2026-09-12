@@ -62,6 +62,33 @@ export function isTransientGhFailure(err: unknown): boolean {
   return TRANSIENT_GH_PATTERNS.some((p) => p.test(detail));
 }
 
+/**
+ * Whether a `gh search` failure is GitHub Search API's per-repo "this repository is
+ * unsearchable" verdict — an HTTP 422 whose body carries the EXACT phrase "cannot be
+ * searched either because the resources do not exist or you do not have permission to
+ * view them" alongside "Invalid search query" (the wrapper Search prepends to every
+ * per-repo scoped query, so both tokens must be present or a bad-syntax 422 could match).
+ *
+ * This is a PERSISTENT per-repo state, not a fleet-wide outage: most commonly a repo
+ * whose search index has no indexable content yet (a brand-new repo, or one with no
+ * indexed issues/comments at all — webhook-router's exact state as of run 34706311555
+ * that failed 651 consecutive hourly runs). Retrying does not help, unlike every 5xx
+ * shape isTransientGhFailure recognizes. Callers whose scan/recall reads have no
+ * candidates in an unsearchable repo BY DEFINITION can safely degrade to `[]` on this
+ * predicate specifically — every OTHER failure class must still propagate loudly so the
+ * consecutive-failure escalation (Rule #358) still fires.
+ */
+export function isUnsearchableRepoFailure(err: unknown): boolean {
+  const detail =
+    err instanceof Error
+      ? `${(err as NodeJS.ErrnoException & { stderr?: string }).stderr ?? ""}\n${err.message}`
+      : String(err);
+  return (
+    /Invalid search query/i.test(detail) &&
+    /cannot be searched either because the resources do not exist or you do not have permission/i.test(detail)
+  );
+}
+
 /** Synchronous sleep — these are sync CLI scripts (execFileSync end to end), so a Promise-based
  * sleep has nothing to await it; `Atomics.wait` blocks the thread without spinning the CPU. */
 function sleepSync(ms: number): void {

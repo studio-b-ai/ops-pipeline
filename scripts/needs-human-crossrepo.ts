@@ -128,6 +128,7 @@ import {
   gh,
   getCommentReactions,
   isTransientGhFailure,
+  isUnsearchableRepoFailure,
   listIssueComments,
   withGhRetry,
   listIssuesByLabel,
@@ -726,10 +727,33 @@ function searchCrossRepoRoutedOrigins(repo: string): IssueRow[] {
   // transient failures get withGhRetry's bounded attempts; anything surviving them
   // propagates loudly so the #358 consecutive-failure escalation still fires — the same
   // contract as the label-based enumeration in main()/runOrphanTwinCleanup.
-  const out = withGhRetry(
-    () => gh(["search", "issues", "--repo", repo, "needs-human-crossrepo", "in:comments", "--json", "number,title", "--limit", "1000"]),
-    { label: `recall search ${repo}` },
-  );
+  //
+  // One CARVE-OUT (run 34706311555 fix): GitHub's Search API returns HTTP 422 "cannot be
+  // searched … resources do not exist or you do not have permission" on any repo whose
+  // search index has no indexable content yet — a persistent PER-REPO verdict (most
+  // commonly a repo with no issues/comments the search index has ever ingested), not a
+  // fleet outage. It fires the SAME way every hour (webhook-router: 651 consecutive
+  // failed runs before this catch), and by definition the recall pass has NO candidates
+  // to find in an unsearchable repo — the whole run's remaining repos were skipped
+  // strictly because one repo's search index is empty. `isUnsearchableRepoFailure`
+  // (github-issues.ts) recognizes ONLY that exact stderr shape — every other failure,
+  // including transient 5xx, other 422 classes, and 4xx auth/parse, still propagates
+  // loudly per the enumeration contract above.
+  let out: string;
+  try {
+    out = withGhRetry(
+      () => gh(["search", "issues", "--repo", repo, "needs-human-crossrepo", "in:comments", "--json", "number,title", "--limit", "1000"]),
+      { label: `recall search ${repo}` },
+    );
+  } catch (err) {
+    if (isUnsearchableRepoFailure(err)) {
+      console.log(
+        `  [warn] recall search ${repo}: repository unsearchable by GitHub's search index (persistent 422 — no indexable content yet, or index doesn't cover this repo) — treating as 0 candidates and continuing`,
+      );
+      return [];
+    }
+    throw err;
+  }
   const parsed = JSON.parse(out) as IssueRow[];
   return Array.isArray(parsed) ? parsed : [];
 }
