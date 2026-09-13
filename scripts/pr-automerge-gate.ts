@@ -231,9 +231,8 @@ function addLabel(repo: string, pr: number, label: string): void {
 
 type ReviewVerdict = "CLEAN" | "FLAG";
 
-async function independentReview(diff: string, systemPrompt: string): Promise<{ verdict: ReviewVerdict; detail: string }> {
+async function independentReview(client: Anthropic, diff: string, systemPrompt: string): Promise<{ verdict: ReviewVerdict; detail: string }> {
   try {
-    const client = anthropicClient(); // api-key or federation (lib/anthropic-credentials, WIF 9/06)
     const response = await client.messages.create({
       model: REVIEW_MODEL,
       max_tokens: REVIEW_MAX_TOKENS,
@@ -273,9 +272,28 @@ async function independentReview(diff: string, systemPrompt: string): Promise<{ 
 // A 2-of-3 FLAG still routes to Kevin. The receipt detail carries the per-vote
 // breakdown (e.g. "votes: CLEAN,FLAG,CLEAN"). Rule #322: publish both known-good
 // and known-bad controls before trusting the vote.
-async function independentReviewVote(diff: string, systemPrompt: string): Promise<{ verdict: ReviewVerdict; detail: string }> {
+//
+// crew-113 (todo #113, 2026-09-12): under WIF federation, `new Anthropic()`
+// per call built THREE independent SDK clients — each with its OWN TokenCache
+// (@anthropic-ai/sdk/lib/credentials/token-cache.js) — that each performed its
+// OWN OIDC token exchange against the SAME on-disk GitHub identity-token file
+// (refreshed only every 4 minutes by the composite action's background loop,
+// per-action.yml). Anthropic's jwt-bearer exchange treats the assertion as
+// single-use (anti-replay): the first of the 3 concurrent exchanges to land
+// consumes the jti, and the other two 401 with "Token exchange failed with
+// status 401 ... Ensure your federation rule matches your identity" — NOT a
+// federation-rule misconfiguration (the error text is misleading; #4/#84).
+// This is exactly why the 2 confirmed firings landed 1/3 CLEAN every time,
+// never 0/3 or 3/3: one exchange always wins the race, the rest always lose it.
+// Fix: build ONE client (and therefore one TokenCache) here and pass it to
+// every parallel vote — the SDK's TokenCache.doRefresh() coalesces concurrent
+// callers into a SINGLE provider call (token-cache.js "Concurrent mandatory
+// callers coalesce into a single provider call"), so 3 votes now share one
+// exchange instead of racing three. api-key mode is unaffected (no exchange).
+export async function independentReviewVote(diff: string, systemPrompt: string): Promise<{ verdict: ReviewVerdict; detail: string }> {
+  const client = anthropicClient(); // api-key or federation (lib/anthropic-credentials, WIF 9/06) — ONE client, ONE TokenCache, shared below
   const results = await Promise.all(
-    Array.from({ length: REVIEW_VOTE_COUNT }, () => independentReview(diff, systemPrompt)),
+    Array.from({ length: REVIEW_VOTE_COUNT }, () => independentReview(client, diff, systemPrompt)),
   );
 
   const cleanCount = results.filter((r) => r.verdict === "CLEAN").length;
