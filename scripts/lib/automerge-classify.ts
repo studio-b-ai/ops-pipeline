@@ -38,6 +38,13 @@ export interface GateResult {
 
 const BUGSQUASHER_AUTHOR = "kbibelhausen";
 const BUGSQUASHER_LABEL = "bugsquasher";
+// 2026-09-13 (Kevin "door fix", Principal sitting): `fleet-internal` is a first-class eligibility label — the seats' own PRs
+// (runner-labeled at box, lib/fleet-internal-label.sh: green, in-registry, no live path) ride the same door as bugsquasher's.
+// ops#409 taught only the QUEUEING step (gateQueues) this label; both eligibility legs below still demanded `bugsquasher`,
+// so no seat-authored code-fix PR had ever merged autonomously (15:19Z 9/13 sweep: 5 refusals "missing 'bugsquasher'").
+const FLEET_INTERNAL_LABEL = "fleet-internal";
+const ELIGIBLE_LABELS = [BUGSQUASHER_LABEL, FLEET_INTERNAL_LABEL];
+const hasEligibleLabel = (labels: readonly string[]) => ELIGIBLE_LABELS.some((l) => labels.includes(l));
 const MAX_CHANGED_LINES = 10;
 
 /**
@@ -325,8 +332,8 @@ export function gateDecision(input: GateInput): GateResult {
   if (input.author !== BUGSQUASHER_AUTHOR) {
     reasons.push(`author '${input.author}' !== '${BUGSQUASHER_AUTHOR}'`);
   }
-  if (!input.labels.includes(BUGSQUASHER_LABEL)) {
-    reasons.push(`missing '${BUGSQUASHER_LABEL}' label (has: ${input.labels.length ? input.labels.join(", ") : "none"})`);
+  if (!hasEligibleLabel(input.labels)) {
+    reasons.push(`missing an eligibility label (${ELIGIBLE_LABELS.map((l) => `'${l}'`).join(" or ")}; has: ${input.labels.length ? input.labels.join(", ") : "none"})`);
   }
 
   const codeFiles = input.files.filter((f) => f.fileClass === "code").map((f) => f.path);
@@ -949,8 +956,8 @@ export function gateDecisionForClass(input: GateInputV2): GateResult {
   if (input.author !== BUGSQUASHER_AUTHOR) {
     reasons.push(`author '${input.author}' !== '${BUGSQUASHER_AUTHOR}'`);
   }
-  if (!input.labels.includes(BUGSQUASHER_LABEL)) {
-    reasons.push(`missing '${BUGSQUASHER_LABEL}' label (has: ${input.labels.length ? input.labels.join(", ") : "none"})`);
+  if (!hasEligibleLabel(input.labels)) {
+    reasons.push(`missing an eligibility label (${ELIGIBLE_LABELS.map((l) => `'${l}'`).join(" or ")}; has: ${input.labels.length ? input.labels.join(", ") : "none"})`);
   }
   if (!input.ciClean) {
     reasons.push("CI not clean");
