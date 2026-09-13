@@ -77,6 +77,34 @@ describe("normalizeActorLogin", () => {
     );
     expect(verdict.authorized).toBe(true);
   });
+  // ───── 2026-09-13 (Kevin "both fixes approved"): the fleet-internal class ─────
+  it("fleet-internal + candidate: the gate's queued is authorized (the runner classified the PR; the gate is the ceiling)", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: [TRAIN_READY_LABEL, "fleet-internal", "candidate"],
+        timeline: [commitAt(0), labeledBy(GATE_AUTHORITY_LOGIN, 1)],
+      }),
+    );
+    expect(verdict.authorized).toBe(true);
+  });
+  it("negative control: fleet-internal WITHOUT candidate is refused — the gate's own tripwire is still required", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: [TRAIN_READY_LABEL, "fleet-internal"],
+        timeline: [commitAt(0), labeledBy(GATE_AUTHORITY_LOGIN, 1)],
+      }),
+    );
+    expect(verdict.authorized).toBe(false);
+  });
+  it("negative control: a HUMAN outside the roster on a fleet-internal PR is refused — the class widens the bot, never the roster", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: [TRAIN_READY_LABEL, "fleet-internal", "candidate"],
+        timeline: [commitAt(0), labeledBy("some-other-human", 1)],
+      }),
+    );
+    expect(verdict.authorized).toBe(false);
+  });
   it("negative control: the UN-normalized GraphQL spelling is refused (the exact live failure)", () => {
     const verdict = evaluateLabelAuthority(
       baseAuthorityInput({

@@ -142,6 +142,8 @@ const CODE_FIX_MERGE_LABEL = "automerge:code-fix";
 // Kevin's 2026-09-02 one-vocabulary rename: train:candidate → candidate (label-authority.ts).
 const TRAIN_CANDIDATE_LABEL = "candidate";
 const BUGSQUASHER_LABEL = "bugsquasher";
+// 2026-09-13 (Kevin, "both fixes approved"): the runner marks fleet-internal green PRs; the gate queues them like bugsquasher.
+const FLEET_INTERNAL_LABEL = "fleet-internal";
 
 // ───────────────────────────── gh helpers ─────────────────────────────
 
@@ -595,7 +597,7 @@ async function evaluate(
     // a human hand. The train's label authority accepts the gate's `queued` ONLY when
     // the PR carries both `bugsquasher` and `candidate` (label-authority.ts
     // GATE_AUTHORITY_*) — a bot `queued` on any other PR is still refused categorically.
-    const gateQueues = labels.includes(BUGSQUASHER_LABEL);
+    const gateQueues = labels.includes(BUGSQUASHER_LABEL) || labels.includes(FLEET_INTERNAL_LABEL);
     // Codex P1 on the door PR: the review above read ONE head (prJson.headRefOid); a
     // commit pushed between that read and these label writes would otherwise get a
     // `queued` the train's staleness leg cannot see (it only looks for commits AFTER
