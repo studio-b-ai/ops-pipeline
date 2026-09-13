@@ -87,6 +87,7 @@ import {
   type LaneComplianceResult,
 } from "./lib/backlog-compliance-lib.js";
 import { gh, ensureLabel, openIssue, closeIssue, commentIssue, retitleIssue, editIssueBody } from "./lib/github-issues.js";
+import { orphanCloseComment, sweepOrphanedMarkerIssues } from "./lib/backlog-orphan-reconcile.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = join(HERE, "backlog-managers.yaml");
@@ -374,6 +375,57 @@ async function main(): Promise<void> {
         closeIssue(config.brain_repo, existing!.number, `0 failed findings for ${result.row.name} this run — compliant. Auto-closed by the backlog-compliance worker.`);
         closed += 1;
         console.log(`CLOSED backlog-compliance issue #${existing!.number} for ${result.row.name} (compliant).`);
+      }
+    }
+  }
+
+  // ───────────── absent-entity orphan sweep (studio-b#112 leg: detector closers) ─────────────
+  // The per-lane loop above iterates `results` (one per ACTIVE, non-skip LANES row), so a lane
+  // whose row left the table — retired, renamed, or flipped inactive — could never be reached by
+  // its close path and its issue stayed open forever (the same gap swept for backlog-staleness in
+  // this leg, and already fixed for gateway #37 / volume #71 / credential #74). Identified by the
+  // SAME body marker the worker opens with, never by title (this worker's own convention).
+  //
+  // Only meaningful in per-lane mode (rollup mode opens no per-lane issues), and skipped under a
+  // partial --lanes scope or a hard read failure: an unscoped lane is not an absent lane, and an
+  // empty openIssues list on a failed read must never read as "all lanes are orphans".
+  // Population printed BEFORE the verdict, unconditionally, so a clean zero reads against what
+  // the sweep could actually SEE rather than as ambiguous silence (Rule #465) — an all-zero line
+  // is otherwise indistinguishable from a sweep that never ran at all.
+  if (!perLaneMode) {
+    console.log(`[backlog-compliance] orphan sweep: n/a in rollup mode (no per-lane issues exist to orphan).`);
+  } else if (hasHardFailures) {
+    console.log(`[backlog-compliance] orphan sweep SKIPPED — hard read failure(s) this run; an empty issue list must never read as "every lane is an orphan".`);
+  } else if (openIssues.length === 0) {
+    console.log(`[backlog-compliance] orphan sweep: 0 orphan(s) — no open backlog-compliance issue exists to be orphaned (population empty).`);
+  }
+  if (perLaneMode && !hasHardFailures && openIssues.length > 0) {
+    if (rollupScopeIncomplete) {
+      console.warn(
+        `backlog-compliance: orphan sweep SKIPPED — --lanes scoped this run to ${scoped.length}/${activeNonSkip.length} active row(s); a lane outside the scope is not absent, merely unscoped.`,
+      );
+    } else {
+      // Entity set = every ACTIVE non-skip row (the set that legitimately owns an issue). A row
+      // that is present-but-inactive, or explicitly skipped, is deliberately NOT in the set: its
+      // issue is genuinely unreachable by the loop above and is a real orphan.
+      const configuredLanes = new Set(activeNonSkip.map((r) => r.name));
+      const sweep = sweepOrphanedMarkerIssues(
+        openIssues.map((i) => ({ number: i.number, title: i.title, state: "OPEN", body: i.body })),
+        configuredLanes,
+        laneMarker,
+        ROLLUP_MARKER,
+      );
+      for (const action of sweep.actions) {
+        if (dryRun) {
+          console.log(`--- [dry-run] orphan sweep: would SWEEP-CLOSE #${action.number} ${action.title} (lane row no longer active in the LANES table) ---`);
+          continue;
+        }
+        closeIssue(config.brain_repo, action.number, orphanCloseComment(action.title, config.lanes_file));
+        closed += 1;
+        console.log(`SWEEP-CLOSED backlog-compliance issue #${action.number} — its lane row is no longer an active LANES row.`);
+      }
+      if (sweep.actions.length === 0) {
+        console.log(`[backlog-compliance] orphan sweep: 0 orphan(s) among ${openIssues.length} open issue(s) vs ${configuredLanes.size} active lane(s).`);
       }
     }
   }
