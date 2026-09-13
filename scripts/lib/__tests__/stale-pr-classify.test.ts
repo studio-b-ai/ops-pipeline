@@ -1,0 +1,238 @@
+import { describe, expect, it } from "vitest";
+import {
+  CONFLICT_HOURS,
+  STALE_DAYS,
+  STALE_PR_CLASSES,
+  classifyPr,
+  classifyPrs,
+  planStalePrAction,
+  renderStalePrIssueBody,
+  summarizeStalePr,
+  type MergeStateStatus,
+  type PrInput,
+  type StalePrFinding,
+} from "../stale-pr-classify.js";
+
+// ───────────────────────────── fixtures ─────────────────────────────
+
+/**
+ * Pinned clock (Rule #256 — never hardcode "today"; the lib is pure and takes `now`,
+ * so every assertion here is deterministic forever).
+ */
+const NOW = "2026-09-13T12:00:00Z";
+
+function daysAgo(n: number): string {
+  return new Date(Date.parse(NOW) - n * 86_400_000).toISOString();
+}
+
+function hoursAgo(n: number): string {
+  return new Date(Date.parse(NOW) - n * 3_600_000).toISOString();
+}
+
+function pr(overrides: Partial<PrInput> = {}): PrInput {
+  return {
+    repo: "studio-b-ai/ops-pipeline",
+    number: 405,
+    title: "release door: widen the queued leg",
+    url: "https://github.com/studio-b-ai/ops-pipeline/pull/405",
+    createdAt: daysAgo(1),
+    updatedAt: daysAgo(1),
+    mergeStateStatus: "CLEAN",
+    isDraft: false,
+    ...overrides,
+  };
+}
+
+// ───────────────────────────── thresholds are the contract ─────────────────────────────
+
+describe("thresholds", () => {
+  it("match the stint text verbatim (>7d no motion, CONFLICTING >48h)", () => {
+    expect(STALE_DAYS).toBe(7);
+    expect(CONFLICT_HOURS).toBe(48);
+  });
+
+  it("class list is exactly the two classes, strongest first", () => {
+    expect([...STALE_PR_CLASSES]).toEqual(["conflicting-unresolved", "stale-no-motion"]);
+  });
+});
+
+// ───────────────────────────── classifyPr: the clean/negative direction (#322) ─────────────────────────────
+
+describe("classifyPr — known-GOOD must return null (#322 negative control)", () => {
+  it("a fresh CLEAN PR is not a finding", () => {
+    expect(classifyPr(pr(), NOW)).toBeNull();
+  });
+
+  it("an OLD PR that was pushed to today is NOT stale — motion, not age, is the test", () => {
+    // The exact false-positive class the lib header calls out: opened three weeks ago,
+    // someone pushed an hour ago. Age is 21d; idle is ~0d. Not a finding.
+    const f = classifyPr(pr({ createdAt: daysAgo(21), updatedAt: hoursAgo(1) }), NOW);
+    expect(f).toBeNull();
+  });
+
+  it("idle just UNDER the 7d bound is not a finding (boundary, exclusive side)", () => {
+    expect(classifyPr(pr({ createdAt: daysAgo(30), updatedAt: daysAgo(6.99) }), NOW)).toBeNull();
+  });
+
+  it("CONFLICTING but younger than 48h is not yet a finding", () => {
+    expect(classifyPr(pr({ mergeStateStatus: "CONFLICTING", createdAt: hoursAgo(47), updatedAt: hoursAgo(47) }), NOW)).toBeNull();
+  });
+
+  it.each<MergeStateStatus>(["CLEAN", "DIRTY", "UNSTABLE", "BLOCKED", "BEHIND", "UNKNOWN"])(
+    "a fresh %s PR is not a finding — only CONFLICTING carries the conflict class",
+    (status) => {
+      expect(classifyPr(pr({ mergeStateStatus: status, createdAt: daysAgo(5), updatedAt: daysAgo(5) }), NOW)).toBeNull();
+    },
+  );
+});
+
+// ───────────────────────────── classifyPr: the firing/positive direction (#322/#464) ─────────────────────────────
+
+describe("classifyPr — known-BAD must fire (#322 positive control)", () => {
+  it("idle exactly AT the 7d bound fires stale-no-motion (boundary, inclusive side)", () => {
+    const f = classifyPr(pr({ createdAt: daysAgo(7), updatedAt: daysAgo(7) }), NOW);
+    expect(f?.class).toBe("stale-no-motion");
+    expect(f?.idleDays).toBeCloseTo(7, 6);
+  });
+
+  it("CONFLICTING exactly AT 48h old fires conflicting-unresolved (boundary, inclusive side)", () => {
+    const f = classifyPr(pr({ mergeStateStatus: "CONFLICTING", createdAt: hoursAgo(48), updatedAt: hoursAgo(1) }), NOW);
+    expect(f?.class).toBe("conflicting-unresolved");
+  });
+
+  it("CONFLICTING fires on AGE even when the PR has recent motion — Rule #433: it gets zero CI runs regardless", () => {
+    // Deliberate asymmetry vs the stale class, and the reason it is tested explicitly:
+    // a conflicting PR being actively pushed to still rots (no CI), so age governs here.
+    const f = classifyPr(pr({ mergeStateStatus: "CONFLICTING", createdAt: daysAgo(10), updatedAt: hoursAgo(2) }), NOW);
+    expect(f?.class).toBe("conflicting-unresolved");
+    expect(f?.idleDays).toBeLessThan(1);
+  });
+
+  it("carries the PR's identity through to the finding (repo/number/title/url)", () => {
+    const f = classifyPr(pr({ repo: "studio-b-ai/brain", number: 241, title: "t", url: "u", createdAt: daysAgo(9), updatedAt: daysAgo(9) }), NOW);
+    expect(f).toMatchObject({ repo: "studio-b-ai/brain", number: 241, title: "t", url: "u", class: "stale-no-motion" });
+    expect(f?.ageDays).toBeCloseTo(9, 6);
+  });
+});
+
+// ───────────────────────────── exclusions + precedence ─────────────────────────────
+
+describe("classifyPr — draft exclusion (Rule #157: a human chose that state)", () => {
+  it("a long-idle DRAFT is excluded", () => {
+    expect(classifyPr(pr({ isDraft: true, createdAt: daysAgo(60), updatedAt: daysAgo(60) }), NOW)).toBeNull();
+  });
+
+  it("a CONFLICTING ancient DRAFT is excluded too — draft beats both classes", () => {
+    expect(classifyPr(pr({ isDraft: true, mergeStateStatus: "CONFLICTING", createdAt: daysAgo(60), updatedAt: daysAgo(60) }), NOW)).toBeNull();
+  });
+});
+
+describe("classifyPr — exactly one finding per PR, strongest class wins", () => {
+  it("BOTH stale AND conflicting reports once, as conflicting-unresolved", () => {
+    const f = classifyPr(pr({ mergeStateStatus: "CONFLICTING", createdAt: daysAgo(30), updatedAt: daysAgo(30) }), NOW);
+    expect(f?.class).toBe("conflicting-unresolved");
+  });
+});
+
+// ───────────────────────────── classifyPrs ─────────────────────────────
+
+describe("classifyPrs", () => {
+  it("maps a mixed list to findings only, preserving input order", () => {
+    const findings = classifyPrs(
+      [
+        pr({ number: 1 }), // fresh → dropped
+        pr({ number: 2, createdAt: daysAgo(20), updatedAt: daysAgo(20) }), // stale
+        pr({ number: 3, isDraft: true, updatedAt: daysAgo(90) }), // draft → dropped
+        pr({ number: 4, mergeStateStatus: "CONFLICTING", createdAt: daysAgo(5), updatedAt: hoursAgo(1) }), // conflicting
+      ],
+      NOW,
+    );
+    expect(findings.map((f) => [f.number, f.class])).toEqual([
+      [2, "stale-no-motion"],
+      [4, "conflicting-unresolved"],
+    ]);
+  });
+
+  it("an all-clean repo yields zero findings (the close path's input)", () => {
+    expect(classifyPrs([pr({ number: 1 }), pr({ number: 2 })], NOW)).toEqual([]);
+  });
+
+  it("an empty PR list is zero findings, not a throw", () => {
+    expect(classifyPrs([], NOW)).toEqual([]);
+  });
+});
+
+// ───────────────────────────── summarize ─────────────────────────────
+
+describe("summarizeStalePr", () => {
+  function finding(cls: StalePrFinding["class"], number: number): StalePrFinding {
+    return { repo: "r", number, title: "t", url: "u", class: cls, ageDays: 9, idleDays: 9 };
+  }
+
+  it("zero findings reads as an explicit zero, never an empty string", () => {
+    expect(summarizeStalePr([])).toBe("0 findings");
+  });
+
+  it("counts per class in the canonical class order (strongest first)", () => {
+    const s = summarizeStalePr([finding("stale-no-motion", 1), finding("conflicting-unresolved", 2), finding("stale-no-motion", 3)]);
+    expect(s).toBe("3 finding(s): 1 conflicting-unresolved, 2 stale-no-motion");
+  });
+
+  it("omits a class with no members rather than printing a zero", () => {
+    expect(summarizeStalePr([finding("stale-no-motion", 1)])).toBe("1 finding(s): 1 stale-no-motion");
+  });
+});
+
+// ───────────────────────────── planStalePrAction (mirrors repo-hygiene's planIssueAction) ─────────────────────────────
+
+describe("planStalePrAction — the full 2x2 auto-reconcile truth table", () => {
+  it("findings + no open issue → open", () => {
+    expect(planStalePrAction(3, false)).toBe("open");
+  });
+  it("findings + open issue → update", () => {
+    expect(planStalePrAction(3, true)).toBe("update");
+  });
+  it("clean + open issue → close (the auto-reconcile leg, Rule #165)", () => {
+    expect(planStalePrAction(0, true)).toBe("close");
+  });
+  it("clean + no open issue → none (stays silent; never opens an all-clear issue)", () => {
+    expect(planStalePrAction(0, false)).toBe("none");
+  });
+});
+
+// ───────────────────────────── renderStalePrIssueBody ─────────────────────────────
+
+describe("renderStalePrIssueBody", () => {
+  const findings: StalePrFinding[] = [
+    { repo: "studio-b-ai/brain", number: 241, title: "brain: a stale one", url: "https://github.com/studio-b-ai/brain/pull/241", class: "stale-no-motion", ageDays: 9.25, idleDays: 9.25 },
+    { repo: "studio-b-ai/brain", number: 253, title: "brain: a conflicting one", url: "https://github.com/studio-b-ai/brain/pull/253", class: "conflicting-unresolved", ageDays: 4.5, idleDays: 0.1 },
+  ];
+
+  it("names the repo, the clock, and both thresholds so the reader can audit the verdict", () => {
+    const body = renderStalePrIssueBody("studio-b-ai/brain", findings, NOW);
+    expect(body).toContain("studio-b-ai/brain");
+    expect(body).toContain(NOW);
+    expect(body).toContain(`>= ${STALE_DAYS}d`);
+    expect(body).toContain(`>= ${CONFLICT_HOURS}h`);
+  });
+
+  it("renders one markdown table row per finding, with a clickable PR link and both ages", () => {
+    const body = renderStalePrIssueBody("studio-b-ai/brain", findings, NOW);
+    expect(body).toContain("| [#241](https://github.com/studio-b-ai/brain/pull/241) brain: a stale one | stale-no-motion | 9.3 | 9.3 |");
+    expect(body).toContain("| [#253](https://github.com/studio-b-ai/brain/pull/253) brain: a conflicting one | conflicting-unresolved | 4.5 | 0.1 |");
+    // Header + separator + one row each, and nothing else claiming to be a row.
+    expect(body.split("\n").filter((l) => l.startsWith("| ["))).toHaveLength(2);
+  });
+
+  it("states the flags-only law in the body — the issue must not read as 'something was merged'", () => {
+    const body = renderStalePrIssueBody("studio-b-ai/brain", findings, NOW);
+    expect(body).toMatch(/nominates/i);
+    expect(body).toMatch(/owning seat/i);
+  });
+
+  it("renders a header-only table when there are no findings (never throws)", () => {
+    const body = renderStalePrIssueBody("studio-b-ai/brain", [], NOW);
+    expect(body).toContain("| PR | class | age (d) | idle (d) |");
+    expect(body.split("\n").filter((l) => l.startsWith("| ["))).toHaveLength(0);
+  });
+});
