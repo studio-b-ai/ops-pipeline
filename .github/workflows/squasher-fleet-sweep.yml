@@ -148,7 +148,12 @@ jobs:
             if [ -n "${ONLY_REPO:-}" ] && [ "$repo" != "$ONLY_REPO" ]; then continue; fi
 
             train_flag=$(jq -r '.train' <<<"$repo_json")
+            # 2026-09-13 (Kevin "both fixes approved", ops#409): `fleet-internal` PRs are ENUMERATED with bugsquasher — the runner
+            # classified them; the gate (GATE_AUTHORITY_CLASSES) decides. Without this line the class existed but was never evaluated
+            # (first firing 06:38Z: 6 labeled PRs, 0 evaluated — #464/#465, the predicate is part of the receipt).
             sq=$(gh pr list --repo "$repo" --label bugsquasher --state open --json number --limit 100 --jq '[.[].number]')
+            fi_=$(gh pr list --repo "$repo" --label fleet-internal --state open --json number --limit 100 --jq '[.[].number]')
+            sq=$(jq -c -n --argjson a "$sq" --argjson b "$fi_" '$a + $b | unique')
             tr='[]'
             if [ "$train_flag" = "true" ]; then
               # `queued` = Kevin's 2026-09-02 one-vocabulary rename of train:ready (scripts/lib/label-authority.ts).
@@ -182,7 +187,7 @@ jobs:
             if [ -n "${ONLY_PR:-}" ] && [ "$train_flag" != "true" ] && [ "$only_pr_carries_queued" = "true" ]; then
               echo "queued PR $repo#$ONLY_PR is not this sweep's to merge (fleet registry train:false) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
             else
-              echo "$repo: bugsquasher=$(jq length <<<"$sq") queued(train)=$(jq length <<<"$tr")"
+              echo "$repo: bugsquasher+fleet-internal=$(jq length <<<"$sq") queued(train)=$(jq length <<<"$tr")"
             fi
 
             # Train entries pass ONLY train_ready — the squasher inputs are blanked
