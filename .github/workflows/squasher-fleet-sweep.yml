@@ -104,7 +104,7 @@ jobs:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           ONLY_REPO: ${{ inputs.repo }}
           ONLY_PR: ${{ inputs.pr_number }}
-          MAX_FANOUT: "20"
+          MAX_FANOUT: "50"   # 9/13: 47 labeled PRs, 20 evaluated → 27 never seen per tick; Principal sitting
           # ops#327: no single repo can crowd more than PER_REPO_CAP entries into
           # either group (queued, bugsquasher) inside the global fanout — so one
           # repo's backlog cannot starve the rest. 5 leaves headroom for four

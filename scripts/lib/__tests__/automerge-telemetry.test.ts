@@ -68,7 +68,7 @@ describe("formatGateReceiptLine", () => {
       prClass: "ci-infra",
       verdict: "missed",
       leg: "eligibility",
-      reasons: ["missing 'bugsquasher' label (has: none)"],
+      reasons: ["missing an eligibility label ('bugsquasher' or 'fleet-internal'; has: none)"],
     });
     expect(line).toContain("class=ci-infra");
     expect(line).toContain("leg=eligibility");
