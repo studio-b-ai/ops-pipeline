@@ -98,9 +98,21 @@ export const MERGE_AUTHORITY_LOGINS: readonly string[] = ["kbibelhausen"];
  */
 export const GATE_AUTHORITY_LOGIN = "studiob-fleet-bot[bot]";
 export const GATE_AUTHORITY_REQUIRED_LABELS: readonly string[] = ["bugsquasher", "candidate"];
+/**
+ * 2026-09-13 (Kevin, "both fixes approved" — brain #112 design call): a SECOND narrow class the same bot may queue —
+ * `fleet-internal` + `candidate`. `fleet-internal` is applied by the shift runner at box ONLY when the PR's repo is in the
+ * fleet registry (scripts/squasher-fleet.json) AND the diff touches no path named as a live surface in the team's kit (#97)
+ * — the runner is the classifier, this gate is the ceiling. Everything else about the gate is unchanged: `hold` wins,
+ * CI must be SUCCESS, the Sonnet vote must be CLEAN, the sha is pinned, staleness applies. Any other bot, any human other
+ * than MERGE_AUTHORITY_LOGINS, or this bot on a PR missing either label → still refused.
+ */
+export const GATE_AUTHORITY_CLASSES: readonly (readonly string[])[] = [
+  GATE_AUTHORITY_REQUIRED_LABELS,
+  ["fleet-internal", "candidate"],
+];
 
 export function isGateAuthorizedActor(actorLogin: string, currentLabels: readonly string[]): boolean {
-  return actorLogin === GATE_AUTHORITY_LOGIN && GATE_AUTHORITY_REQUIRED_LABELS.every((l) => currentLabels.includes(l));
+  return actorLogin === GATE_AUTHORITY_LOGIN && GATE_AUTHORITY_CLASSES.some((cls) => cls.every((l) => currentLabels.includes(l)));
 }
 
 /**
