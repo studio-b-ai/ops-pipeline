@@ -83,7 +83,7 @@ export function parseIssueRoutingTable(text: string): IssueRoutingTable {
     if (hasRoutine && hasHosted) {
       throw new Error(`issue-class-routing: worker \`${name}\` has both \`routine\` and \`hosted\` — pick one`);
     }
-    workers.set(name, { routine: hasRoutine ? spec.routine.trim() : undefined, hosted: hasHosted || undefined });
+    workers.set(name, { routine: hasRoutine ? (spec.routine as string).trim() : undefined, hosted: hasHosted || undefined });
   }
 
   if (!Array.isArray(doc.routes)) throw new Error("issue-class-routing: `routes` must be a list");
