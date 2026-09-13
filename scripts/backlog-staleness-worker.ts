@@ -60,6 +60,7 @@ import { classify, render, LABEL, type Finding, type IssueInput, type Thresholds
 import { parseSeverityTitle } from "./lib/severity-issue-reconcile.js";
 import { planIssueAction } from "./lib/repo-hygiene-lib.js";
 import { ensureLabel, listIssuesByLabel, openIssue, closeIssue, commentIssue, retitleIssue, editIssueBody, gh } from "./lib/github-issues.js";
+import { orphanCloseComment, sweepOrphanedTitleIssues } from "./lib/backlog-orphan-reconcile.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = join(HERE, "backlog-managers.yaml");
@@ -292,6 +293,46 @@ async function main(): Promise<void> {
       );
       closed += 1;
       console.log(`CLOSED backlog-staleness issue #${existingNum} for ${manager} (clean).`);
+    }
+  }
+
+  // ───────────── absent-entity orphan sweep (studio-b#112 leg: detector closers) ─────────────
+  // The loop above iterates `managers`, which is seeded ONLY from backlog-managers.yaml — so a
+  // manager REMOVED from the registry (renamed, retired, merged into another seat) could never be
+  // reached by the close path above, and its open aggregate issue stayed open forever asserting a
+  // stale finding count for a seat with no owner (Rule #412). Live at authoring time: #169 `CMO`,
+  // #166 `COO`, #157 `CTO` against a 4-manager registry. Same class already fixed for
+  // gateway-token-watch (#37), railway-volume-monitor (#71) and credential-expiry-monitor (#74);
+  // this ports the same name-in-set shape via lib/backlog-orphan-reconcile.ts.
+  //
+  // Runs over the SAME `openIssues` list already read above (no extra API call), and BEFORE the
+  // read-failure throw below on purpose: an orphan's absence from the registry is decided by the
+  // committed config alone, so a repo read that failed this run cannot make an orphan verdict
+  // wrong. Skipped entirely under a partial --repos scope, because `entries` is then a subset of
+  // the registry and a manager outside the scope would look absent when it is merely unscoped.
+  const scopeIsPartial = entries.length !== config.repos.length;
+  if (scopeIsPartial) {
+    console.log(
+      `[backlog-staleness] orphan sweep SKIPPED — --repos scoped this run to ${entries.length}/${config.repos.length} registry row(s); a manager outside the scope is not absent, merely unscoped.`,
+    );
+  } else {
+    const configuredManagers = new Set(config.repos.map((e) => e.manager));
+    const sweep = sweepOrphanedTitleIssues(
+      openIssues.map((i) => ({ number: i.number, title: i.title, state: "OPEN" })),
+      configuredManagers,
+      LABEL,
+    );
+    for (const action of sweep.actions) {
+      if (dryRun) {
+        console.log(`--- [dry-run] orphan sweep: would SWEEP-CLOSE #${action.number} ${action.title} (manager '${action.entity}' no longer in the registry) ---`);
+        continue;
+      }
+      closeIssue(SELF_REPO, action.number, orphanCloseComment(action.entity, "scripts/backlog-managers.yaml"));
+      closed += 1;
+      console.log(`SWEEP-CLOSED backlog-staleness issue #${action.number} — manager '${action.entity}' no longer in the registry.`);
+    }
+    if (sweep.actions.length === 0) {
+      console.log(`[backlog-staleness] orphan sweep: 0 orphan(s) among ${openIssues.length} open issue(s) vs ${configuredManagers.size} configured manager(s).`);
     }
   }
 
