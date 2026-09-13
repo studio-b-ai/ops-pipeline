@@ -175,3 +175,88 @@ export function planStalePrAction(findingCount: number, issueOpen: boolean): Sta
   if (findingCount > 0) return issueOpen ? "update" : "open";
   return issueOpen ? "close" : "none";
 }
+
+/**
+ * ── The swept POPULATION (studio-b#112 leg 1 ↔ leg 4 coherence) ──────────────────────
+ *
+ * A watcher's predicate is only half its receipt — the other half is the POPULATION it
+ * could see (Rule #465). This leg originally swept `backlog-managers.yaml` alone (13
+ * repos, the "which repos does a seat open PRs in" answer, reused per Rule #283). But
+ * stint #112's FIRST leg widened the RELEASE door (`train: true` in squasher-fleet.json)
+ * onto claude-config-plane, brain, radio, lightsout and client-asthetik — and three of
+ * those five (claude-config-plane, radio, lightsout) are absent from backlog-managers.yaml.
+ *
+ * So the door could auto-merge in a repo the rot-watch could not see. Measured live
+ * 2026-09-13T12:54Z, exactly the PRs that fell through the gap:
+ *   - studio-b-ai/claude-config-plane#272 — mergeable=CONFLICTING mergeStateStatus=DIRTY
+ *   - studio-b-ai/radio#1010            — mergeable=CONFLICTING mergeStateStatus=DIRTY
+ * Neither repo was in ANY sweep population, so neither PR was watched by anything.
+ *
+ * The fix is a UNION derived at read time, never a mutation of either file:
+ *   - `backlog-managers.yaml` is shared committed config consumed by three OTHER workers
+ *     (backlog-compliance-worker, backlog-staleness-worker, train-liveness-worker) —
+ *     widening it would silently change THEIR behavior too (Rule #1 scope discipline).
+ *   - `squasher-fleet.json` is the door's own registry, owned by the door.
+ * Reading both and unioning leaves each file's owner intact while closing the gap: any
+ * repo the release door can act in is a repo this watch covers. Pure + order-stable so
+ * the population itself is unit-testable.
+ *
+ * Seat attribution: backlog-managers.yaml names a `manager` per repo; a door-registry
+ * repo with no manager row is attributed to the door's owning seat (Mechanic holds
+ * ops-pipeline). The finding still lands on the OWNING repo either way (Rule #165).
+ */
+export const DOOR_ONLY_FALLBACK_MANAGER = "Mechanic";
+
+export interface SweepRepo {
+  repo: string;
+  manager: string;
+  /** Which registry put this repo in the population — rendered as the finding's provenance. */
+  source: "backlog-managers" | "release-door" | "both";
+}
+
+export interface BacklogManagerRow {
+  repo: string;
+  manager?: string;
+}
+
+export interface DoorRegistryRow {
+  repo: string;
+  /** squasher-fleet.json's `train` field — true = the RELEASE (`queued`) leg is live here. */
+  train?: boolean;
+}
+
+/**
+ * Union the backlog-manager rows with the release-door registry's TRAIN-ENABLED repos.
+ *
+ * Only `train: true` door rows join: a registry row with the release leg off cannot
+ * auto-merge, so it is not the coherence gap this closes (and pulling all 18 registry
+ * rows in would widen the watch on a claim nobody made). Pure; output order is stable —
+ * backlog-manager rows first in their config order, then door-only repos in registry
+ * order — so the swept order (and thus the issue bodies) are deterministic.
+ */
+export function resolveSweepPopulation(
+  backlogRows: BacklogManagerRow[],
+  doorRows: DoorRegistryRow[],
+): SweepRepo[] {
+  const doorTrain = new Set(doorRows.filter((d) => d.train === true).map((d) => d.repo));
+  const seen = new Set<string>();
+  const out: SweepRepo[] = [];
+
+  for (const row of backlogRows) {
+    if (seen.has(row.repo)) continue; // a duplicated config row must not double-sweep
+    seen.add(row.repo);
+    out.push({
+      repo: row.repo,
+      manager: row.manager ?? DOOR_ONLY_FALLBACK_MANAGER,
+      source: doorTrain.has(row.repo) ? "both" : "backlog-managers",
+    });
+  }
+
+  for (const repo of doorTrain) {
+    if (seen.has(repo)) continue;
+    seen.add(repo);
+    out.push({ repo, manager: DOOR_ONLY_FALLBACK_MANAGER, source: "release-door" });
+  }
+
+  return out;
+}

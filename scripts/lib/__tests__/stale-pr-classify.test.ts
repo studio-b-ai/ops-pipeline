@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CONFLICT_HOURS,
+  DOOR_ONLY_FALLBACK_MANAGER,
   STALE_DAYS,
   STALE_PR_CLASSES,
   MAX_UNKNOWN_MERGEABLE,
@@ -9,7 +10,10 @@ import {
   isMergeabilityUnresolved,
   planStalePrAction,
   renderStalePrIssueBody,
+  resolveSweepPopulation,
   summarizeStalePr,
+  type BacklogManagerRow,
+  type DoorRegistryRow,
   type Mergeable,
   type MergeStateStatus,
   type PrInput,
@@ -366,5 +370,119 @@ describe("renderStalePrIssueBody", () => {
     const body = renderStalePrIssueBody("studio-b-ai/brain", [], NOW);
     expect(body).toContain("| PR | class | age (d) | idle (d) | mergeable | mergeStateStatus |");
     expect(body.split("\n").filter((l) => l.startsWith("| ["))).toHaveLength(0);
+  });
+});
+
+// ───────────────────────────── resolveSweepPopulation ─────────────────────────────
+
+/**
+ * The population half of the receipt (#465). These cases pin the REAL registries as
+ * measured 2026-09-13: backlog-managers.yaml had 13 repos, squasher-fleet.json had 18
+ * with train:true on 11 — and three train-enabled release-door repos
+ * (claude-config-plane, radio, lightsout) were absent from the yaml entirely, so the
+ * door could auto-merge where this watch was blind.
+ */
+describe("resolveSweepPopulation", () => {
+  const backlog: BacklogManagerRow[] = [
+    { repo: "studio-b-ai/ops-pipeline", manager: "Mechanic" },
+    { repo: "studio-b-ai/brain", manager: "Dispatcher" },
+    { repo: "studio-b-ai/client-asthetik", manager: "Mechanic" },
+  ];
+  const door: DoorRegistryRow[] = [
+    { repo: "studio-b-ai/brain", train: true },
+    { repo: "studio-b-ai/client-asthetik", train: true },
+    { repo: "studio-b-ai/claude-config-plane", train: true },
+    { repo: "studio-b-ai/radio", train: true },
+    { repo: "studio-b-ai/lightsout", train: true },
+    { repo: "studio-b-ai/ops-pipeline", train: false },
+    { repo: "studio-b-ai/acudev", train: false },
+  ];
+
+  it("KNOWN-GOOD: every backlog-manager row survives the union with its manager intact (#471)", () => {
+    const pop = resolveSweepPopulation(backlog, door);
+    for (const row of backlog) {
+      const got = pop.find((p) => p.repo === row.repo);
+      expect(got, `${row.repo} must not be dropped by the union`).toBeDefined();
+      expect(got!.manager).toBe(row.manager);
+    }
+  });
+
+  it("KNOWN-BAD (the live gap): train-enabled door repos absent from the yaml ARE swept", () => {
+    const pop = resolveSweepPopulation(backlog, door).map((p) => p.repo);
+    // The exact three that fell through on 2026-09-13, two with a live CONFLICTING PR.
+    expect(pop).toContain("studio-b-ai/claude-config-plane"); // #272 CONFLICTING/DIRTY
+    expect(pop).toContain("studio-b-ai/radio"); // #1010 CONFLICTING/DIRTY
+    expect(pop).toContain("studio-b-ai/lightsout");
+  });
+
+  it("does NOT pull in door rows whose release leg is off — the gap is train:true only", () => {
+    const pop = resolveSweepPopulation(backlog, door).map((p) => p.repo);
+    // acudev is train:false and has no backlog row, so nothing put it in the population.
+    expect(pop).not.toContain("studio-b-ai/acudev");
+  });
+
+  it("keeps a train:false door repo that has its OWN backlog row (union, not intersection)", () => {
+    const pop = resolveSweepPopulation(backlog, door).map((p) => p.repo);
+    expect(pop).toContain("studio-b-ai/ops-pipeline"); // train:false, but a backlog row
+  });
+
+  it("labels provenance so a zero can be read against what the sweep could see", () => {
+    const pop = resolveSweepPopulation(backlog, door);
+    const by = (r: string) => pop.find((p) => p.repo === r)!;
+    expect(by("studio-b-ai/brain").source).toBe("both"); // in yaml AND train-enabled
+    expect(by("studio-b-ai/ops-pipeline").source).toBe("backlog-managers"); // yaml only
+    expect(by("studio-b-ai/radio").source).toBe("release-door"); // door only — the gap
+  });
+
+  it("attributes a door-only repo to the door's owning seat (no unowned finding)", () => {
+    const pop = resolveSweepPopulation(backlog, door);
+    expect(pop.find((p) => p.repo === "studio-b-ai/radio")!.manager).toBe(DOOR_ONLY_FALLBACK_MANAGER);
+    expect(pop.every((p) => p.manager.length > 0)).toBe(true);
+  });
+
+  it("never double-sweeps: a repo in both registries appears exactly once", () => {
+    const pop = resolveSweepPopulation(backlog, door);
+    const dupes = pop.map((p) => p.repo).filter((r, i, a) => a.indexOf(r) !== i);
+    expect(dupes).toEqual([]);
+    expect(new Set(pop.map((p) => p.repo)).size).toBe(pop.length);
+  });
+
+  it("dedupes a duplicated backlog row rather than sweeping it twice", () => {
+    const pop = resolveSweepPopulation(
+      [{ repo: "studio-b-ai/brain", manager: "Dispatcher" }, { repo: "studio-b-ai/brain", manager: "Mechanic" }],
+      [],
+    );
+    expect(pop).toHaveLength(1);
+    expect(pop[0].manager).toBe("Dispatcher"); // first row wins, deterministically
+  });
+
+  it("is order-stable: backlog rows in config order, then door-only repos in registry order", () => {
+    const pop = resolveSweepPopulation(backlog, door).map((p) => p.repo);
+    expect(pop).toEqual([
+      "studio-b-ai/ops-pipeline",
+      "studio-b-ai/brain",
+      "studio-b-ai/client-asthetik",
+      "studio-b-ai/claude-config-plane",
+      "studio-b-ai/radio",
+      "studio-b-ai/lightsout",
+    ]);
+    // Stable across repeated calls — the issue bodies must not reshuffle run to run.
+    expect(resolveSweepPopulation(backlog, door).map((p) => p.repo)).toEqual(pop);
+  });
+
+  it("treats a missing `train` field as off (absent is not enabled)", () => {
+    const pop = resolveSweepPopulation([], [{ repo: "studio-b-ai/roundhouse" }]).map((p) => p.repo);
+    expect(pop).toEqual([]);
+  });
+
+  it("an empty door registry degrades to exactly the backlog population (no crash)", () => {
+    const pop = resolveSweepPopulation(backlog, []);
+    expect(pop.map((p) => p.repo)).toEqual(backlog.map((b) => b.repo));
+    expect(pop.every((p) => p.source === "backlog-managers")).toBe(true);
+  });
+
+  it("a backlog row with no manager still gets an owning seat", () => {
+    const pop = resolveSweepPopulation([{ repo: "studio-b-ai/clients" }], []);
+    expect(pop[0].manager).toBe(DOOR_ONLY_FALLBACK_MANAGER);
   });
 });

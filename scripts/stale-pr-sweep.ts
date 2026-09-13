@@ -40,11 +40,15 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { classifyPrs, isMergeabilityUnresolved, planStalePrAction, renderStalePrIssueBody, summarizeStalePr, type Mergeable, type MergeStateStatus, type PrInput } from "./lib/stale-pr-classify.js";
+import { classifyPrs, isMergeabilityUnresolved, planStalePrAction, renderStalePrIssueBody, resolveSweepPopulation, summarizeStalePr, type BacklogManagerRow, type DoorRegistryRow, type Mergeable, type MergeStateStatus, type PrInput, type SweepRepo } from "./lib/stale-pr-classify.js";
 import { ensureLabel, listIssuesByLabel, openIssue, closeIssue, commentIssue, gh } from "./lib/github-issues.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = join(HERE, "backlog-managers.yaml");
+// The RELEASE door's own registry (ops#405 flipped `train: true` onto 5 more repos).
+// Read-only here — this worker never writes either config. See resolveSweepPopulation's
+// header for why the population is a read-time UNION instead of a widened yaml.
+const DOOR_REGISTRY_FILE = join(HERE, "squasher-fleet.json");
 const LABEL = "stale-pr";
 // <=100 chars — GitHub silently rejects longer; guarded by github-issues.test.ts's
 // repo-wide literal scrape, which caught this at 111 chars on first write.
@@ -54,20 +58,26 @@ const LABEL_COLOR = "FBCA04"; // yellow — matches the stint's "yellow stale-pr
 /** Safety bound, not a paging mechanism (Rule #331). */
 const PR_LIST_LIMIT = 500;
 
-interface RepoManagerEntry {
-  repo: string;
-}
-
-interface Config {
-  repos: RepoManagerEntry[];
-}
-
-function loadConfig(): Config {
-  const raw = parseYaml(readFileSync(CONFIG_FILE, "utf-8")) as { repos?: RepoManagerEntry[] } | null;
-  if (!raw || !Array.isArray(raw.repos) || raw.repos.length === 0) {
+/**
+ * The swept population: backlog-managers.yaml's rows UNION the release door's
+ * train-enabled repos. Both files are read read-only and neither is mutated — see
+ * resolveSweepPopulation's header in the classify lib for the measured gap this closes
+ * (claude-config-plane#272 and radio#1010 were CONFLICTING in door repos no sweep covered).
+ * A malformed/missing door registry is FATAL, not a silent narrowing: degrading back to
+ * the 13-repo population is exactly the blind spot this leg exists to remove (Rule #465).
+ */
+function loadPopulation(): SweepRepo[] {
+  const rawYaml = parseYaml(readFileSync(CONFIG_FILE, "utf-8")) as { repos?: BacklogManagerRow[] } | null;
+  if (!rawYaml || !Array.isArray(rawYaml.repos) || rawYaml.repos.length === 0) {
     throw new Error(`${CONFIG_FILE} malformed: "repos" is missing or empty`);
   }
-  return { repos: raw.repos };
+
+  const rawJson = JSON.parse(readFileSync(DOOR_REGISTRY_FILE, "utf-8")) as { repos?: DoorRegistryRow[] } | null;
+  if (!rawJson || !Array.isArray(rawJson.repos) || rawJson.repos.length === 0) {
+    throw new Error(`${DOOR_REGISTRY_FILE} malformed: "repos" is missing or empty — refusing to sweep a silently-narrowed population (Rule #465).`);
+  }
+
+  return resolveSweepPopulation(rawYaml.repos, rawJson.repos);
 }
 
 interface GhPrRow {
@@ -163,16 +173,23 @@ async function main(): Promise<void> {
   const { dryRun, now, reposFilter } = parseArgs(process.argv.slice(2));
   console.log(`=== stale-pr-sweep${dryRun ? " --dry-run (real reads, NO issue mutations)" : ""} now=${now}${reposFilter ? ` --repos ${reposFilter.join(",")}` : ""} ===`);
 
-  const config = loadConfig();
-  const configRepoNames = new Set(config.repos.map((e) => e.repo));
+  const population = loadPopulation();
+  const configRepoNames = new Set(population.map((e) => e.repo));
   if (reposFilter) {
     if (reposFilter.length === 0) throw new Error("--repos parsed to zero repo names (check for stray commas/whitespace)");
     const unknown = reposFilter.filter((r) => !configRepoNames.has(r));
     if (unknown.length > 0) {
-      throw new Error(`--repos names repo(s) not present in ${CONFIG_FILE}: ${unknown.join(", ")}. Known repos: ${[...configRepoNames].sort().join(", ")}`);
+      throw new Error(`--repos names repo(s) not in the swept population (${CONFIG_FILE} ∪ train-enabled ${DOOR_REGISTRY_FILE}): ${unknown.join(", ")}. Known repos: ${[...configRepoNames].sort().join(", ")}`);
     }
   }
-  const entries = reposFilter ? config.repos.filter((e) => reposFilter.includes(e.repo)) : config.repos;
+  const entries = reposFilter ? population.filter((e) => reposFilter.includes(e.repo)) : population;
+
+  // The population IS part of the receipt (#465): print where each swept repo came from,
+  // so a zero can be read against what the sweep could actually see.
+  const doorOnly = population.filter((e) => e.source === "release-door").map((e) => e.repo);
+  console.log(
+    `[stale-pr-sweep] population=${population.length} (backlog-managers ${population.filter((e) => e.source !== "release-door").length} + release-door-only ${doorOnly.length}${doorOnly.length > 0 ? `: ${doorOnly.join(", ")}` : ""})`,
+  );
 
   const readFailed = new Set<string>();
   let opened = 0;
