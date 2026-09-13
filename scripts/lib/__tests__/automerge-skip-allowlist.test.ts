@@ -172,4 +172,54 @@ describe("committed data file", () => {
       expect(name).not.toMatch(/^build \//);
     }
   });
+
+  // ───── studio-b#112, 2026-09-13: radio's three by-design PR-event skips ─────
+  // Born from a live defect, not a hypothetical: the 19:17Z sweep refused
+  // radio#1008 at leg=ci-rollup with ciClean=false while GitHub's own
+  // mergeStateStatus said CLEAN. Cause: ops#405 flipped radio onto the release
+  // leg without giving it a sanction set, so these three notification jobs —
+  // structurally unable to run on a pull_request event (radio origin/main
+  // ci.yml `if:` conditions pin them to refs/heads/main push) — made radio's
+  // CI leg permanently inert. Guards the regression in BOTH directions per
+  // Rule #322.
+  it("sanctions radio's three by-design PR-event notification skips (studio-b#112)", () => {
+    const resolved = loadSanctionedSkips("studio-b-ai/radio");
+    expect(resolved.has("Post-Deploy Smoke")).toBe(true);
+    expect(resolved.has("Slack Alert on Failure")).toBe(true);
+    expect(resolved.has("Slack Recovery Notice")).toBe(true);
+  });
+
+  it("NEGATIVE CONTROL: radio's sanction set never grows past those three — no real gate is sanctioned", () => {
+    const resolved = loadSanctionedSkips("studio-b-ai/radio");
+    expect([...resolved].sort()).toEqual([
+      "Post-Deploy Smoke",
+      "Slack Alert on Failure",
+      "Slack Recovery Notice",
+    ]);
+    // radio's real gates stay required — naming them explicitly so a future
+    // widening of this entry fails loudly here rather than in a live sweep.
+    for (const gate of [
+      "Build & Check",
+      "Cross-System QA / API Tests (Vitest)",
+      "gitleaks / Secret scan (gitleaks, Rule 363)",
+      "boundary-check",
+    ]) {
+      expect(resolved.has(gate)).toBe(false);
+    }
+  });
+
+  it("radio's entry matches webhook-router's precedent exactly (same ci.yml shape, same three names)", () => {
+    const radio = [...loadSanctionedSkips("studio-b-ai/radio")].sort();
+    const wr = [...loadSanctionedSkips("studio-b-ai/webhook-router")].sort();
+    expect(radio).toEqual(wr);
+  });
+
+  it("NEGATIVE CONTROL: lightsout stays unsanctioned — a repo with zero CI must keep failing closed", () => {
+    // ops#405 flipped lightsout on too, but its refusal is CORRECT and is NOT
+    // this change's business: it has no .github/workflows at all (GitHub API
+    // 404 at 19:5xZ), so isRollupClean's empty-rollup guard refuses it. Adding
+    // skips could never help a repo with no checks, and sanctioning anything
+    // here would be vacuous-pass territory.
+    expect([...loadSanctionedSkips("studio-b-ai/lightsout")]).toEqual([]);
+  });
 });
