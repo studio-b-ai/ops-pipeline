@@ -40,6 +40,14 @@
  */
 
 export const STALE_DAYS = 7;
+
+/**
+ * How many of a repo's non-draft open PRs may report `mergeable="UNKNOWN"` before the
+ * whole read is rejected as unresolved. Zero: GitHub resolves mergeability for the WHOLE
+ * page at once, so a legitimate warm read has no UNKNOWN rows at all (observed across
+ * 13 repos / 34 PRs, 2026-09-13) — one UNKNOWN means the page was served cold.
+ */
+export const MAX_UNKNOWN_MERGEABLE = 0;
 export const CONFLICT_HOURS = 48;
 
 /** `mergeable` — the ONLY field that reports a conflict in list mode (see header). */
@@ -103,6 +111,30 @@ export function classifyPr(pr: PrInput, nowIso: string): StalePrFinding | null {
 
 export function classifyPrs(prs: PrInput[], nowIso: string): StalePrFinding[] {
   return prs.map((pr) => classifyPr(pr, nowIso)).filter((f): f is StalePrFinding => f !== null);
+}
+
+/**
+ * GitHub computes `mergeable` LAZILY (#382 — a read taken before the value resolves is a
+ * FAILED INSTRUMENT, not a result). A cold `gh pr list` returns `mergeable="UNKNOWN"` for
+ * every row; a warm one returns the truth. Found live 2026-09-13 while proving this leg's
+ * first firing: the 12:42Z dry-run reported `brain: 18 open PR(s) -> 0 findings` while the
+ * very same query moments later reported **7 CONFLICTING** (#160 at 308h, #221, #225,
+ * #230, #242, #252, #270). `classifyPr` treats UNKNOWN as not-conflicting, so a cold page
+ * degrades SILENTLY to a healthy-looking fleet-wide zero.
+ *
+ * That zero is not merely a missed finding: `planStalePrAction(0, true)` returns "close",
+ * so a cold read would have AUTO-CLOSED a repo's live `[stale-pr]` issue — the exact thing
+ * this worker's step-4 contract promises never to do ("never close on data you didn't
+ * fully reconfirm", Rule #465).
+ *
+ * So an unresolved page is a READ FAILURE, routed into the existing per-repo skip path
+ * (issue left untouched, next run retries) rather than classified. Drafts are excluded
+ * from the count because they are excluded from classification.
+ */
+export function isMergeabilityUnresolved(prs: PrInput[]): boolean {
+  const considered = prs.filter((p) => !p.isDraft);
+  const unknown = considered.filter((p) => p.mergeable === "UNKNOWN").length;
+  return unknown > MAX_UNKNOWN_MERGEABLE;
 }
 
 /** Fleet-wide summary line for logs / the [stale-pr] issue's opening line. */

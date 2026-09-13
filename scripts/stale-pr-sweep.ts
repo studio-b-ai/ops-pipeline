@@ -19,6 +19,11 @@
  *      open but came back clean this run: auto-close with a comment.
  *   4. A repo whose `gh pr list` read fails is skipped this run (its issue, if open,
  *      stays open unmodified — Rule #465: never close on data you didn't fully reconfirm).
+ *      A page whose `mergeable` came back UNKNOWN counts as such a failure: GitHub computes
+ *      mergeability lazily, so a cold read reports UNKNOWN everywhere and would classify as
+ *      a healthy zero (and then AUTO-CLOSE the repo's live issue). `listOpenPrsResolved`
+ *      re-reads to warm the page and gives up into the skip path — see
+ *      `isMergeabilityUnresolved` in the classify lib for the measured evidence.
  *
  * Flags-only (the classify lib's Law): never rebases, closes, or merges a PR itself — the
  * owning seat (named by backlog-managers.yaml's manager column) acts on the finding in its
@@ -35,7 +40,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { classifyPrs, planStalePrAction, renderStalePrIssueBody, summarizeStalePr, type Mergeable, type MergeStateStatus, type PrInput } from "./lib/stale-pr-classify.js";
+import { classifyPrs, isMergeabilityUnresolved, planStalePrAction, renderStalePrIssueBody, summarizeStalePr, type Mergeable, type MergeStateStatus, type PrInput } from "./lib/stale-pr-classify.js";
 import { ensureLabel, listIssuesByLabel, openIssue, closeIssue, commentIssue, gh } from "./lib/github-issues.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -74,6 +79,48 @@ interface GhPrRow {
   mergeable: string;
   mergeStateStatus: string;
   isDraft: boolean;
+}
+
+/**
+ * How many times to re-read a repo whose page came back with unresolved mergeability, and
+ * how long to wait between tries. GitHub starts computing `mergeable` when it is ASKED for
+ * (the cold read is itself the trigger), so the retry is what warms the page — measured
+ * 2026-09-13: brain's cold read was all-UNKNOWN and a re-read seconds later reported the
+ * real 7 CONFLICTING rows. Bounded, then surfaced as a read failure (Rule #382: a poll that
+ * never waited proves nothing; Rule #465: never act on data you didn't fully reconfirm).
+ */
+const MERGEABILITY_RETRIES = 4;
+const MERGEABILITY_RETRY_MS = 4000;
+
+function sleepSync(ms: number): void {
+  // Deliberately synchronous: this worker is a straight-line script and every other `gh`
+  // call in it is execFileSync — an async detour here would be the only await in the file.
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Read a repo's open PRs with mergeability actually RESOLVED. Retries a cold page
+ * (see `isMergeabilityUnresolved`) and throws — into the caller's per-repo skip path — if
+ * it never resolves, rather than classifying against UNKNOWN and reporting a blind zero.
+ */
+function listOpenPrsResolved(repo: string): PrInput[] {
+  let prs = listOpenPrs(repo);
+  for (let attempt = 1; attempt <= MERGEABILITY_RETRIES && isMergeabilityUnresolved(prs); attempt += 1) {
+    const started = Date.now();
+    sleepSync(MERGEABILITY_RETRY_MS);
+    const waited = Date.now() - started;
+    console.warn(
+      `stale-pr-sweep: ${repo} returned unresolved mergeability (GitHub computes it lazily) — re-read ${attempt}/${MERGEABILITY_RETRIES} after ${waited}ms.`,
+    );
+    prs = listOpenPrs(repo);
+  }
+  if (isMergeabilityUnresolved(prs)) {
+    const unknown = prs.filter((p) => !p.isDraft && p.mergeable === "UNKNOWN").map((p) => `#${p.number}`);
+    throw new Error(
+      `${repo}: mergeability still UNRESOLVED after ${MERGEABILITY_RETRIES} re-reads (UNKNOWN on ${unknown.join(", ")}). Refusing to classify — an UNKNOWN page reads as a healthy zero and would auto-close this repo's live [stale-pr] issue (Rules #382/#465).`,
+    );
+  }
+  return prs;
 }
 
 function listOpenPrs(repo: string): PrInput[] {
@@ -136,7 +183,7 @@ async function main(): Promise<void> {
   for (const entry of entries) {
     let prs: PrInput[];
     try {
-      prs = listOpenPrs(entry.repo);
+      prs = listOpenPrsResolved(entry.repo);
     } catch (err) {
       readFailed.add(entry.repo);
       console.warn(`stale-pr-sweep: read failed for ${entry.repo} — skipping this repo this run: ${err instanceof Error ? err.message : String(err)}`);

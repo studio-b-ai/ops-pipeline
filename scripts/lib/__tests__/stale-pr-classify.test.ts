@@ -3,8 +3,10 @@ import {
   CONFLICT_HOURS,
   STALE_DAYS,
   STALE_PR_CLASSES,
+  MAX_UNKNOWN_MERGEABLE,
   classifyPr,
   classifyPrs,
+  isMergeabilityUnresolved,
   planStalePrAction,
   renderStalePrIssueBody,
   summarizeStalePr,
@@ -44,6 +46,92 @@ function pr(overrides: Partial<PrInput> = {}): PrInput {
     ...overrides,
   };
 }
+
+// ──────────────── unresolved mergeability is a FAILED READ, not a clean result ────────────────
+
+/**
+ * Regression guard for the live defect found 2026-09-13 while proving this leg's first
+ * firing (#464): GitHub computes `mergeable` lazily, so a COLD `gh pr list` page reports
+ * UNKNOWN for every row. `classifyPr` reads UNKNOWN as not-conflicting, so the sweep
+ * reported `brain: 18 open PR(s) -> 0 findings` while the same query moments later showed
+ * 7 CONFLICTING (#160 at 308h, #221, #225, #230, #242, #252, #270). Worse, that zero drives
+ * `planStalePrAction(0, true) === "close"` — a cold read would auto-close the repo's live
+ * issue, which is exactly what the worker's step-4 contract forbids (#465).
+ */
+describe("isMergeabilityUnresolved", () => {
+  it("is zero-tolerance by contract — GitHub resolves a whole page at once", () => {
+    expect(MAX_UNKNOWN_MERGEABLE).toBe(0);
+  });
+
+  // #322 positive control: the instrument must also see a known-GOOD (a warm page).
+  it("accepts a fully-resolved page (known-good must PASS, #322/#471)", () => {
+    const warm = [
+      pr({ number: 160, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" }),
+      pr({ number: 253, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" }),
+    ];
+    expect(isMergeabilityUnresolved(warm)).toBe(false);
+  });
+
+  // #322 negative control: it must REJECT the known-bad cold page.
+  it("rejects the all-UNKNOWN cold page that produced the live blind zero (known-bad must FIRE)", () => {
+    const cold = [160, 221, 225, 230, 242, 252, 270].map((number) =>
+      pr({ number, mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN", createdAt: daysAgo(13), updatedAt: hoursAgo(6) }),
+    );
+    expect(isMergeabilityUnresolved(cold)).toBe(true);
+    // The whole point: classification against that page looks perfectly healthy.
+    expect(classifyPrs(cold, NOW)).toHaveLength(0);
+    // ...and a healthy zero on an existing issue means CLOSE. Hence read-failure routing.
+    expect(planStalePrAction(0, true)).toBe("close");
+  });
+
+  it("rejects a page where only ONE row is unresolved (a partial page is still a cold page)", () => {
+    expect(
+      isMergeabilityUnresolved([
+        pr({ number: 1, mergeable: "MERGEABLE" }),
+        pr({ number: 2, mergeable: "MERGEABLE" }),
+        pr({ number: 3, mergeable: "UNKNOWN" }),
+      ]),
+    ).toBe(true);
+  });
+
+  it("ignores drafts — they are excluded from classification, so their mergeability is irrelevant", () => {
+    expect(
+      isMergeabilityUnresolved([
+        pr({ number: 1, mergeable: "MERGEABLE" }),
+        pr({ number: 2, mergeable: "UNKNOWN", isDraft: true }),
+      ]),
+    ).toBe(false);
+  });
+
+  it("accepts an empty page — a repo with zero open PRs is honestly clean, not unresolved", () => {
+    expect(isMergeabilityUnresolved([])).toBe(false);
+  });
+
+  it("accepts a draft-only page (no classifiable row can be blind)", () => {
+    expect(isMergeabilityUnresolved([pr({ mergeable: "UNKNOWN", isDraft: true })])).toBe(false);
+  });
+
+  it("proves the warm read would have caught the real finding the cold read missed", () => {
+    // brain#160: created 308h before NOW, CONFLICTING once the page warms.
+    const warm160 = pr({
+      repo: "studio-b-ai/brain",
+      number: 160,
+      createdAt: hoursAgo(308),
+      updatedAt: hoursAgo(6),
+      mergeable: "CONFLICTING",
+      mergeStateStatus: "DIRTY",
+    });
+    expect(isMergeabilityUnresolved([warm160])).toBe(false);
+    const found = classifyPrs([warm160], NOW);
+    expect(found).toHaveLength(1);
+    expect(found[0].class).toBe("conflicting-unresolved");
+
+    // Same PR, cold: silently zero findings — the defect, pinned.
+    const cold160 = { ...warm160, mergeable: "UNKNOWN" as Mergeable, mergeStateStatus: "UNKNOWN" as MergeStateStatus };
+    expect(classifyPrs([cold160], NOW)).toHaveLength(0);
+    expect(isMergeabilityUnresolved([cold160])).toBe(true);
+  });
+});
 
 // ───────────────────────────── thresholds are the contract ─────────────────────────────
 
