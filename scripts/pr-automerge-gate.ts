@@ -398,6 +398,18 @@ async function evaluate(
   }
   const author = prJson.author.login;
   const labels = prJson.labels.map((l) => l.name);
+  // 2026-09-13 (Kevin "door pens"): a DIRTY fleet-internal PR was refused forever — crews branch from a stale main and never
+  // rebase (cp#272/#277, radio#1010, brain#252 sat DIRTY 10h+). Ask GitHub to update the branch from base (a merge commit,
+  // never a force-push; conflicts leave it DIRTY and the receipt says so). The PR re-runs CI and is re-evaluated when its
+  // fingerprint changes (change-driven sweep). Only for fleet-internal — a human's PR is theirs to rebase.
+  if (prJson.mergeStateStatus === "DIRTY" && labels.includes(FLEET_INTERNAL_LABEL)) {
+    try {
+      gh(["api", "-X", "PUT", `repos/${repo}/pulls/${pr}/update-branch`, "-f", `expected_head_sha=${prJson.headRefOid}`]);
+      console.log(`[info] pr-automerge-gate ${repo}#${pr}: DIRTY fleet-internal — requested update-branch from base; re-evaluated when CI lands`);
+    } catch (e) {
+      console.log(`[info] pr-automerge-gate ${repo}#${pr}: DIRTY and update-branch refused (real conflict) — ${(e as Error).message.split("\n")[0]}`);
+    }
+  }
   const totalChangedLines = prJson.additions + prJson.deletions;
   // 2026-09-09 Kevin 'widen': the code-fix cap counts additions only (deletions of dead code are not risk).
   const codeFixLines = prJson.additions;
@@ -583,6 +595,18 @@ async function evaluate(
     );
     console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "review", reasons: finalCheck.reasons }));
     await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "review", reasons: [...finalCheck.reasons, `review detail: ${review.detail}`], additions: prJson.additions, deletions: prJson.deletions });
+    // 2026-09-13 (Kevin "door pens"): a FLAG used to be a dead end — the refusal enrolled, nothing a human saw, the PR sat
+    // (ops#407/#413, bolt#2265 all day). Now the FLAG is a CARD: the reviewer's reason lands as a PR comment and the PR gets
+    // `needs-human`, which the Toto glance surfaces as a blue card. Kevin's `a` applies `reviewed` (the existing sha-pinned
+    // human receipt, humanReviewReceipt()) and the next sweep merges; `x` applies `hold`. Idempotent per head sha.
+    try {
+      const marker = `<!-- gate-flag ${prJson.headRefOid} -->`;
+      const prior = gh(["pr", "view", String(pr), "--repo", repo, "--json", "comments", "--jq", `[.comments[].body | select(contains("${marker}"))] | length`]).trim();
+      if (prior === "0") {
+        commentOnPr(repo, pr, `${marker}\n**Release door — review FLAG** (head \`${prJson.headRefOid.slice(0, 7)}\`)\n\n${review.detail}\n\n_A human \`reviewed\` label on this head lets the next sweep merge; \`hold\` parks it. This is a blue card on the glass._`);
+        gh(["api", "-X", "POST", `repos/${repo}/issues/${pr}/labels`, "-f", "labels[]=needs-human"]);
+      }
+    } catch (e) { console.log(`[warn] FLAG→card failed for ${repo}#${pr}: ${(e as Error).message.split("\n")[0]}`); }
     return;
   }
 

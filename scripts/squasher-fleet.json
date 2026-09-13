@@ -94,7 +94,7 @@
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "(^|/)(settings\\.json|shift-runner/shifts\\.yaml|config-push/)",
       "safe_path_globs": "bin/**,shift-runner/**,skills/**",
-      "required_checks": "",
+      "required_checks": "syntax",
       "train": true
     },
     {

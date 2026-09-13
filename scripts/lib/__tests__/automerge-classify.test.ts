@@ -546,15 +546,15 @@ describe("classifyPrDiffClass", () => {
     expect(result.failureLeg).toBe("class-match");
   });
 
-  it("resolves null (line-cap) for an otherwise-qualifying ci-infra diff at 41 lines", () => {
-    const result = classifyPrDiffClass({ files: files([".github/workflows/ci.yml"]), totalChangedLines: 41 });
+  it("resolves null (line-cap) for an otherwise-qualifying ci-infra diff at 121 lines", () => {
+    const result = classifyPrDiffClass({ files: files([".github/workflows/ci.yml"]), totalChangedLines: 121 });
     expect(result.prClass).toBeNull();
     expect(result.failureLeg).toBe("line-cap");
     expect(result.reasons.some((r) => r.includes("ci-infra") && r.includes("totalChangedLines"))).toBe(true);
   });
 
-  it("resolves null (line-cap) for an otherwise-qualifying test-only diff at 41 lines", () => {
-    const result = classifyPrDiffClass({ files: files(["scripts/lib/__tests__/foo.test.ts"]), totalChangedLines: 41 });
+  it("resolves null (line-cap) for an otherwise-qualifying test-only diff at 401 lines", () => {
+    const result = classifyPrDiffClass({ files: files(["scripts/lib/__tests__/foo.test.ts"]), totalChangedLines: 401 });
     expect(result.prClass).toBeNull();
     expect(result.failureLeg).toBe("line-cap");
   });
@@ -982,11 +982,11 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
     expect(result.reasons.some((r) => r.includes("package manifest/lockfile"))).toBe(true);
   });
 
-  it("refuses at 801 lines (code-fix additions-only cap) (§5 plant: the cap) with failureLeg line-cap", () => {
-    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 801 });
+  it("refuses at 1501 lines (code-fix additions-only cap) (§5 plant: the cap) with failureLeg line-cap", () => {
+    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 1501 });
     expect(result.prClass).toBeNull();
     expect(result.failureLeg).toBe("line-cap");
-    expect(result.reasons.some((r) => r.includes("code-fix") && r.includes("801 > 800"))).toBe(true);
+    expect(result.reasons.some((r) => r.includes("code-fix") && r.includes("1501 > 1500"))).toBe(true);
   });
 
   it("sensitivePathPatterns still beat the code-fix class entirely", () => {
@@ -1003,8 +1003,8 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
     expect(result.failureLeg).toBeNull();
   });
 
-  it("resolves code-fix at exactly 800 lines (boundary)", () => {
-    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 800 });
+  it("resolves code-fix at exactly 1500 lines (boundary)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 1500 });
     expect(result.prClass).toBe("code-fix");
   });
 
@@ -1015,11 +1015,11 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
     expect(result.failureLeg).toBeNull();
   });
 
-  it("code-fix: additions 900 + deletions 0 = total 900 refuses (additions > 800)", () => {
-    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 900, additions: 900 });
+  it("code-fix: additions 1600 + deletions 0 = total 1600 refuses (additions > 1500)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, totalChangedLines: 1600, additions: 1600 });
     expect(result.prClass).toBeNull();
     expect(result.failureLeg).toBe("line-cap");
-    expect(result.reasons.some((r) => r.includes("code-fix") && r.includes("additions 900 > 800"))).toBe(true);
+    expect(result.reasons.some((r) => r.includes("code-fix") && r.includes("additions 1600 > 1500"))).toBe(true);
   });
 
   // ───── Precedence: code-fix resolves LAST, existing classes stay byte-identical ─────

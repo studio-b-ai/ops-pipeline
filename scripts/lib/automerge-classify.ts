@@ -428,8 +428,8 @@ export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only" | "vault-doc
 export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only", "vault-doc", "code-fix"];
 
 const DOCS_COMMENT_LINE_CAP = MAX_CHANGED_LINES; // 10, unchanged
-const CI_INFRA_LINE_CAP = 40;
-const TEST_ONLY_LINE_CAP = 40;
+const CI_INFRA_LINE_CAP = 120;  // 9/13: a workflow file with its comments is rarely under 40
+const TEST_ONLY_LINE_CAP = 400; // 9/13: a real test file is not 40 lines
 // ops#190 B1 (doc §4.1): the code-fix class's line cap. Deliberately an ORDER OF
 // MAGNITUDE looser than the other classes because the class is guarded by three
 // legs the others don't have: an allowlist-primary safe_path_globs requirement, a
@@ -442,7 +442,7 @@ const TEST_ONLY_LINE_CAP = 40;
 // requires safe_path_globs + the denylist + named checks + review CLEAN; a customer-
 // facing surface without a QA receipt stays a human's call by NOT being in any
 // repo's safe_path_globs (theme/portal excluded; price-sync's extensions/** excluded).
-const CODE_FIX_LINE_CAP = 800; // 2026-09-09 Kevin 'widen': counts ADDITIONS only (see evalCodeFix) — a 1,600-line dead-code deletion is not a big change
+const CODE_FIX_LINE_CAP = 1500; // 2026-09-13 (Kevin 'go', door pens): 800 → 1500. Seat-authored PRs carry their tests + receipts in-diff (cp#269 +1291, ops#412 +1126, cp#275 +856 all refused at 800); the second-model review is the reviewer, not the line count. Counts ADDITIONS only (see evalCodeFix) — a 1,600-line dead-code deletion is not a big change
 
 // brain#239 doc 4 leg B (2026-09-10): vault-doc — the fleet's highest-volume, lowest-risk
 // PR. Text-only (decisions, architecture, seats, coldstarts, scratchpad exports) with a
