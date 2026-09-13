@@ -8,6 +8,7 @@ import {
   planStalePrAction,
   renderStalePrIssueBody,
   summarizeStalePr,
+  type Mergeable,
   type MergeStateStatus,
   type PrInput,
   type StalePrFinding,
@@ -37,6 +38,7 @@ function pr(overrides: Partial<PrInput> = {}): PrInput {
     url: "https://github.com/studio-b-ai/ops-pipeline/pull/405",
     createdAt: daysAgo(1),
     updatedAt: daysAgo(1),
+    mergeable: "MERGEABLE",
     mergeStateStatus: "CLEAN",
     isDraft: false,
     ...overrides,
@@ -75,11 +77,11 @@ describe("classifyPr — known-GOOD must return null (#322 negative control)", (
   });
 
   it("CONFLICTING but younger than 48h is not yet a finding", () => {
-    expect(classifyPr(pr({ mergeStateStatus: "CONFLICTING", createdAt: hoursAgo(47), updatedAt: hoursAgo(47) }), NOW)).toBeNull();
+    expect(classifyPr(pr({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", createdAt: hoursAgo(47), updatedAt: hoursAgo(47) }), NOW)).toBeNull();
   });
 
   it.each<MergeStateStatus>(["CLEAN", "DIRTY", "UNSTABLE", "BLOCKED", "BEHIND", "UNKNOWN"])(
-    "a fresh %s PR is not a finding — only CONFLICTING carries the conflict class",
+    "a fresh mergeStateStatus=%s PR is not a finding — that field is context, never the predicate",
     (status) => {
       expect(classifyPr(pr({ mergeStateStatus: status, createdAt: daysAgo(5), updatedAt: daysAgo(5) }), NOW)).toBeNull();
     },
@@ -96,14 +98,14 @@ describe("classifyPr — known-BAD must fire (#322 positive control)", () => {
   });
 
   it("CONFLICTING exactly AT 48h old fires conflicting-unresolved (boundary, inclusive side)", () => {
-    const f = classifyPr(pr({ mergeStateStatus: "CONFLICTING", createdAt: hoursAgo(48), updatedAt: hoursAgo(1) }), NOW);
+    const f = classifyPr(pr({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", createdAt: hoursAgo(48), updatedAt: hoursAgo(1) }), NOW);
     expect(f?.class).toBe("conflicting-unresolved");
   });
 
   it("CONFLICTING fires on AGE even when the PR has recent motion — Rule #433: it gets zero CI runs regardless", () => {
     // Deliberate asymmetry vs the stale class, and the reason it is tested explicitly:
     // a conflicting PR being actively pushed to still rots (no CI), so age governs here.
-    const f = classifyPr(pr({ mergeStateStatus: "CONFLICTING", createdAt: daysAgo(10), updatedAt: hoursAgo(2) }), NOW);
+    const f = classifyPr(pr({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", createdAt: daysAgo(10), updatedAt: hoursAgo(2) }), NOW);
     expect(f?.class).toBe("conflicting-unresolved");
     expect(f?.idleDays).toBeLessThan(1);
   });
@@ -115,6 +117,48 @@ describe("classifyPr — known-BAD must fire (#322 positive control)", () => {
   });
 });
 
+// ───────────── the blind-instrument regression (#322/#465) ─────────────
+//
+// Found by live probe 2026-09-13 while proving this leg's first fleet-wide zero honest
+// rather than blind: `gh pr list --json mergeStateStatus` NEVER emits "CONFLICTING" — a
+// conflicting PR reports mergeStateStatus="DIRTY" there, and only `mergeable` carries
+// "CONFLICTING". Observed over the whole fleet's 34 open PRs / 13 repos: list-mode
+// mergeStateStatus values were exactly {CLEAN, DIRTY, UNSTABLE, BLOCKED}, zero
+// "CONFLICTING" anywhere; the single-PR instrument on brain#160/#252/#230 each read
+// `mergeStateStatus=DIRTY mergeable=CONFLICTING`. The first draft of this lib classified
+// on mergeStateStatus, which made the conflict class structurally DEAD — fail-closed and
+// silent forever, reporting a healthy zero while the org sweep's 7 hand-found CONFLICTING
+// PRs sat in plain sight. These tests pin the predicate so that defect cannot return.
+
+describe("conflict predicate is `mergeable`, never `mergeStateStatus` (#322/#465 regression)", () => {
+  it("FIRES on the real fleet shape: mergeable=CONFLICTING with mergeStateStatus=DIRTY", () => {
+    // Exactly brain#160's observed pair (age 12.8d, recently touched).
+    const f = classifyPr(pr({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", createdAt: daysAgo(12.8), updatedAt: hoursAgo(6) }), NOW);
+    expect(f?.class).toBe("conflicting-unresolved");
+  });
+
+  it("does NOT fire on mergeStateStatus=CONFLICTING alone — that value never appears in list mode", () => {
+    // The inverse control: if someone re-points the predicate back at mergeStateStatus,
+    // this expectation flips and the suite goes red.
+    const f = classifyPr(pr({ mergeable: "MERGEABLE", mergeStateStatus: "CONFLICTING", createdAt: daysAgo(30), updatedAt: hoursAgo(1) }), NOW);
+    expect(f).toBeNull();
+  });
+
+  it("mergeable=UNKNOWN is not a conflict — GitHub is still computing mergeability", () => {
+    expect(classifyPr(pr({ mergeable: "UNKNOWN", mergeStateStatus: "DIRTY", createdAt: daysAgo(30), updatedAt: hoursAgo(1) }), NOW)).toBeNull();
+  });
+
+  it("a DIRTY-but-MERGEABLE old PR still fires the STALE class when idle — the two legs stay independent", () => {
+    const f = classifyPr(pr({ mergeable: "MERGEABLE", mergeStateStatus: "DIRTY", createdAt: daysAgo(30), updatedAt: daysAgo(30) }), NOW);
+    expect(f?.class).toBe("stale-no-motion");
+  });
+
+  it("carries the observed pair into the finding as the verdict's evidence", () => {
+    const f = classifyPr(pr({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", createdAt: daysAgo(5), updatedAt: hoursAgo(1) }), NOW);
+    expect(f).toMatchObject({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" });
+  });
+});
+
 // ───────────────────────────── exclusions + precedence ─────────────────────────────
 
 describe("classifyPr — draft exclusion (Rule #157: a human chose that state)", () => {
@@ -123,13 +167,13 @@ describe("classifyPr — draft exclusion (Rule #157: a human chose that state)",
   });
 
   it("a CONFLICTING ancient DRAFT is excluded too — draft beats both classes", () => {
-    expect(classifyPr(pr({ isDraft: true, mergeStateStatus: "CONFLICTING", createdAt: daysAgo(60), updatedAt: daysAgo(60) }), NOW)).toBeNull();
+    expect(classifyPr(pr({ isDraft: true, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", createdAt: daysAgo(60), updatedAt: daysAgo(60) }), NOW)).toBeNull();
   });
 });
 
 describe("classifyPr — exactly one finding per PR, strongest class wins", () => {
   it("BOTH stale AND conflicting reports once, as conflicting-unresolved", () => {
-    const f = classifyPr(pr({ mergeStateStatus: "CONFLICTING", createdAt: daysAgo(30), updatedAt: daysAgo(30) }), NOW);
+    const f = classifyPr(pr({ mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", createdAt: daysAgo(30), updatedAt: daysAgo(30) }), NOW);
     expect(f?.class).toBe("conflicting-unresolved");
   });
 });
@@ -143,7 +187,7 @@ describe("classifyPrs", () => {
         pr({ number: 1 }), // fresh → dropped
         pr({ number: 2, createdAt: daysAgo(20), updatedAt: daysAgo(20) }), // stale
         pr({ number: 3, isDraft: true, updatedAt: daysAgo(90) }), // draft → dropped
-        pr({ number: 4, mergeStateStatus: "CONFLICTING", createdAt: daysAgo(5), updatedAt: hoursAgo(1) }), // conflicting
+        pr({ number: 4, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY", createdAt: daysAgo(5), updatedAt: hoursAgo(1) }), // conflicting
       ],
       NOW,
     );
@@ -166,7 +210,7 @@ describe("classifyPrs", () => {
 
 describe("summarizeStalePr", () => {
   function finding(cls: StalePrFinding["class"], number: number): StalePrFinding {
-    return { repo: "r", number, title: "t", url: "u", class: cls, ageDays: 9, idleDays: 9 };
+    return { repo: "r", number, title: "t", url: "u", class: cls, ageDays: 9, idleDays: 9, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" };
   }
 
   it("zero findings reads as an explicit zero, never an empty string", () => {
@@ -204,8 +248,8 @@ describe("planStalePrAction — the full 2x2 auto-reconcile truth table", () => 
 
 describe("renderStalePrIssueBody", () => {
   const findings: StalePrFinding[] = [
-    { repo: "studio-b-ai/brain", number: 241, title: "brain: a stale one", url: "https://github.com/studio-b-ai/brain/pull/241", class: "stale-no-motion", ageDays: 9.25, idleDays: 9.25 },
-    { repo: "studio-b-ai/brain", number: 253, title: "brain: a conflicting one", url: "https://github.com/studio-b-ai/brain/pull/253", class: "conflicting-unresolved", ageDays: 4.5, idleDays: 0.1 },
+    { repo: "studio-b-ai/brain", number: 241, title: "brain: a stale one", url: "https://github.com/studio-b-ai/brain/pull/241", class: "stale-no-motion", ageDays: 9.25, idleDays: 9.25, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" },
+    { repo: "studio-b-ai/brain", number: 253, title: "brain: a conflicting one", url: "https://github.com/studio-b-ai/brain/pull/253", class: "conflicting-unresolved", ageDays: 4.5, idleDays: 0.1, mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" },
   ];
 
   it("names the repo, the clock, and both thresholds so the reader can audit the verdict", () => {
@@ -218,8 +262,8 @@ describe("renderStalePrIssueBody", () => {
 
   it("renders one markdown table row per finding, with a clickable PR link and both ages", () => {
     const body = renderStalePrIssueBody("studio-b-ai/brain", findings, NOW);
-    expect(body).toContain("| [#241](https://github.com/studio-b-ai/brain/pull/241) brain: a stale one | stale-no-motion | 9.3 | 9.3 |");
-    expect(body).toContain("| [#253](https://github.com/studio-b-ai/brain/pull/253) brain: a conflicting one | conflicting-unresolved | 4.5 | 0.1 |");
+    expect(body).toContain("| [#241](https://github.com/studio-b-ai/brain/pull/241) brain: a stale one | stale-no-motion | 9.3 | 9.3 | MERGEABLE | CLEAN |");
+    expect(body).toContain("| [#253](https://github.com/studio-b-ai/brain/pull/253) brain: a conflicting one | conflicting-unresolved | 4.5 | 0.1 | CONFLICTING | DIRTY |");
     // Header + separator + one row each, and nothing else claiming to be a row.
     expect(body.split("\n").filter((l) => l.startsWith("| ["))).toHaveLength(2);
   });
@@ -232,7 +276,7 @@ describe("renderStalePrIssueBody", () => {
 
   it("renders a header-only table when there are no findings (never throws)", () => {
     const body = renderStalePrIssueBody("studio-b-ai/brain", [], NOW);
-    expect(body).toContain("| PR | class | age (d) | idle (d) |");
+    expect(body).toContain("| PR | class | age (d) | idle (d) | mergeable | mergeStateStatus |");
     expect(body.split("\n").filter((l) => l.startsWith("| ["))).toHaveLength(0);
   });
 });

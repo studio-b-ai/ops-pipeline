@@ -15,9 +15,22 @@
  *   1. stale-no-motion     — PR open >= STALE_DAYS with its OWN updatedAt also that old
  *                             (no motion, not merely old — a PR someone just pushed to
  *                             today is not stale even if opened three weeks ago).
- *   2. conflicting-unresolved — mergeStateStatus === "CONFLICTING" and open >= CONFLICT_HOURS
- *                                (Rule #433: a CONFLICTING PR gets zero CI runs at all —
+ *   2. conflicting-unresolved — mergeable === "CONFLICTING" and open >= CONFLICT_HOURS
+ *                                (Rule #433: a conflicting PR gets zero CI runs at all —
  *                                this is exactly the silent-rot class that needs a human).
+ *
+ * ⚠ THE CONFLICT SIGNAL IS `mergeable`, NOT `mergeStateStatus` (#322/#465 — found by live
+ * probe, 2026-09-13, while proving this leg's first zero honest rather than blind):
+ * `gh pr list --json mergeStateStatus` NEVER emits "CONFLICTING" — a conflicting PR reports
+ * mergeStateStatus="DIRTY" there, and only `mergeable` carries "CONFLICTING". Observed
+ * across the whole fleet's open-PR population (34 PRs / 13 repos): list-mode
+ * mergeStateStatus values were exactly {CLEAN, DIRTY, UNSTABLE, BLOCKED} — "CONFLICTING"
+ * appeared zero times anywhere. Confirmed against the single-PR instrument on three named
+ * rows: brain#160 / #252 / #230 each read `mergeStateStatus=DIRTY mergeable=CONFLICTING`.
+ * Classifying on mergeStateStatus therefore made this class STRUCTURALLY BLIND — it would
+ * have shipped fail-closed-silent forever, reporting a healthy fleet-wide zero while the
+ * org sweep's 7 hand-found CONFLICTING PRs sat in plain sight. mergeStateStatus is kept on
+ * the input purely as reported CONTEXT; it is never the conflict predicate.
  *
  * A draft PR is excluded from both classes — a draft is deliberately not-yet-ready, not
  * abandoned (mirrors dead-cron's disabled_manually exclusion, Rule #157: a human chose
@@ -29,6 +42,10 @@
 export const STALE_DAYS = 7;
 export const CONFLICT_HOURS = 48;
 
+/** `mergeable` — the ONLY field that reports a conflict in list mode (see header). */
+export type Mergeable = "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+
+/** `mergeStateStatus` — reported context only, never the conflict predicate (see header). */
 export type MergeStateStatus = "CLEAN" | "CONFLICTING" | "DIRTY" | "UNSTABLE" | "BLOCKED" | "BEHIND" | "DRAFT" | "UNKNOWN";
 
 export interface PrInput {
@@ -40,6 +57,9 @@ export interface PrInput {
   createdAt: string;
   /** ISO 8601 — last activity (commits/comments/reviews) per GitHub's own field. */
   updatedAt: string;
+  /** The conflict predicate. `mergeStateStatus` does NOT carry this signal (see header). */
+  mergeable: Mergeable;
+  /** Context only — surfaced in the issue body so a reader can audit the verdict. */
   mergeStateStatus: MergeStateStatus;
   isDraft: boolean;
 }
@@ -55,6 +75,9 @@ export interface StalePrFinding {
   class: StalePrClass;
   ageDays: number;
   idleDays: number;
+  /** Observed at classify time — rendered into the issue body as the verdict's evidence. */
+  mergeable: Mergeable;
+  mergeStateStatus: MergeStateStatus;
 }
 
 function daysBetween(fromIso: string, nowIso: string): number {
@@ -68,11 +91,12 @@ export function classifyPr(pr: PrInput, nowIso: string): StalePrFinding | null {
   const idleDays = daysBetween(pr.updatedAt, nowIso);
 
   // Strongest class first (Rule #433's silent-CI-death class is the more actionable read).
-  if (pr.mergeStateStatus === "CONFLICTING" && ageDays * 24 >= CONFLICT_HOURS) {
-    return { repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, class: "conflicting-unresolved", ageDays, idleDays };
+  const observed = { mergeable: pr.mergeable, mergeStateStatus: pr.mergeStateStatus };
+  if (pr.mergeable === "CONFLICTING" && ageDays * 24 >= CONFLICT_HOURS) {
+    return { repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, class: "conflicting-unresolved", ageDays, idleDays, ...observed };
   }
   if (idleDays >= STALE_DAYS) {
-    return { repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, class: "stale-no-motion", ageDays, idleDays };
+    return { repo: pr.repo, number: pr.number, title: pr.title, url: pr.url, class: "stale-no-motion", ageDays, idleDays, ...observed };
   }
   return null;
 }
@@ -95,13 +119,15 @@ export function renderStalePrIssueBody(repo: string, findings: StalePrFinding[],
   lines.push(`**Stale-PR sweep** for \`${repo}\` — generated ${generatedAtIso}.`);
   lines.push("");
   lines.push(
-    `Thresholds: no-motion >= ${STALE_DAYS}d (own \`updatedAt\`, not just age) · CONFLICTING unresolved >= ${CONFLICT_HOURS}h (Rule #433 — a conflicting PR gets zero CI runs and rots silently).`,
+    `Thresholds: no-motion >= ${STALE_DAYS}d (own \`updatedAt\`, not just age) · conflicting unresolved >= ${CONFLICT_HOURS}h (Rule #433 — a conflicting PR gets zero CI runs and rots silently).`,
   );
   lines.push("");
-  lines.push("| PR | class | age (d) | idle (d) |");
-  lines.push("|---|---|---|---|");
+  lines.push("| PR | class | age (d) | idle (d) | mergeable | mergeStateStatus |");
+  lines.push("|---|---|---|---|---|---|");
   for (const f of findings) {
-    lines.push(`| [#${f.number}](${f.url}) ${f.title} | ${f.class} | ${f.ageDays.toFixed(1)} | ${f.idleDays.toFixed(1)} |`);
+    lines.push(
+      `| [#${f.number}](${f.url}) ${f.title} | ${f.class} | ${f.ageDays.toFixed(1)} | ${f.idleDays.toFixed(1)} | ${f.mergeable} | ${f.mergeStateStatus} |`,
+    );
   }
   lines.push("");
   lines.push(

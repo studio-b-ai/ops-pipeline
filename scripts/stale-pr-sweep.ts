@@ -11,7 +11,8 @@
  *      repos does a seat open PRs in" answer backlog-staleness-worker.ts already has, and
  *      the file is committed config this worker never writes).
  *   2. Per repo: `gh pr list --state open` (number/title/url/createdAt/updatedAt/
- *      mergeStateStatus/isDraft) -> classifyPrs().
+ *      mergeable/mergeStateStatus/isDraft) -> classifyPrs(). `mergeable` is the conflict
+ *      predicate — list-mode `mergeStateStatus` never says CONFLICTING (lib header).
  *   3. Per repo with findings: open/update ONE auto-reconciled `[stale-pr]` issue ON THE
  *      OWNING REPO (Rule #165 — the open-issue set is the dedup state; mirrors
  *      dead-cron-worker.ts's per-repo pattern exactly, Rule #283). Repos whose issue is
@@ -34,13 +35,15 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
-import { classifyPrs, planStalePrAction, renderStalePrIssueBody, summarizeStalePr, type MergeStateStatus, type PrInput } from "./lib/stale-pr-classify.js";
+import { classifyPrs, planStalePrAction, renderStalePrIssueBody, summarizeStalePr, type Mergeable, type MergeStateStatus, type PrInput } from "./lib/stale-pr-classify.js";
 import { ensureLabel, listIssuesByLabel, openIssue, closeIssue, commentIssue, gh } from "./lib/github-issues.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = join(HERE, "backlog-managers.yaml");
 const LABEL = "stale-pr";
-const LABEL_DESCRIPTION = "studio-b#112 stale sweep: open = this repo has a PR stale >=7d no-motion or CONFLICTING >=48h (auto-reconciled)"; // <=100 chars, guarded by ensureLabel
+// <=100 chars — GitHub silently rejects longer; guarded by github-issues.test.ts's
+// repo-wide literal scrape, which caught this at 111 chars on first write.
+const LABEL_DESCRIPTION = "studio-b#112: open = a PR here is stale >=7d or CONFLICTING >=48h (auto-reconciled)";
 const LABEL_COLOR = "FBCA04"; // yellow — matches the stint's "yellow stale-pr:<repo>#N" vocabulary
 
 /** Safety bound, not a paging mechanism (Rule #331). */
@@ -68,6 +71,7 @@ interface GhPrRow {
   url: string;
   createdAt: string;
   updatedAt: string;
+  mergeable: string;
   mergeStateStatus: string;
   isDraft: boolean;
 }
@@ -75,7 +79,10 @@ interface GhPrRow {
 function listOpenPrs(repo: string): PrInput[] {
   const raw = gh([
     "pr", "list", "--repo", repo, "--state", "open", "--limit", String(PR_LIST_LIMIT),
-    "--json", "number,title,url,createdAt,updatedAt,mergeStateStatus,isDraft",
+    // `mergeable` is the conflict predicate; `mergeStateStatus` is context only. See
+    // lib/stale-pr-classify.ts's header — list-mode mergeStateStatus NEVER emits
+    // "CONFLICTING" (it reports DIRTY), so asking only for it made the class blind.
+    "--json", "number,title,url,createdAt,updatedAt,mergeable,mergeStateStatus,isDraft",
   ]);
   const rows = JSON.parse(raw) as GhPrRow[];
   if (rows.length === PR_LIST_LIMIT) {
@@ -88,6 +95,7 @@ function listOpenPrs(repo: string): PrInput[] {
     url: r.url,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
+    mergeable: r.mergeable as Mergeable,
     mergeStateStatus: r.mergeStateStatus as MergeStateStatus,
     isDraft: r.isDraft,
   }));
