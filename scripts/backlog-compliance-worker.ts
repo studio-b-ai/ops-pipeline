@@ -389,6 +389,16 @@ async function main(): Promise<void> {
   // Only meaningful in per-lane mode (rollup mode opens no per-lane issues), and skipped under a
   // partial --lanes scope or a hard read failure: an unscoped lane is not an absent lane, and an
   // empty openIssues list on a failed read must never read as "all lanes are orphans".
+  // Population printed BEFORE the verdict, unconditionally, so a clean zero reads against what
+  // the sweep could actually SEE rather than as ambiguous silence (Rule #465) — an all-zero line
+  // is otherwise indistinguishable from a sweep that never ran at all.
+  if (!perLaneMode) {
+    console.log(`[backlog-compliance] orphan sweep: n/a in rollup mode (no per-lane issues exist to orphan).`);
+  } else if (hasHardFailures) {
+    console.log(`[backlog-compliance] orphan sweep SKIPPED — hard read failure(s) this run; an empty issue list must never read as "every lane is an orphan".`);
+  } else if (openIssues.length === 0) {
+    console.log(`[backlog-compliance] orphan sweep: 0 orphan(s) — no open backlog-compliance issue exists to be orphaned (population empty).`);
+  }
   if (perLaneMode && !hasHardFailures && openIssues.length > 0) {
     if (rollupScopeIncomplete) {
       console.warn(
