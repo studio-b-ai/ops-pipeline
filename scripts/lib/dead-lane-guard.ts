@@ -40,16 +40,24 @@ export const LIVE_SLOT_SEATS: readonly string[] = [
 
 const LIVE_SLOT_SEATS_SET: ReadonlySet<string> = new Set(LIVE_SLOT_SEATS);
 
-/** Known-DEAD seats this guard must actively refuse (retired-but-still-labeled
- * lane owners). Kept explicit (not just "absent from LIVE_SLOT_SEATS") so a
- * genuinely-new/typo'd seat name is NOT silently treated as dead — only a seat
- * on this list, or absent from the live set for another reason, is refused. */
+/** Known-DEAD seats (retired-but-still-labeled lane owners) — documentation/
+ * audit list only. `resolveDeadLaneRelabel` does NOT gate on this constant:
+ * it refuses ANY `lane:<seat>` absent from LIVE_SLOT_SEATS, so a genuinely
+ * new/typo'd seat name is refused and relabeled exactly like a seat named
+ * here — there is no typo-vs-known-dead distinction in the code today. If
+ * that distinction becomes necessary, gate on this list explicitly inside
+ * resolveDeadLaneRelabel rather than relying on absence-from-live-set alone. */
 export const KNOWN_DEAD_SEATS: readonly string[] = ["engineer", "controller"] as const;
 
 export const LANE_LABEL_PREFIX = "lane:";
 
 /** Repo → owning team, for resolving which race engineer inherits a dead lane.
- * Mirrors kits/studio-b.yaml and kits/asthetik.yaml `repos:` lists. */
+ * Covers all repos listed in `~/Documents/brain/kits/{studio-b,asthetik}.yaml`
+ * `repos:` with their matching team, plus two repos not yet in either kit file
+ * — `studio-b-ai/claude-hooks` (studio-b) and `studio-b-ai/studiob` (asthetik)
+ * — kept here because dead-lane issues can land on them today. The kit files
+ * are the sweep-diff target to bring into parity, not this map (verified
+ * 2026-09-14: `grep repos: kits/*.yaml` lacks both). */
 export const REPO_TEAM: Readonly<Record<string, "studio-b" | "asthetik">> = {
   "studio-b-ai/ops-pipeline": "studio-b",
   "studio-b-ai/claude-config-plane": "studio-b",
@@ -104,7 +112,7 @@ export function resolveDeadLaneRelabel(repoFullName: string, labels: readonly st
     const seat = raw.slice(LANE_LABEL_PREFIX.length).trim().toLowerCase();
     if (seat === "") continue;
     if (LIVE_SLOT_SEATS_SET.has(seat)) continue; // live seat — leave it alone
-    // Dead (either explicitly known-dead, or absent from the live set entirely).
+    // Dead: absent from the live seat set.
     const to = `${LANE_LABEL_PREFIX}${re}`;
     if (raw === to) continue; // already the team RE — no-op
     return { from: raw, to };
