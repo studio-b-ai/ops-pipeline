@@ -30,7 +30,7 @@ const DATA_FILE = join(HERE, "..", "issue-class-routing.yaml");
 
 export type IssueRoutingTable = {
   readonly version: number;
-  readonly workers: ReadonlyMap<string, { routine: string }>;
+  readonly workers: ReadonlyMap<string, { routine?: string; hosted?: boolean }>;
   readonly routes: ReadonlyArray<{ label: string; worker: string }>;
   readonly defaultRoute: { worker: string; restate: boolean };
   readonly vetoes: ReadonlySet<string>;
@@ -39,7 +39,7 @@ export type IssueRoutingTable = {
 
 export type IssueRoute =
   | { decision: "never"; reason: string }
-  | { decision: "dispatch"; worker: string; routine: string; restate: boolean; reason: string };
+  | { decision: "dispatch"; worker: string; routine?: string; hosted?: boolean; restate: boolean; reason: string };
 
 const TOP_LEVEL_KEYS = new Set(["version", "workers", "routes", "default", "vetoes", "never_prefixes"]);
 
@@ -72,12 +72,18 @@ export function parseIssueRoutingTable(text: string): IssueRoutingTable {
   if (!isPlainObject(doc.workers) || Object.keys(doc.workers).length === 0) {
     throw new Error("issue-class-routing: `workers` must be a non-empty mapping");
   }
-  const workers = new Map<string, { routine: string }>();
+  const workers = new Map<string, { routine?: string; hosted?: boolean }>();
   for (const [name, spec] of Object.entries(doc.workers)) {
-    if (!isPlainObject(spec) || typeof spec.routine !== "string" || spec.routine.trim() === "") {
-      throw new Error(`issue-class-routing: worker \`${name}\` needs a non-empty \`routine\``);
+    if (!isPlainObject(spec)) throw new Error(`issue-class-routing: worker \`${name}\` must be a mapping`);
+    const hasRoutine = typeof spec.routine === "string" && spec.routine.trim() !== "";
+    const hasHosted = spec.hosted === true;
+    if (!hasRoutine && !hasHosted) {
+      throw new Error(`issue-class-routing: worker \`${name}\` needs either \`routine\` or \`hosted: true\``);
     }
-    workers.set(name, { routine: spec.routine.trim() });
+    if (hasRoutine && hasHosted) {
+      throw new Error(`issue-class-routing: worker \`${name}\` has both \`routine\` and \`hosted\` — pick one`);
+    }
+    workers.set(name, { routine: hasRoutine ? (spec.routine as string).trim() : undefined, hosted: hasHosted || undefined });
   }
 
   if (!Array.isArray(doc.routes)) throw new Error("issue-class-routing: `routes` must be a list");
@@ -138,7 +144,7 @@ export function routeIssue(labels: ReadonlyArray<string>, table: IssueRoutingTab
   for (const r of table.routes) {
     if (norm.includes(r.label.toLowerCase())) {
       const w = table.workers.get(r.worker)!;
-      return { decision: "dispatch", worker: r.worker, routine: w.routine, restate: false, reason: `class label \`${r.label}\`` };
+      return { decision: "dispatch", worker: r.worker, routine: w.routine, hosted: w.hosted, restate: false, reason: `class label \`${r.label}\`` };
     }
   }
   const d = table.defaultRoute;
@@ -147,6 +153,7 @@ export function routeIssue(labels: ReadonlyArray<string>, table: IssueRoutingTab
     decision: "dispatch",
     worker: d.worker,
     routine: w.routine,
+    hosted: w.hosted,
     restate: d.restate,
     reason: norm.length === 0 ? "no labels — default route" : "no class label — default route",
   };

@@ -26,6 +26,8 @@ workers:
     routine: trig_01EHMVrXLW1xg2aixEc1MXNJ      # Bug Squasher (claude.ai routine)
   enhancement-worker:
     routine: trig_01E64JV6mRtDsyJzXAbvE8jK      # Enhancement Worker (claude.ai routine)
+  drain:
+    hosted: true                                  # Hosted-voice dispatch (opencode/LiteLLM, not Anthropic)
 
 # first match wins, top to bottom
 routes:
@@ -33,6 +35,8 @@ routes:
     worker: squasher
   - label: enhancement
     worker: enhancement-worker
+  - label: drain
+    worker: drain
 
 # unlabeled / other-labeled issues: worked by the Squasher with the restate step
 default:
