@@ -93,7 +93,7 @@
       "repo": "studio-b-ai/claude-config-plane",
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "(^|/)(settings\\.json|shift-runner/shifts\\.yaml|config-push/)",
-      "safe_path_globs": "bin/**,shift-runner/**,skills/**",
+      "safe_path_globs": "bin/**,shift-runner/**,skills/**,.gitignore",
       "required_checks": "syntax",
       "train": true
     },
