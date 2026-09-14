@@ -52,12 +52,12 @@ export const KNOWN_DEAD_SEATS: readonly string[] = ["engineer", "controller"] as
 export const LANE_LABEL_PREFIX = "lane:";
 
 /** Repo → owning team, for resolving which race engineer inherits a dead lane.
- * Superset of `~/Documents/brain/kits/{studio-b,asthetik}.yaml` `repos:` lists:
- * every kit-listed repo is present with the matching team, PLUS two repos not
- * yet in either kit file — `studio-b-ai/claude-hooks` (studio-b) and
- * `studio-b-ai/studiob` (asthetik) — kept here because dead-lane issues can
- * land in them today; the kit files are the sweep-diff target to update next,
- * not this map (verified 2026-09-14: `grep repos: kits/*.yaml` lacks both). */
+ * Covers all repos listed in `~/Documents/brain/kits/{studio-b,asthetik}.yaml`
+ * `repos:` with their matching team, plus two repos not yet in either kit file
+ * — `studio-b-ai/claude-hooks` (studio-b) and `studio-b-ai/studiob` (asthetik)
+ * — kept here because dead-lane issues can land on them today. The kit files
+ * are the sweep-diff target to bring into parity, not this map (verified
+ * 2026-09-14: `grep repos: kits/*.yaml` lacks both). */
 export const REPO_TEAM: Readonly<Record<string, "studio-b" | "asthetik">> = {
   "studio-b-ai/ops-pipeline": "studio-b",
   "studio-b-ai/claude-config-plane": "studio-b",
@@ -112,7 +112,7 @@ export function resolveDeadLaneRelabel(repoFullName: string, labels: readonly st
     const seat = raw.slice(LANE_LABEL_PREFIX.length).trim().toLowerCase();
     if (seat === "") continue;
     if (LIVE_SLOT_SEATS_SET.has(seat)) continue; // live seat — leave it alone
-    // Dead (either explicitly known-dead, or absent from the live set entirely).
+    // Dead: absent from the live seat set.
     const to = `${LANE_LABEL_PREFIX}${re}`;
     if (raw === to) continue; // already the team RE — no-op
     return { from: raw, to };
