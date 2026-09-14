@@ -8,8 +8,12 @@ import {
   isCardLeg,
   legacyCardMarkerFor,
 } from "../gate-flag-card.js";
+import { classifyPrDiffClass } from "../automerge-classify.js";
 
 const SCRIPTS_DIR = join(import.meta.dirname, "..", "..");
+
+/** #302's head at the time Kevin applied `reviewed` (14:59:38Z, after the 14:38:20Z push). */
+const HEAD_302 = "49629dbb6adf7c538b081495139007537d06b26e";
 
 /**
  * ops#313 — the defect this file guards. claude-config-plane#302 carried a human
@@ -162,5 +166,56 @@ describe("pr-automerge-gate.ts actually wires the card at every decision leg", (
     const helper = src.slice(start, start + 2000);
     expect(helper).toContain("try {");
     expect(helper).toMatch(/catch \(e\)/);
+  });
+});
+
+// ───────────── the live regression, through the REAL classifier ─────────────
+//
+// The copy tests above prove the card SAYS the right thing. This block proves the
+// refusal it describes is the one claude-config-plane#302 actually got — by calling
+// classifyPrDiffClass() on #302's real file list with claude-config-plane's real
+// registry entry (#223: a probe that re-assembles its own verdict tests only itself).
+// Without this, a future change to the sensitive-path leg could move #302 to a
+// different leg and every copy test above would still pass.
+
+describe("claude-config-plane#302 refuses at class-match, and the card matches", () => {
+  // #302's authoritative file list (gh pr view 302 --json files, head 49629db).
+  const files = [
+    { path: "settings.json", fileClass: "code" as const },
+    { path: "shift-runner/opencode-seat/opencode.jsonc", fileClass: "code" as const },
+  ];
+  // Verbatim from scripts/squasher-fleet.json, claude-config-plane entry.
+  const registry = {
+    sensitivePathPatterns: ["(^|/)(settings\\.json|shift-runner/shifts\\.yaml|config-push/)"],
+    safePathGlobs: ["bin/**", "shift-runner/**", "skills/**", ".gitignore"],
+  };
+
+  it("the refusal was CORRECT — settings.json is deliberately sensitive", () => {
+    const res = classifyPrDiffClass({ files, totalChangedLines: 42, additions: 42, ...registry });
+    expect(res.prClass).toBeNull();
+    expect(res.failureLeg).toBe("class-match");
+    expect(res.reasons.join(" ")).toContain("settings.json");
+  });
+
+  it("the card for that refusal names `queued`, never the reviewed door Kevin acted on", () => {
+    const res = classifyPrDiffClass({ files, totalChangedLines: 42, additions: 42, ...registry });
+    const card = buildFlagCard({ leg: "class-match", headSha: HEAD_302, reasons: res.reasons });
+    expect(card.body).not.toMatch(/`reviewed` label on this head lets the next sweep merge/);
+    expect(card.body).toContain("`queued`");
+    expect(card.body).toContain("settings.json");
+  });
+
+  // Positive control (#322/#471): the same registry entry on an in-glob, non-sensitive
+  // diff still resolves a class — proving the sensitive-path leg is narrow, not a
+  // blanket refusal that would make the test above pass for the wrong reason.
+  it("positive control: an in-glob non-sensitive diff still classifies as code-fix", () => {
+    const res = classifyPrDiffClass({
+      files: [{ path: "shift-runner/opencode-seat/opencode.jsonc", fileClass: "code" as const }],
+      totalChangedLines: 12,
+      additions: 12,
+      ...registry,
+    });
+    expect(res.failureLeg).toBeNull();
+    expect(res.prClass).toBe("code-fix");
   });
 });
