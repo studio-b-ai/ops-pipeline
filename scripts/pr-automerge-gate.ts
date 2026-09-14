@@ -108,6 +108,7 @@ import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 import { enrollGateRefusal, resolveGateRefusals } from "./lib/gate-enroll.js";
+import { buildFlagCard, isCardLeg, type CardLeg } from "./lib/gate-flag-card.js";
 import { mergeDoorFrom, formatTrainMergeReceipt, type MergeDoor } from "./lib/merge-door.js";
 import {
   resolveAuthorityLogins,
@@ -227,6 +228,40 @@ function commentOnPr(repo: string, pr: number, body: string): void {
  *  of a merge). Throws on failure; both callers treat that as fail-closed. */
 function addLabel(repo: string, pr: number, label: string): void {
   gh(["pr", "edit", String(pr), "--repo", repo, "--add-label", label]);
+}
+
+/**
+ * The blue card (ops#313). Posts a per-leg card + `needs-human` for a DECISION-leg
+ * refusal, idempotent per (leg, head sha). Copy lives in lib/gate-flag-card.ts.
+ *
+ * WIRED AT EVERY DECISION LEG, not just `review` — that single-site wiring is the
+ * defect this replaces: claude-config-plane#302 was refused at `class-match` (the
+ * leg that runs BEFORE the review leg reads `reviewed`), while the card already on
+ * it promised a `reviewed` label would let the next sweep merge. Kevin applied
+ * `reviewed`; the 15:24Z sweep (run 34861917273) refused at class-match again, which
+ * cannot see the label. #412: prose is a claim about scope — so each leg now names
+ * the door that actually opens IT (`queued` for class/cap/checks; `reviewed` only
+ * where it substitutes for the model's vote).
+ *
+ * NEVER THROWS. A card is an advisory surface; a comment/label failure must not turn
+ * a clean refusal into a gate crash (the pre-#313 site had the same contract).
+ */
+function postFlagCard(repo: string, pr: number, leg: GateReceiptLeg, headSha: string, reasons: readonly string[]): void {
+  if (!isCardLeg(leg)) return;
+  try {
+    const card = buildFlagCard({ leg: leg as CardLeg, headSha, reasons });
+    // Search for this card's marker AND (review leg only) the pre-#313 markerless-leg
+    // form, so already-carded PRs are not re-carded on the next sweep.
+    const markers = [card.marker, card.legacyMarker].filter((m): m is string => typeof m === "string");
+    const jq = `[.comments[].body | select(${markers.map((m) => `contains("${m}")`).join(" or ")})] | length`;
+    const prior = gh(["pr", "view", String(pr), "--repo", repo, "--json", "comments", "--jq", jq]).trim();
+    if (prior !== "0") return;
+    commentOnPr(repo, pr, card.body);
+    gh(["api", "-X", "POST", `repos/${repo}/issues/${pr}/labels`, "-f", "labels[]=needs-human"]);
+    console.log(`[card] pr-automerge-gate ${repo}#${pr}: blue card posted for leg=${leg} head=${headSha.slice(0, 7)}`);
+  } catch (e) {
+    console.log(`[warn] FLAG→card failed for ${repo}#${pr} leg=${leg}: ${(e as Error).message.split("\n")[0]}`);
+  }
 }
 
 // ───────────────────────────── independent review leg ─────────────────────────────
@@ -499,6 +534,8 @@ async function evaluate(
     // ops#260 leg 3: line-cap / class-match refusals are Kevin's decisions — one line
     // in the block; the helper itself skips wait-class legs and never throws.
     await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg, reasons: classification.reasons, additions: prJson.additions, deletions: prJson.deletions });
+    // ops#313: card it too — the decision line is Kevin's queue, the card is the glass.
+    postFlagCard(repo, pr, leg, prJson.headRefOid, classification.reasons);
     return;
   }
   const prClass = classification.prClass;
@@ -510,6 +547,7 @@ async function evaluate(
       formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "class-match", reasons: [reason] }),
     );
     await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "class-match", reasons: [reason], additions: prJson.additions, deletions: prJson.deletions });
+    postFlagCard(repo, pr, "class-match", prJson.headRefOid, [reason]);
     return;
   }
 
@@ -563,6 +601,7 @@ async function evaluate(
       );
       console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "named-checks", reasons: namedChecks.reasons }));
       await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "named-checks", reasons: namedChecks.reasons, additions: prJson.additions, deletions: prJson.deletions });
+      postFlagCard(repo, pr, "named-checks", prJson.headRefOid, namedChecks.reasons);
       return;
     }
   }
@@ -599,14 +638,10 @@ async function evaluate(
     // (ops#407/#413, bolt#2265 all day). Now the FLAG is a CARD: the reviewer's reason lands as a PR comment and the PR gets
     // `needs-human`, which the Toto glance surfaces as a blue card. Kevin's `a` applies `reviewed` (the existing sha-pinned
     // human receipt, humanReviewReceipt()) and the next sweep merges; `x` applies `hold`. Idempotent per head sha.
-    try {
-      const marker = `<!-- gate-flag ${prJson.headRefOid} -->`;
-      const prior = gh(["pr", "view", String(pr), "--repo", repo, "--json", "comments", "--jq", `[.comments[].body | select(contains("${marker}"))] | length`]).trim();
-      if (prior === "0") {
-        commentOnPr(repo, pr, `${marker}\n**Release door — review FLAG** (head \`${prJson.headRefOid.slice(0, 7)}\`)\n\n${review.detail}\n\n_A human \`reviewed\` label on this head lets the next sweep merge; \`hold\` parks it. This is a blue card on the glass._`);
-        gh(["api", "-X", "POST", `repos/${repo}/issues/${pr}/labels`, "-f", "labels[]=needs-human"]);
-      }
-    } catch (e) { console.log(`[warn] FLAG→card failed for ${repo}#${pr}: ${(e as Error).message.split("\n")[0]}`); }
+    // ops#313: the copy + idempotency now live in lib/gate-flag-card.ts and the SAME helper
+    // cards the earlier decision legs, which used to refuse silently under a card promising
+    // a door only this leg has.
+    postFlagCard(repo, pr, "review", prJson.headRefOid, [review.detail]);
     return;
   }
 
