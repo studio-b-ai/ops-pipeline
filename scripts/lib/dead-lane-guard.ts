@@ -40,13 +40,12 @@ export const LIVE_SLOT_SEATS: readonly string[] = [
 
 const LIVE_SLOT_SEATS_SET: ReadonlySet<string> = new Set(LIVE_SLOT_SEATS);
 
-/** Known-DEAD seats (retired-but-still-labeled lane owners) — documentation/
- * audit list only. `resolveDeadLaneRelabel` does NOT gate on this constant:
- * it refuses ANY `lane:<seat>` absent from LIVE_SLOT_SEATS, so a genuinely
- * new/typo'd seat name is refused and relabeled exactly like a seat named
- * here — there is no typo-vs-known-dead distinction in the code today. If
- * that distinction becomes necessary, gate on this list explicitly inside
- * resolveDeadLaneRelabel rather than relying on absence-from-live-set alone. */
+/** Known-dead seats (retired-but-still-labeled lane owners) — documentation/
+ * audit list only. resolveDeadLaneRelabel does NOT gate on this constant:
+ * it refuses ANY `lane:<seat>` absent from LIVE_SLOT_SEATS, treating a
+ * genuinely new/typo'd seat name identically to a known-dead one. This
+ * list exists so a sweep scanner can report which dead labels actually
+ * appear on open issues vs which are purely audit entries. */
 export const KNOWN_DEAD_SEATS: readonly string[] = ["engineer", "controller"] as const;
 
 export const LANE_LABEL_PREFIX = "lane:";
