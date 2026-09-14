@@ -40,19 +40,22 @@ export const LIVE_SLOT_SEATS: readonly string[] = [
 
 const LIVE_SLOT_SEATS_SET: ReadonlySet<string> = new Set(LIVE_SLOT_SEATS);
 
-/** Known-dead seats (retired-but-still-labeled lane owners) — documentation/
- * audit list only. resolveDeadLaneRelabel does NOT gate on this constant:
- * it refuses ANY `lane:<seat>` absent from LIVE_SLOT_SEATS, treating a
- * genuinely new/typo'd seat name identically to a known-dead one. */
+/** Known-dead seats — retired seats that still carry lane labels on open issues.
+ * resolveDeadLaneRelabel uses this as a typo guard: it re-labels a `lane:<seat>`
+ * ONLY when the seat is on this list; any other absent-from-LIVE_SLOT_SEATS label
+ * (genuine typo, stale alias, etc.) is left untouched to avoid silently absorbing
+ * a mis-typed seat name into the race-engineer lane. */
 export const KNOWN_DEAD_SEATS: readonly string[] = ["engineer", "controller"] as const;
+
+const KNOWN_DEAD_SEATS_SET: ReadonlySet<string> = new Set(KNOWN_DEAD_SEATS);
 
 export const LANE_LABEL_PREFIX = "lane:";
 
 /** Repo → owning team, for resolving which race engineer inherits a dead lane.
- * Covers all repos listed in `~/Documents/brain/kits/{studio-b,asthetik}.yaml`
- * `repos:` with their matching team, plus two repos not yet in either kit file
- * — `studio-b-ai/claude-hooks` (studio-b) and `studio-b-ai/studiob` (asthetik)
- * — kept here because dead-lane issues can land on them today. */
+ * Drawn from `~/Documents/brain/kits/{studio-b,asthetik}.yaml` `repos:` plus
+ * two extras not yet in either kit file — `studio-b-ai/claude-hooks` (studio-b)
+ * and `studio-b-ai/studiob` (asthetik) — kept here because dead-lane issues can
+ * land on them today. Not a claim of kit parity; add repos here as needed. */
 export const REPO_TEAM: Readonly<Record<string, "studio-b" | "asthetik">> = {
   "studio-b-ai/ops-pipeline": "studio-b",
   "studio-b-ai/claude-config-plane": "studio-b",
@@ -88,15 +91,15 @@ export interface LaneRelabel {
 
 /**
  * Given an issue's current labels and its repo, decide whether any `lane:<seat>`
- * label names a seat without a live slot. Returns the relabel to apply, or null
- * if every `lane:<seat>` label already names a live seat (or the repo's team
- * cannot be resolved — fail-visible, never fail-closed: an unknown repo is a
- * no-op here, not a guess).
+ * label names a KNOWN-DEAD seat. Returns the relabel to apply, or null
+ * if every `lane:<seat>` label already names a live seat (or is a typo the
+ * guard skips, or the repo's team cannot be resolved — fail-visible, never
+ * fail-closed: an unknown repo is a no-op here, not a guess).
  *
  * Known-bad control (the stint's own acceptance example): `lane:engineer` on a
  * client-asthetik issue → refused, relabeled to `lane:race-engineer-ae`.
  * Known-good control: `lane:race-engineer-ae` (already the team RE) → no-op.
- */
+ * Typo guard: `lane:controllr` (not in KNOWN_DEAD_SEATS) → skipped, not mis-routed. */
 export function resolveDeadLaneRelabel(repoFullName: string, labels: readonly string[]): LaneRelabel | null {
   const re = raceEngineerForRepo(repoFullName);
   if (!re) return null;
@@ -107,7 +110,8 @@ export function resolveDeadLaneRelabel(repoFullName: string, labels: readonly st
     const seat = raw.slice(LANE_LABEL_PREFIX.length).trim().toLowerCase();
     if (seat === "") continue;
     if (LIVE_SLOT_SEATS_SET.has(seat)) continue; // live seat — leave it alone
-    // Dead: absent from the live seat set.
+    if (!KNOWN_DEAD_SEATS_SET.has(seat)) continue; // typo/unknown — don't absorb into the RE lane
+    // Known-dead: re-label to the owning team's race engineer.
     const to = `${LANE_LABEL_PREFIX}${re}`;
     if (raw === to) continue; // already the team RE — no-op
     return { from: raw, to };

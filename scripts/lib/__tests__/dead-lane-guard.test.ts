@@ -31,6 +31,14 @@ describe("resolveDeadLaneRelabel — both directions (Rule #322)", () => {
     expect(resolveDeadLaneRelabel("studio-b-ai/client-asthetik", ["bug", "P1"])).toBeNull();
   });
 
+  it("typo guard: lane:controllr (not in KNOWN_DEAD_SEATS) is skipped, not mis-routed to RE", () => {
+    expect(resolveDeadLaneRelabel("studio-b-ai/ops-pipeline", ["lane:controllr"])).toBeNull();
+  });
+
+  it("typo guard: genuinedly bogus lane label (not in either set) is skipped", () => {
+    expect(resolveDeadLaneRelabel("studio-b-ai/ops-pipeline", ["lane:notarealseat"])).toBeNull();
+  });
+
   it("negative control: unresolvable repo (no team mapping) → null, never a guess", () => {
     expect(resolveDeadLaneRelabel("studio-b-ai/some-unmapped-repo", ["lane:engineer"])).toBeNull();
   });
