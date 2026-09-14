@@ -43,9 +43,7 @@ const LIVE_SLOT_SEATS_SET: ReadonlySet<string> = new Set(LIVE_SLOT_SEATS);
 /** Known-dead seats (retired-but-still-labeled lane owners) — documentation/
  * audit list only. resolveDeadLaneRelabel does NOT gate on this constant:
  * it refuses ANY `lane:<seat>` absent from LIVE_SLOT_SEATS, treating a
- * genuinely new/typo'd seat name identically to a known-dead one. This
- * list exists so a sweep scanner can report which dead labels actually
- * appear on open issues vs which are purely audit entries. */
+ * genuinely new/typo'd seat name identically to a known-dead one. */
 export const KNOWN_DEAD_SEATS: readonly string[] = ["engineer", "controller"] as const;
 
 export const LANE_LABEL_PREFIX = "lane:";
@@ -54,9 +52,7 @@ export const LANE_LABEL_PREFIX = "lane:";
  * Covers all repos listed in `~/Documents/brain/kits/{studio-b,asthetik}.yaml`
  * `repos:` with their matching team, plus two repos not yet in either kit file
  * — `studio-b-ai/claude-hooks` (studio-b) and `studio-b-ai/studiob` (asthetik)
- * — kept here because dead-lane issues can land on them today. The kit files
- * are the sweep-diff target to bring into parity, not this map (verified
- * 2026-09-14: `grep repos: kits/*.yaml` lacks both). */
+ * — kept here because dead-lane issues can land on them today. */
 export const REPO_TEAM: Readonly<Record<string, "studio-b" | "asthetik">> = {
   "studio-b-ai/ops-pipeline": "studio-b",
   "studio-b-ai/claude-config-plane": "studio-b",
