@@ -1137,9 +1137,23 @@ export function withoutLabelWokenReruns(
   });
 }
 
+export interface RequiredChecksOpts {
+  /** Changed file paths for this PR (e.g. `prJson.files`). When a required check
+   *  never reported, the gate checks whether no changed file matches its path glob
+   *  — if so, the check is not-applicable and skipped rather than failed. */
+  changedFiles?: string[];
+  /** Per-check path globs, POSITIONAL with `requiredNames`. Each glob defines the
+   *  files whose change SHOULD trigger the corresponding check's workflow. A glob
+   *  not present (shorter than `requiredNames`) defaults to `**` (always
+   *  applicable — backward-compatible). An empty-string glob is compiled to null
+   *  (matches nothing), same as `compileSafePathGlob("")`. */
+  checkPathGlobs?: string[];
+}
+
 export function requiredChecksSatisfied(
   rollup: RollupItem[],
   requiredNames: string[],
+  opts?: RequiredChecksOpts,
 ): { ok: boolean; reasons: string[] } {
   const names = requiredNames.map((n) => n.trim()).filter((n) => n.length > 0);
   if (names.length === 0) {
@@ -1150,14 +1164,31 @@ export function requiredChecksSatisfied(
   }
 
   const reasons: string[] = [];
+  const changedFiles = opts?.changedFiles ?? [];
+  const rawGlobs = opts?.checkPathGlobs ?? [];
+  const compiledGlobs = names.map((_, i) => {
+    const raw = rawGlobs[i] ?? "**";
+    const re = compileSafePathGlob(raw);
+    if (re) return { re, raw };
+    return null;
+  });
+
+  let idx = 0;
   for (const name of names) {
     const entries = rollup.filter((item) => (item.name ?? item.context) === name);
     if (entries.length === 0) {
+      const glob = compiledGlobs[idx];
+      if (glob && changedFiles.length > 0 && !changedFiles.some((f) => glob.re.test(f))) {
+        idx++;
+        continue;
+      }
       reasons.push(`required check '${name}' never reported on this commit`);
+      idx++;
       continue;
     }
     if (entries.some((item) => !isTerminal(item))) {
       reasons.push(`required check '${name}' still in flight`);
+      idx++;
       continue;
     }
     const newest = Math.max(...entries.map(rollupTime));
@@ -1172,6 +1203,7 @@ export function requiredChecksSatisfied(
       const describe = (item: RollupItem) => item.state ?? item.conclusion ?? item.status ?? "unrecognized";
       reasons.push(`required check '${name}' latest result is not SUCCESS (${bad.map(describe).join(", ")})`);
     }
+    idx++;
   }
 
   return { ok: reasons.length === 0, reasons };

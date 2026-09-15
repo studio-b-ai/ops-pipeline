@@ -1145,6 +1145,70 @@ describe("requiredChecksSatisfied (ops#190 B1 — the named-checks leg)", () => 
     const rollup: RollupItem[] = [{ context: "build", state: "ERROR", createdAt: T1 }];
     expect(requiredChecksSatisfied(rollup, ["build"]).ok).toBe(false);
   });
+
+  // ───── ops#369: path-glob not-applicable leg ─────
+
+  it("skips a never-reported check when NO changed file matches its path glob — not-applicable, not a failure", () => {
+    const r = requiredChecksSatisfied(
+      [pass("build")],
+      ["build", "tsc --noEmit (SDK drift guard) (api)"],
+      { changedFiles: ["scripts/foo.ts", "scripts/bar.ts"], checkPathGlobs: ["**", "packages/**"] },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.reasons).toEqual([]);
+  });
+
+  it("fails a never-reported check when a changed file DOES match its path glob — the check should have run", () => {
+    const r = requiredChecksSatisfied(
+      [pass("build")],
+      ["build", "tsc --noEmit (SDK drift guard) (api)"],
+      { changedFiles: ["scripts/foo.ts", "packages/api/src/index.ts"], checkPathGlobs: ["**", "packages/**"] },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reasons.some((s) => s.includes("'tsc --noEmit") && s.includes("never reported"))).toBe(true);
+  });
+
+  it("fails a never-reported check when no path glob is provided — backward-compatible (always applicable)", () => {
+    const r = requiredChecksSatisfied([pass("build")], ["build", "tests"], { changedFiles: ["scripts/foo.ts"] });
+    expect(r.ok).toBe(false);
+    expect(r.reasons.some((s) => s.includes("'tests'") && s.includes("never reported"))).toBe(true);
+  });
+
+  it("skips a never-reported check when path glob is present but NONE of the changed files match — even with only that single check", () => {
+    const r = requiredChecksSatisfied(
+      [],
+      ["tsc --noEmit (SDK drift guard) (api)"],
+      { changedFiles: ["scripts/foo.ts"], checkPathGlobs: ["packages/**"] },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.reasons).toEqual([]);
+  });
+
+  it("a never-reported check with an empty-file list and a non-** glob still counts as not-reported (safety: empty file list = degenerate, the check MIGHT be needed)", () => {
+    const r = requiredChecksSatisfied(
+      [pass("build")],
+      ["build", "tsc --noEmit (SDK drift guard) (api)"],
+      { changedFiles: [], checkPathGlobs: ["**", "packages/**"] },
+    );
+    expect(r.ok).toBe(false);
+    expect(r.reasons.some((s) => s.includes("'tsc --noEmit") && s.includes("never reported"))).toBe(true);
+  });
+
+  it("a non-reported check with no opts at all still fails (backward-compatible — no changedFiles)", () => {
+    const r = requiredChecksSatisfied([pass("build")], ["build", "tests"]);
+    expect(r.ok).toBe(false);
+    expect(r.reasons.some((s) => s.includes("'tests'") && s.includes("never reported"))).toBe(true);
+  });
+
+  it("KNOWN-GOOD control: a never-reported check that IS NOT-APPLICABLE (scripts-only diff) passes alongside other SUCCESS checks", () => {
+    const r = requiredChecksSatisfied(
+      [pass("Build + boot + probe"), pass("turbo run test (all workspace suites)")],
+      ["Build + boot + probe", "tsc --noEmit (SDK drift guard) (api)", "turbo run test (all workspace suites)"],
+      { changedFiles: ["scripts/upgrade-eslint.ts"], checkPathGlobs: ["**", "packages/**", "**"] },
+    );
+    expect(r.ok).toBe(true);
+    expect(r.reasons).toEqual([]);
+  });
 });
 
 // ─────────────────── codeFixRevalidateDeltas (ops#190 B1, doc §4.1 move 5) ───────────────────

@@ -31,6 +31,13 @@ export interface Args {
    *  §4.1 move 4 — each named check must be strictly SUCCESS on the head commit).
    *  Empty = the named-checks leg fails closed, so code-fix can never merge. */
   requiredChecks: string[];
+  /** ops#369: per-check path globs, POSITIONAL with `requiredChecks`. When a
+   *  required check never reported on the head commit AND no changed file matches
+   *  its glob, the check is treated as not-applicable (skipped) rather than
+   *  failing the leg. A missing/absent entry defaults to `**` (always applicable
+   *  — backward-compatible). Callers that don't pass this flag at all get empty
+   *  (every check always applicable, the pre-#369 behaviour). */
+  checkPathGlobs: string[];
   /** ops#190 rung A2: when true the runner evaluates the A-side `train:ready`
    *  label-authority gate (`evaluateTrainReady`) instead of the B-side squasher
    *  diff-classification gate. The two gates are structurally separate (doc §3.1 vs
@@ -61,6 +68,8 @@ export function parseArgs(argv: string[]): Args {
   const safePathGlobs: string[] = [];
   let requiredCheckFlagSeen = false;
   const requiredChecks: string[] = [];
+  let checkPathGlobFlagSeen = false;
+  const checkPathGlobs: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo") repo = argv[++i];
     else if (argv[i] === "--pr") pr = Number(argv[++i]);
@@ -74,6 +83,10 @@ export function parseArgs(argv: string[]): Args {
       requiredCheckFlagSeen = true;
       const trimmed = argv[++i]?.trim();
       if (trimmed) requiredChecks.push(trimmed);
+    } else if (argv[i] === "--check-path-glob") {
+      checkPathGlobFlagSeen = true;
+      const trimmed = argv[++i]?.trim();
+      if (trimmed) checkPathGlobs.push(trimmed);
     } else if (argv[i] === "--sensitive-path") {
       sensitivePathFlagSeen = true;
       // Trim before storing (codex P2 finding, 2026-08-02 pass 2): the reusable
@@ -102,9 +115,9 @@ export function parseArgs(argv: string[]): Args {
   // ignoring the other's flags. Presence is what matters, not validity: even
   // `--enabled-classes docs-comment` (the default value, explicitly passed)
   // combined with --train-ready signals a confused caller.
-  if (trainReady && (enabledClassesRaw !== undefined || sensitivePathFlagSeen || safePathGlobFlagSeen || requiredCheckFlagSeen)) {
+  if (trainReady && (enabledClassesRaw !== undefined || sensitivePathFlagSeen || safePathGlobFlagSeen || requiredCheckFlagSeen || checkPathGlobFlagSeen)) {
     throw new Error(
-      "--train-ready is mutually exclusive with --enabled-classes/--sensitive-path/--safe-path-glob/--required-check " +
+      "--train-ready is mutually exclusive with --enabled-classes/--sensitive-path/--safe-path-glob/--required-check/--check-path-glob " +
         "(A-side label-authority gate vs B-side squasher gate — one invocation evaluates exactly one)",
     );
   }
@@ -134,5 +147,5 @@ export function parseArgs(argv: string[]): Args {
     enabledClasses = requested as PrDiffClass[];
   }
 
-  return { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, trainReady };
+  return { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, checkPathGlobs, trainReady };
 }
