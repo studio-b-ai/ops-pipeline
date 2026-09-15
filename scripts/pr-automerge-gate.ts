@@ -1057,7 +1057,30 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
 
     // ── Revalidate (train shape): snapshot drift, then a fresh authority re-evaluation ──
     const before: AuthoritySnapshot = { labels, headRefOid: prJson.headRefOid, state: prJson.state, mergeStateStatus: prJson.mergeStateStatus };
-    const revalidatePr = fetchPr(repo, pr);
+    let revalidatePr = fetchPr(repo, pr);
+    // 2026-09-15 crew-352: a sibling merge recomputing mergeability flips mergeStateStatus
+    // to UNKNOWN right here — which reads as "drift" against `before` (CLEAN) and aborts
+    // the cycle. Same transient-UNKNOWN re-read as evaluateTrainReadyInner: re-read up to
+    // 3×20s when CI is clean so the fresh recompute settles instead of bouncing a sweep.
+    if (revalidatePr.mergeStateStatus === "UNKNOWN") {
+      const unkCiClean = isRollupClean(revalidatePr.statusCheckRollup, loadSanctionedSkips(repo));
+      if (unkCiClean) {
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          execFileSync("sleep", ["20"]);
+          revalidatePr = fetchPr(repo, pr);
+          console.log(
+            `[info] pr-automerge-gate ${repo}#${pr}: mergeStateStatus was UNKNOWN — ` +
+              `re-read ${attempt}/3 after 20s → ${revalidatePr.mergeStateStatus}`,
+          );
+          if (revalidatePr.mergeStateStatus !== "UNKNOWN") break;
+        }
+      } else {
+        console.log(
+          `[info] pr-automerge-gate ${repo}#${pr}: mergeStateStatus is UNKNOWN but CI not clean — ` +
+            `skipping re-read (UNKNOWN + !ciClean = unmergeable either way)`,
+        );
+      }
+    }
     const after: AuthoritySnapshot = {
       labels: revalidatePr.labels.map((l) => l.name),
       headRefOid: revalidatePr.headRefOid,
