@@ -98,14 +98,6 @@
       "train": true
     },
     {
-      "repo": "studio-b-ai/roundhouse",
-      "enabled_classes": "docs-comment",
-      "sensitive_path_patterns": "",
-      "safe_path_globs": "",
-      "required_checks": "",
-      "train": false
-    },
-    {
       "repo": "studio-b-ai/claude-hooks",
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "",
