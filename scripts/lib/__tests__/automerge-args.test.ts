@@ -119,16 +119,26 @@ describe("parseArgs", () => {
     ).toThrow(/mutually exclusive/);
   });
 
-  it("throws when --train-ready is combined with --sensitive-path (mutual exclusion, fail-loud)", () => {
-    expect(() =>
-      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--sensitive-path", "\\.sql$", "--train-ready"]),
-    ).toThrow(/mutually exclusive/);
+  it("now allows --train-ready combined with --sensitive-path (crew-357 NEW-1: the sensitive-path floor runs on BOTH gates, so the flag is valid in train mode too)", () => {
+    const args = parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--sensitive-path", "\\.sql$"]);
+    expect(args.trainReady).toBe(true);
+    expect(args.sensitivePathPatterns).toEqual(["\\.sql$"]);
   });
 
-  it("throws even when the combined --sensitive-path value is whitespace-only (codex P2, A2 pass 1) — exclusion keys on flag PRESENCE, not on whether the value survived trimming", () => {
-    expect(() =>
-      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--sensitive-path", "   "]),
-    ).toThrow(/mutually exclusive/);
+  it("allows --train-ready combined with multiple --sensitive-path flags (crew-357 NEW-1)", () => {
+    const args = parseArgs([
+      "--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready",
+      "--sensitive-path", "\\.sql$",
+      "--sensitive-path", "^\\.github/actions/",
+    ]);
+    expect(args.trainReady).toBe(true);
+    expect(args.sensitivePathPatterns).toEqual(["\\.sql$", "^\\.github/actions/"]);
+  });
+
+  it("allows --train-ready combined with a whitespace-only --sensitive-path (crew-357 NEW-1: the trimmed value is dropped; the flag is still present in argv, and the mutual exclusion no longer fires on it)", () => {
+    const args = parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--sensitive-path", "   "]);
+    expect(args.trainReady).toBe(true);
+    expect(args.sensitivePathPatterns).toEqual([]);
   });
 
   it("still requires --repo/--pr in train mode (the mutual-exclusion check does not preempt required-arg validation)", () => {

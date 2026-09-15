@@ -190,9 +190,12 @@ jobs:
               echo "$repo: bugsquasher+fleet-internal=$(jq length <<<"$sq") queued(train)=$(jq length <<<"$tr")"
             fi
 
-            # Train entries pass ONLY train_ready — the squasher inputs are blanked
+            # Train entries pass ONLY train_ready — the squasher-only class inputs are blanked
             # deliberately (the reusable ignores them in train mode; forwarding
             # enabled_classes would trip the script's mutual-exclusion fail-loud).
+            # crew-357 NEW-1: sensitive_path_patterns IS forwarded on train entries —
+            # the sensitive-path floor runs on BOTH paths, so the train must also
+            # refuse `queued` when a path hits the denylist.
             entries=$(jq -c --argjson cfg "$repo_json" --argjson sq "$sq" --argjson tr "$tr" '
               . + ($sq | map({repo: $cfg.repo, pr_number: (. | tostring), train_ready: false,
                               enabled_classes: $cfg.enabled_classes,
@@ -200,7 +203,7 @@ jobs:
                               safe_path_globs: $cfg.safe_path_globs,
                               required_checks: $cfg.required_checks}))
                 + ($tr | map({repo: $cfg.repo, pr_number: (. | tostring), train_ready: true,
-                              enabled_classes: "", sensitive_path_patterns: "",
+                              enabled_classes: "", sensitive_path_patterns: $cfg.sensitive_path_patterns,
                               safe_path_globs: "", required_checks: ""}))' <<<"$entries")
           done < <(jq -c '.repos[]' "$CONFIG")
 

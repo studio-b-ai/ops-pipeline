@@ -831,6 +831,40 @@ export interface ClassifyPrDiffClassResult {
 }
 
 /**
+ * crew-357 NEW-1 (2026-09-15): the sensitive-path matcher, extracted so the SAME
+ * implementation backs both consumers:
+ *  - `classifyPrDiffClass` below (the class-match decision leg), unchanged in
+ *    behavior; and
+ *  - `pr-automerge-gate.ts`'s FLOOR leg, which runs BEFORE `evaluateQueuedOverride`
+ *    and on the train path so `queued` can never lower a sensitive path.
+ *
+ * One matcher, two call sites — a second hand-rolled copy is exactly the drift the
+ * saga warns about (the class-match leg looked correct while the floor did not exist).
+ *
+ * Fail-closed semantics, unchanged from the inline form this replaces:
+ *  - a malformed caller pattern (misconfiguration) NEVER throws and NEVER reads as
+ *    "no exclusion" — it returns `{ ok: false }` so both callers refuse;
+ *  - `patterns` undefined/empty = no exclusion (`hits: []`);
+ *  - matching is case-sensitive `RegExp.test` against the whole path, as before.
+ */
+export type SensitivePathEvaluation = { ok: true; hits: string[] } | { ok: false; error: string };
+
+export function evaluateSensitivePaths(
+  paths: readonly string[],
+  patterns: readonly string[] | undefined,
+): SensitivePathEvaluation {
+  if (!patterns || patterns.length === 0) return { ok: true, hits: [] };
+  let res: RegExp[];
+  try {
+    res = patterns.map((src) => new RegExp(src));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
+  return { ok: true, hits: paths.filter((p) => res.some((re) => re.test(p))) };
+}
+
+/**
  * Resolves which (if any) of the PR-level diff classes a PR's file set qualifies
  * for. Exactly one class per PR: a diff spanning two classes' file shapes (e.g. a
  * workflow file AND a test file together) satisfies NEITHER candidate's "every file
@@ -855,30 +889,23 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
     return { prClass: null, failureLeg: "class-match", reasons: ["no changed files"] };
   }
 
-  if (sensitivePathPatterns && sensitivePathPatterns.length > 0) {
-    // A malformed regex source (caller misconfiguration) must NEVER throw out of this
-    // function and must NEVER be silently ignored (treating a broken pattern as "no
-    // exclusion" would defeat the exact fail-closed guarantee this parameter exists
-    // for) — it fails closed exactly like a real sensitive-path hit: prClass: null.
-    let sensitiveRes: RegExp[];
-    try {
-      sensitiveRes = sensitivePathPatterns.map((src) => new RegExp(src));
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return {
-        prClass: null,
-        failureLeg: "class-match",
-        reasons: [`invalid sensitivePathPatterns regex (fail-closed): ${message}`],
-      };
-    }
-    const sensitiveFiles = files.filter((f) => sensitiveRes.some((re) => re.test(f.path)));
-    if (sensitiveFiles.length > 0) {
-      return {
-        prClass: null,
-        failureLeg: "class-match",
-        reasons: [`sensitive path(s) excluded from classification: ${sensitiveFiles.map((f) => f.path).join(", ")}`],
-      };
-    }
+  const sensitive = evaluateSensitivePaths(
+    files.map((f) => f.path),
+    sensitivePathPatterns,
+  );
+  if (!sensitive.ok) {
+    return {
+      prClass: null,
+      failureLeg: "class-match",
+      reasons: [`invalid sensitivePathPatterns regex (fail-closed): ${sensitive.error}`],
+    };
+  }
+  if (sensitive.hits.length > 0) {
+    return {
+      prClass: null,
+      failureLeg: "class-match",
+      reasons: [`sensitive path(s) excluded from classification: ${sensitive.hits.join(", ")}`],
+    };
   }
 
   const candidates: CandidateEval[] = [

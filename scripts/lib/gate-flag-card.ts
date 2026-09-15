@@ -42,9 +42,9 @@
 
 /** The refusal legs that can carry a card. Mirrors gate-enroll's DECISION_LEGS: a
  *  machinery leg (truncation, held, eligibility, head-moved) is not a human's to clear. */
-export type CardLeg = "review" | "class-match" | "line-cap" | "named-checks";
+export type CardLeg = "review" | "class-match" | "line-cap" | "named-checks" | "sensitive-paths";
 
-const CARD_LEGS: ReadonlySet<string> = new Set<CardLeg>(["review", "class-match", "line-cap", "named-checks"]);
+const CARD_LEGS: ReadonlySet<string> = new Set<CardLeg>(["review", "class-match", "line-cap", "named-checks", "sensitive-paths"]);
 
 /** True when `leg` is a refusal a human label can clear — i.e. one that earns a card. */
 export function isCardLeg(leg: string): leg is CardLeg {
@@ -68,7 +68,18 @@ export function doorSentenceFor(leg: CardLeg): string {
       ? "the diff did not resolve to an enabled class"
       : leg === "line-cap"
         ? "the diff is over this class's line cap"
-        : "a named required check is not satisfied";
+        : leg === "sensitive-paths"
+          ? "the diff touches a sensitive path (this repo's floor — `queued` never lowers it)"
+          : "a named required check is not satisfied";
+  if (leg === "sensitive-paths") {
+    return (
+      `_This refusal is a **sensitive-path** leg — the diff touches a path this repo ` +
+      "declares sensitive, so NO label (`queued` included) clears it: the floor Kevin's " +
+      "key never lowers. `hold` parks it; to merge this requires moving the paths out of " +
+      "scope (a narrower PR) or Kevin amending the sensitive-path policy itself. " +
+      "This is a blue card on the glass._"
+    );
+  }
   return (
     `_This refusal is a **${leg}** leg — ${what}, so \`reviewed\` does NOT clear it ` +
     "(`reviewed` substitutes for the model's vote, which this PR never reached). " +

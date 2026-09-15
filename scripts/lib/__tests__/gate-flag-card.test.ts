@@ -106,12 +106,14 @@ describe("idempotency markers are per (leg, head)", () => {
 });
 
 describe("isCardLeg admits exactly the decision legs", () => {
-  it.each(["review", "class-match", "line-cap", "named-checks"])("%s earns a card", (leg) => {
+  it.each(["review", "class-match", "line-cap", "named-checks", "sensitive-paths"])("%s earns a card", (leg) => {
     expect(isCardLeg(leg)).toBe(true);
   });
 
   // Machinery refusals are not a human's to clear — carding them would be noise a
-  // label cannot answer (the mirror of the #313 defect).
+  // label cannot answer (the mirror of the #313 defect). sensitive-paths IS a card
+  // leg (a human must amend the policy or narrow the PR), so it is deliberately NOT
+  // in this machinery list.
   it.each(["truncation", "held", "eligibility", "head-moved", "queued", "ci-rollup", "other"])(
     "%s does NOT earn a card",
     (leg) => {
@@ -138,9 +140,10 @@ describe("pr-automerge-gate.ts actually wires the card at every decision leg", (
 
   it("routes every decision-leg refusal through one carding helper", () => {
     // Call sites: the classification refusal (carries class-match AND line-cap via its
-    // resolved `leg`), the not-enabled-class refusal, named-checks, review — 4 total.
+    // resolved `leg`), the not-enabled-class refusal, named-checks, review, and the
+    // crew-357 NEW-1 sensitive-paths floor — at least 5 total.
     const calls = src.match(/^\s*postFlagCard\(/gm) ?? [];
-    expect(calls.length).toBeGreaterThanOrEqual(4);
+    expect(calls.length).toBeGreaterThanOrEqual(5);
   });
 
   it("cards the review leg AND at least one pre-review decision leg", () => {
@@ -151,6 +154,8 @@ describe("pr-automerge-gate.ts actually wires the card at every decision leg", (
     expect(src).toMatch(/postFlagCard\(repo, pr, "named-checks",/);
     // The classification site passes the resolved leg variable (class-match | line-cap).
     expect(src).toMatch(/postFlagCard\(repo, pr, leg,/);
+    // crew-357 NEW-1: the sensitive-path floor also cards.
+    expect(src).toMatch(/postFlagCard\(repo, pr, "sensitive-paths",/);
   });
 
   it("the carding helper applies needs-human alongside the comment", () => {

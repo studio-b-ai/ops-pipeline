@@ -6,6 +6,7 @@ import {
   withoutLabelWokenReruns,
   compileSafePathGlob,
   evaluateMergeReadiness,
+  evaluateSensitivePaths,
   gateDecision,
   gateDecisionForClass,
   isRollupClean,
@@ -1420,5 +1421,40 @@ describe("classifyPrDiffClass — vault-doc class (brain#239 doc 4 leg B, 2026-0
     });
     expect(result.prClass).toBeNull();
     expect(result.reasons.some((r) => r.includes("vault-doc") && r.includes("outside vault allowlist"))).toBe(true);
+  });
+});
+
+describe("evaluateSensitivePaths (crew-357 NEW-1 — the shared floor matcher)", () => {
+  // Rule #471 both-directions: the floor matcher must reject a known-bad (a hit on a
+  // sensitive path) AND pass a known-good (no hit). These are the negative/positive
+  // controls that prove the door honors the sensitive-path floor on BOTH gates.
+
+  it("negative control (#471): flags a path that matches a sensitive pattern", () => {
+    const r = evaluateSensitivePaths([".github/workflows/rep-access-silence-monitor.yml"], ["^\\.github/workflows/"]);
+    expect(r.ok).toBe(true);
+    expect("hits" in r).toBe(true);
+    if ("hits" in r) expect(r.hits).toEqual([".github/workflows/rep-access-silence-monitor.yml"]);
+  });
+
+  it("positive control (#471): returns no hits for a safe path against a non-matching pattern", () => {
+    const r = evaluateSensitivePaths(["src/lib/order-notes.ts"], ["^\\.github/workflows/"]);
+    expect(r).toEqual({ ok: true, hits: [] });
+  });
+
+  it("empty/undefined patterns = no exclusion", () => {
+    expect(evaluateSensitivePaths(["src/foo.ts"], undefined)).toEqual({ ok: true, hits: [] });
+    expect(evaluateSensitivePaths(["src/foo.ts"], [])).toEqual({ ok: true, hits: [] });
+  });
+
+  it("fail-closes (never throws) on a malformed pattern", () => {
+    const r = evaluateSensitivePaths(["src/foo.ts"], ["(unclosed["]);
+    expect(r.ok).toBe(false);
+  });
+
+  it("matches multiple patterns (the fleet registry encodes several, e.g. squash/label-authority/workflows)", () => {
+    const patterns = ["(^|/)squasher-fleet\\.json$|(^|/)label-authority\\.ts$|(^|/)\\.github/workflows/"];
+    const r = evaluateSensitivePaths(["scripts/squasher-fleet.json"], patterns);
+    expect(r.ok).toBe(true);
+    if ("hits" in r) expect(r.hits).toEqual(["scripts/squasher-fleet.json"]);
   });
 });

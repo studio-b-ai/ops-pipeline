@@ -93,6 +93,7 @@ import {
   classifyPrDiffClass,
   codeFixRevalidateDeltas,
   evaluateMergeReadiness,
+  evaluateSensitivePaths,
   gateDecisionForClass,
   isRollupClean,
   parseUnifiedDiff,
@@ -490,7 +491,7 @@ async function evaluate(
     return;
   }
 
-  // ── Legs "held" / "queued" (ops-pipeline#260 leg 4): Kevin's word on a decision line. ──
+  // ── Leg "held" / "queued" (ops-pipeline#260 leg 4): Kevin's word on a decision line. ──
   // The machinery legs above (OPEN, not draft, mergeStateStatus CLEAN, CI rollup clean,
   // complete file list) are the floor his word never lowers. Below them, `hold` parks
   // the PR — nothing else runs, and its open decision line(s) resolve as held so the
@@ -506,6 +507,34 @@ async function evaluate(
     console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "held", reasons: [detail] }));
     await resolveGateRefusals(repo, pr, { resolution: "held" });
     return;
+  }
+  // ── Leg "sensitive-paths" (crew-357 NEW-1): the floor, `queued` never lowers it. ──
+  // Sensitive paths (per-repo regex patterns from the fleet registry) are checked
+  // BEFORE `evaluateQueuedOverride`: `queued` overrides DECISION legs (class-match,
+  // line-cap, named-checks, review); sensitive-paths is a FLOOR leg that blocks
+  // `queued` from ever reaching the decision legs. Uses prJson.files (the
+  // authoritative file list already validated complete above), no diff fetch needed.
+  {
+    const sensitive = evaluateSensitivePaths(
+      prJson.files.map((f) => f.path),
+      sensitivePathPatterns,
+    );
+    if (!sensitive.ok) {
+      const reasons = [`invalid sensitivePathPatterns regex (fail-closed): ${sensitive.error}`];
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: sensitive-paths floor — ${reasons[0]}`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "sensitive-paths", reasons }));
+      await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "sensitive-paths", reasons, additions: prJson.additions, deletions: prJson.deletions });
+      postFlagCard(repo, pr, "sensitive-paths", prJson.headRefOid, reasons);
+      return;
+    }
+    if (sensitive.hits.length > 0) {
+      const reasons = [`sensitive path(s) on the floor — \`queued\` never lowers them: ${sensitive.hits.join(", ")}`];
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: sensitive-paths floor — ${reasons[0]}`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "sensitive-paths", reasons }));
+      await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "sensitive-paths", reasons, additions: prJson.additions, deletions: prJson.deletions });
+      postFlagCard(repo, pr, "sensitive-paths", prJson.headRefOid, reasons);
+      return;
+    }
   }
   if (labels.includes(QUEUED_LABEL)) {
     const outcome = await evaluateQueuedOverride(repo, pr, prJson, labels);
@@ -995,6 +1024,12 @@ export interface TrainReadyOptions {
    *  door (or omit it) directly, no env stubbing required. Omit/undefined ⇒
    *  treated the same as null (renders the honest "unknown" door). */
   door?: MergeDoor | null;
+  /** crew-357 NEW-1: the repo's sensitive-path patterns (fleet registry). The
+   *  sensitive-path floor runs on the train path too (before the authority leg) —
+   *  a `queued` label never lowers a sensitive path even on a train:true repo.
+   *  Omit/empty = no sensitive-path floor (backward-compatible with the pre-NEW-1
+   *  train invocations, which carried none). */
+  sensitivePathPatterns?: string[];
 }
 
 /**
@@ -1366,6 +1401,36 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     return { outcome: "refused", detail };
   }
 
+  // crew-357 NEW-1: the sensitive-path floor runs on the train path too — a `queued`
+  // label (the train's authority) never lowers a sensitive path. Uses prJson.files
+  // (the authoritative file list from `gh pr view --json files`), no diff fetch.
+  // Carded like the squasher path's floor: needs-human + enrolled line so Kevin sees
+  // it on the glass. The train path's only door is `queued`, which this floor blocks —
+  // an un-carded refusal here is invisible until the PR ages out (the same-class
+  // bug as the pre-#313 review-only carding).
+  {
+    const trainSensitive = evaluateSensitivePaths(
+      prJson.files.map((f) => f.path),
+      opts.sensitivePathPatterns,
+    );
+    if (!trainSensitive.ok) {
+      const reasons = [`invalid sensitivePathPatterns regex (fail-closed): ${trainSensitive.error}`];
+      const detail = `sensitive-paths floor: ${reasons[0]}`;
+      logTrainGateLine(repo, pr, "refused", detail);
+      await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "sensitive-paths", reasons, additions: prJson.additions, deletions: prJson.deletions });
+      postFlagCard(repo, pr, "sensitive-paths", prJson.headRefOid, reasons);
+      return { outcome: "refused", detail };
+    }
+    if (trainSensitive.hits.length > 0) {
+      const reasons = [`sensitive path(s) on the floor — \`queued\` never lowers them: ${trainSensitive.hits.join(", ")}`];
+      const detail = `sensitive-paths floor: ${reasons[0]}`;
+      logTrainGateLine(repo, pr, "refused", detail);
+      await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "sensitive-paths", reasons, additions: prJson.additions, deletions: prJson.deletions });
+      postFlagCard(repo, pr, "sensitive-paths", prJson.headRefOid, reasons);
+      return { outcome: "refused", detail };
+    }
+  }
+
   // TODO(A2 or later rung): window law (doc §3.1 step 6) — restart-train repos
   // (repoClassFor(repo) === "train") merge only inside restart-train-lib.ts's window
   // rules (`windowState`, `orderQueue`). `windowState` needs `computeAnchor
@@ -1514,7 +1579,10 @@ async function main(): Promise<void> {
     // #412: the door fact is read ONCE here, at the call site, from the live
     // Actions environment — never inside evaluateTrainReady itself, which stays
     // pure/injectable for tests (see TrainReadyOptions.door).
-    await evaluateTrainReady(repo, pr, { door: mergeDoorFrom() });
+    await evaluateTrainReady(repo, pr, {
+      door: mergeDoorFrom(),
+      sensitivePathPatterns,
+    });
     return;
   }
   try {

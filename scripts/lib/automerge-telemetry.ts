@@ -75,6 +75,11 @@ export type GateReceiptLeg =
   // whose non-terminal state then deltas the gate's own revalidate. A decision leg,
   // not a wait: the loop cannot clear itself, so a human owns the outcome.
   | "flap-guard"
+  // 2026-09-15 crew-357 (NEW-1): sensitive-paths, the floor above the queued override.
+  // Sensitive paths (caller-supplied regex per repo from the fleet registry) are
+  // checked BEFORE evaluateQueuedOverride and on the train path — `queued` never
+  // overrides them. A decision leg (needs-human card, enrolled line), not a wait.
+  | "sensitive-paths"
   | "other";
 
 export interface GateReceiptInput {

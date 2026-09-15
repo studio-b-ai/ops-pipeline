@@ -35,9 +35,12 @@ export interface Args {
    *  label-authority gate (`evaluateTrainReady`) instead of the B-side squasher
    *  diff-classification gate. The two gates are structurally separate (doc §3.1 vs
    *  §4) and take disjoint configuration, so `--train-ready` is mutually exclusive
-   *  with the squasher-only flags (`--enabled-classes`, `--sensitive-path`) —
-   *  combining them is a caller misconfiguration and throws rather than silently
-   *  ignoring half the invocation. */
+   *  with the squasher-only flags (`--enabled-classes`, `--safe-path-glob`,
+   *  `--required-check`) — combining them is a caller misconfiguration and throws
+   *  rather than silently ignoring half the invocation.
+   *  `--sensitive-path` is NO LONGER exclusive with `--train-ready` (crew-357
+   *  NEW-1): the sensitive-path floor runs on BOTH paths, before the queued override
+   *  on the squasher side and as a merge-readiness check on the train side. */
   trainReady: boolean;
 }
 
@@ -101,11 +104,14 @@ export function parseArgs(argv: string[]): Args {
   // gates is ambiguous — fail loud (#161) instead of picking one and silently
   // ignoring the other's flags. Presence is what matters, not validity: even
   // `--enabled-classes docs-comment` (the default value, explicitly passed)
-  // combined with --train-ready signals a confused caller.
-  if (trainReady && (enabledClassesRaw !== undefined || sensitivePathFlagSeen || safePathGlobFlagSeen || requiredCheckFlagSeen)) {
+  // combined with --train-ready signals a confused caller. `--sensitive-path` is
+  // deliberately NOT in this list (crew-357 NEW-1): it configures the floor leg,
+  // which runs on BOTH gates, so it is valid in either mode.
+  if (trainReady && (enabledClassesRaw !== undefined || safePathGlobFlagSeen || requiredCheckFlagSeen)) {
     throw new Error(
-      "--train-ready is mutually exclusive with --enabled-classes/--sensitive-path/--safe-path-glob/--required-check " +
-        "(A-side label-authority gate vs B-side squasher gate — one invocation evaluates exactly one)",
+      "--train-ready is mutually exclusive with --enabled-classes/--safe-path-glob/--required-check " +
+        "(A-side label-authority gate vs B-side squasher gate — one invocation evaluates exactly one; " +
+        "--sensitive-path is allowed with either, it configures the shared floor leg)",
     );
   }
 
