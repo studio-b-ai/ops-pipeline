@@ -200,7 +200,7 @@ jobs:
                               safe_path_globs: $cfg.safe_path_globs,
                               required_checks: $cfg.required_checks}))
                 + ($tr | map({repo: $cfg.repo, pr_number: (. | tostring), train_ready: true,
-                              enabled_classes: "", sensitive_path_patterns: "",
+                              enabled_classes: "", sensitive_path_patterns: $cfg.sensitive_path_patterns,
                               safe_path_globs: "", required_checks: ""}))' <<<"$entries")
           done < <(jq -c '.repos[]' "$CONFIG")
 
