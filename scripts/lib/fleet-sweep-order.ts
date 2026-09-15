@@ -55,6 +55,7 @@ export interface FleetSweepEntry {
   sensitive_path_patterns: string;
   safe_path_globs: string;
   required_checks: string;
+  check_path_globs: string;
 }
 
 export interface OrderOptions {

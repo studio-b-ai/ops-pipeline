@@ -18,6 +18,7 @@ function mkTrain(repo: string, pr: string): FleetSweepEntry {
     sensitive_path_patterns: "",
     safe_path_globs: "",
     required_checks: "",
+    check_path_globs: "",
   };
 }
 
@@ -30,6 +31,7 @@ function mkBugsq(repo: string, pr: string): FleetSweepEntry {
     sensitive_path_patterns: "",
     safe_path_globs: "src/**",
     required_checks: "Build & Check",
+    check_path_globs: "",
   };
 }
 
@@ -204,6 +206,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
       sensitive_path_patterns: "^\\.github/actions/",
       safe_path_globs: "src/**",
       required_checks: "Client — TypeScript + Build,Server — TypeScript + Tests",
+      check_path_globs: "",
     };
 
     const ordered = orderFleetSweepEntries([entry], { maxFanout: 20, perRepoCap: 5, runOffset: 0 });

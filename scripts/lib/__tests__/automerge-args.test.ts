@@ -138,10 +138,11 @@ describe("parseArgs", () => {
 
   // ───── --safe-path-glob / --required-check (ops#190 B1) ─────
 
-  it("defaults safePathGlobs and requiredChecks to [] when the flags are omitted (every existing caller's shape — code-fix stays inert)", () => {
+  it("defaults safePathGlobs, requiredChecks and checkPathGlobs to [] when the flags are omitted (every existing caller's shape — code-fix stays inert)", () => {
     const args = parseArgs(["--repo", "studio-b-ai/bolt-wms", "--pr", "7"]);
     expect(args.safePathGlobs).toEqual([]);
     expect(args.requiredChecks).toEqual([]);
+    expect(args.checkPathGlobs).toEqual([]);
   });
 
   it("collects multiple --safe-path-glob flags into an array, in order", () => {
@@ -198,6 +199,45 @@ describe("parseArgs", () => {
       "",
     ]);
     expect(args.requiredChecks).toEqual(["build"]);
+  });
+
+  it("collects multiple --check-path-glob flags into an array, in order, POSITIONAL with --required-check", () => {
+    const args = parseArgs([
+      "--repo",
+      "studio-b-ai/bolt-wms",
+      "--pr",
+      "7",
+      "--check-path-glob",
+      "src/**",
+      "--check-path-glob",
+      "packages/**",
+    ]);
+    expect(args.checkPathGlobs).toEqual(["src/**", "packages/**"]);
+  });
+
+  it("trims whitespace off each --check-path-glob value and drops whitespace-only entries", () => {
+    const args = parseArgs([
+      "--repo",
+      "studio-b-ai/bolt-wms",
+      "--pr",
+      "7",
+      "--check-path-glob",
+      " packages/** ",
+      "--check-path-glob",
+      "",
+    ]);
+    expect(args.checkPathGlobs).toEqual(["packages/**"]);
+  });
+
+  it("defaults checkPathGlobs to [] when the flag is omitted — every check always applicable", () => {
+    const args = parseArgs(["--repo", "studio-b-ai/bolt-wms", "--pr", "7"]);
+    expect(args.checkPathGlobs).toEqual([]);
+  });
+
+  it("throws when --train-ready is combined with --check-path-glob (widened mutual exclusion, fail-loud)", () => {
+    expect(() =>
+      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--check-path-glob", "packages/**"]),
+    ).toThrow(/mutually exclusive/);
   });
 
   it("throws when --train-ready is combined with --safe-path-glob (widened mutual exclusion, fail-loud)", () => {

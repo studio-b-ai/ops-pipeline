@@ -15,6 +15,7 @@
       "sensitive_path_patterns": "",
       "safe_path_globs": "packages/*/src/**,scripts/**,docs/**",
       "required_checks": "Build + boot + probe,tsc --noEmit (SDK drift guard) (api),turbo run test (all workspace suites)",
+      "check_path_globs": "**,packages/**,**",
       "train": false
     },
     {

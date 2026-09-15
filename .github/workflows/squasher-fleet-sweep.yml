@@ -221,10 +221,12 @@ jobs:
                               enabled_classes: $cfg.enabled_classes,
                               sensitive_path_patterns: $cfg.sensitive_path_patterns,
                               safe_path_globs: $cfg.safe_path_globs,
-                              required_checks: $cfg.required_checks}))
+                              required_checks: $cfg.required_checks,
+                              check_path_globs: ($cfg.check_path_globs // "")}))
                 + ($tr | map({repo: $cfg.repo, pr_number: (. | tostring), train_ready: true,
                               enabled_classes: "", sensitive_path_patterns: "",
-                              safe_path_globs: "", required_checks: ""}))' <<<"$entries")
+                              safe_path_globs: "", required_checks: "",
+                              check_path_globs: ""}))' <<<"$entries")
           done < <(jq -c '.repos[]' "$CONFIG")
 
           # Kevin 2026-09-15 05:5xZ: "box ... should be picked up by the cron in any repo." Repos outside the
@@ -282,6 +284,7 @@ jobs:
       sensitive_path_patterns: ${{ matrix.sensitive_path_patterns }}
       safe_path_globs: ${{ matrix.safe_path_globs }}
       required_checks: ${{ matrix.required_checks }}
+      check_path_globs: ${{ matrix.check_path_globs }}
       train_ready: ${{ matrix.train_ready }}
     secrets:
       # ANTHROPIC_API_KEY no longer passed (WIF, 9/06) — the gate federates from this run's OIDC identity.
