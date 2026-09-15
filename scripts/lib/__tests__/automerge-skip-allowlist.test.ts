@@ -208,10 +208,9 @@ describe("committed data file", () => {
     }
   });
 
-  it("radio's entry matches webhook-router's precedent exactly (same ci.yml shape, same three names)", () => {
+  it("radio's entry carries the three sanctioned skips (Post-Deploy Smoke, Slack Alert on Failure, Slack Recovery Notice)", () => {
     const radio = [...loadSanctionedSkips("studio-b-ai/radio")].sort();
-    const wr = [...loadSanctionedSkips("studio-b-ai/webhook-router")].sort();
-    expect(radio).toEqual(wr);
+    expect(radio).toEqual(["Post-Deploy Smoke", "Slack Alert on Failure", "Slack Recovery Notice"]);
   });
 
   it("NEGATIVE CONTROL: lightsout stays unsanctioned — a repo with zero CI must keep failing closed", () => {

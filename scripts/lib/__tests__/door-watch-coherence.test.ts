@@ -22,7 +22,7 @@ const LIVE_DOOR_ROWS: DoorRegistryRow[] = [
   { repo: "studio-b-ai/studiob-price-sync", train: true },
   { repo: "studio-b-ai/asthetik-trade-theme", train: true },
   { repo: "studio-b-ai/asthetik-portal", train: true },
-  { repo: "studio-b-ai/webhook-router", train: true },
+  { repo: "studio-b-ai/radio", train: true },
   { repo: "studio-b-ai/ops-pipeline", train: false },
   { repo: "studio-b-ai/acuops-pipeline", train: false },
   { repo: "studio-b-ai/acudev", train: false },
@@ -31,7 +31,6 @@ const LIVE_DOOR_ROWS: DoorRegistryRow[] = [
   { repo: "studio-b-ai/claude-config-plane", train: true },
   { repo: "studio-b-ai/roundhouse", train: false },
   { repo: "studio-b-ai/claude-hooks", train: false },
-  { repo: "studio-b-ai/radio", train: true },
   { repo: "studio-b-ai/lightsout", train: true },
   { repo: "studio-b-ai/client-asthetik", train: true },
   { repo: "studio-b-ai/toto", train: true },
@@ -40,7 +39,7 @@ const LIVE_DOOR_ROWS: DoorRegistryRow[] = [
 /** backlog-managers.yaml's `repos:` list BEFORE this PR widened it — the drifted state. */
 const WATCHED_BEFORE: string[] = [
   "studio-b-ai/ops-pipeline",
-  "studio-b-ai/webhook-router",
+  "studio-b-ai/radio",
   "studio-b-ai/client-asthetik",
   "studio-b-ai/acuops-pipeline",
   "studio-b-ai/acudev",
@@ -58,7 +57,6 @@ const WATCHED_BEFORE: string[] = [
 const WATCHED_AFTER: string[] = [
   ...WATCHED_BEFORE,
   "studio-b-ai/claude-config-plane",
-  "studio-b-ai/radio",
   "studio-b-ai/lightsout",
   "studio-b-ai/toto",
 ];
@@ -72,7 +70,7 @@ const LANE_MANAGERS: Readonly<Record<string, string>> = {
 };
 
 describe("findDoorWatchIncoherence — the live defect (Rule #322 known-bad)", () => {
-  it("fires on the REAL pre-fix registries, naming exactly the 4 drifted repos", () => {
+  it("fires on the REAL pre-fix registries, naming exactly the 3 drifted repos (radio was already watched — the stale webhook-router entry was a duplicate in the door registry, not a missing watch)", () => {
     const findings = findDoorWatchIncoherence({
       doorRows: LIVE_DOOR_ROWS,
       watchedRepos: WATCHED_BEFORE,
@@ -82,7 +80,6 @@ describe("findDoorWatchIncoherence — the live defect (Rule #322 known-bad)", (
     expect(findings.map((f) => f.repo)).toEqual([
       "studio-b-ai/claude-config-plane",
       "studio-b-ai/lightsout",
-      "studio-b-ai/radio",
       "studio-b-ai/toto",
     ]);
     expect(findings.every((f) => f.class === "door_watch_incoherent")).toBe(true);
@@ -244,8 +241,7 @@ describe("summarizeDoorWatchCoherence", () => {
       laneManagers: LANE_MANAGERS,
     });
     const summary = summarizeDoorWatchCoherence(findings);
-    expect(summary).toContain("4 repo(s)");
-    expect(summary).toContain("studio-b-ai/radio");
+    expect(summary).toContain("3 repo(s)");
     expect(summary).toContain("studio-b-ai/toto");
   });
 });

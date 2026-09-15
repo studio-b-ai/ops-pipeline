@@ -1,6 +1,6 @@
 # 2026-09-06 (Engineer, six-lens backlog sweep finding 3): managers repointed from the retired
 # C-suite titles (CTO/COO/CMO/CoS) to the LIVE roster (Mechanic/Engineer/Dispatcher/Publicity),
-# per webhook-router src/bugsquasher/seat-owner.ts REPO_LANE_MANAGER and the 9/03 seat folds.
+# per radio (fka webhook-router) src/bugsquasher/seat-owner.ts REPO_LANE_MANAGER and the 9/03 seat folds.
 # The four aggregate issues (ops#157 CTO · #166 COO · #169 CMO · #170 CoS = 242 findings,
 # refreshed daily for 18-20 days) had no consumer because no seat answers to those names;
 # the Dispatcher's /yard reads the re-titled ones. Close the four old aggregates on merge.
@@ -25,8 +25,6 @@
 repos:
   - repo: "studio-b-ai/ops-pipeline"
     manager: "Mechanic"
-  - repo: "studio-b-ai/webhook-router"
-    manager: "Engineer"
   - repo: "studio-b-ai/client-asthetik"
     manager: "Mechanic"
     note: "Acumatica lane"

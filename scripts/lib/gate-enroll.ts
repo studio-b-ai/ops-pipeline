@@ -53,7 +53,7 @@ export function isDecisionLeg(leg: GateReceiptLeg): boolean {
 }
 
 const SHORT_REPO: Readonly<Record<string, string>> = {
-  "studio-b-ai/webhook-router": "wr",
+  "studio-b-ai/radio": "wr",
   "studio-b-ai/bolt-wms": "bolt",
   "studio-b-ai/client-asthetik": "ca",
   "studio-b-ai/ops-pipeline": "ops",

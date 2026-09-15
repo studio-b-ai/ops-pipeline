@@ -17,7 +17,7 @@ import {
   REPO_LANE_MANAGER,
 } from "../needs-human-router-lib.js";
 
-const ALLOWLIST = new Set(["studio-b-ai/bolt-wms", "studio-b-ai/studiob", "studio-b-ai/studiob-price-sync", "studio-b-ai/webhook-router", "studio-b-ai/asthetik-trade-theme"]);
+const ALLOWLIST = new Set(["studio-b-ai/bolt-wms", "studio-b-ai/studiob", "studio-b-ai/studiob-price-sync", "studio-b-ai/radio", "studio-b-ai/asthetik-trade-theme"]);
 
 const OWN_REPO = "studio-b-ai/ops-pipeline";
 
@@ -250,7 +250,7 @@ describe("summarizeDispositions (Rule #465 — always all six kinds, including z
 
 describe("laneLabelFor (2026-09-06 — every route carries the seat's lane label)", () => {
   it("known-GOOD: the five router-allowlisted repos all resolve to lane:engineer (the seat that reads those queues)", () => {
-    for (const r of ["bolt-wms", "studiob", "studiob-price-sync", "webhook-router", "asthetik-trade-theme"]) {
+    for (const r of ["bolt-wms", "studiob", "studiob-price-sync", "radio", "asthetik-trade-theme"]) {
       expect(laneLabelFor(`studio-b-ai/${r}`)).toBe("lane:engineer");
     }
     expect(laneLabelFor("studio-b-ai/ops-pipeline")).toBe("lane:mechanic");

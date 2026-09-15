@@ -103,7 +103,7 @@
     {"name":"tiered-close-out","archived":true,"visibility":"PUBLIC","pushedAtAtSeed":"2026-04-26T13:25:09Z"},
     {"name":"ui-test-suite","archived":false,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-17T06:56:53Z","class293":"Internal Tooling","verdict":"manual-tax","verdictAt":"2026-08-30T01:22:11Z","note":"live cron #357/#358"},
     {"name":"wasala","archived":false,"visibility":"PRIVATE","pushedAtAtSeed":"2026-05-27T11:32:59Z","class293":"Internal Tooling","verdict":"manual-tax","verdictAt":"2026-08-30T01:22:11Z","note":"deployed-dormant (wasala-platform); #74 rename pending"},
-    {"name":"webhook-router","archived":false,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-29T23:47:52Z","class293":"Internal Tooling","verdict":"mechanic-covered","verdictAt":"2026-08-30T01:22:11Z","note":"deployed (studiob-platform); full loop coverage"},
+    {"name":"radio","archived":false,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-29T23:47:52Z","class293":"Internal Tooling","verdict":"mechanic-covered","verdictAt":"2026-08-30T01:22:11Z","note":"deployed (studiob-platform); full loop coverage"},
     {"name":"window-detector","archived":true,"visibility":"PRIVATE","pushedAtAtSeed":"2026-03-21T03:30:40Z"},
     {"name":"zoom-mcp","archived":true,"visibility":"PRIVATE","pushedAtAtSeed":"2026-03-13T19:02:10Z"}
   ]

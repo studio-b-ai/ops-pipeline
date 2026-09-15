@@ -12,7 +12,7 @@ import {
 } from "../gate-enroll.js";
 
 const REFUSAL: GateRefusal = {
-  repo: "studio-b-ai/webhook-router",
+  repo: "studio-b-ai/radio",
   pr: 811,
   headSha: "fb604456955ff05fcd1bc5f1fe38b457e2bfa663",
   leg: "line-cap",
@@ -41,12 +41,12 @@ describe("isDecisionLeg — the ruling's list, both verdicts (#471)", () => {
 describe("buildEnrollment — the exact body the door receives", () => {
   it("pins key, group, member label, detail shape and originator", () => {
     expect(buildEnrollment(REFUSAL)).toEqual({
-      enrollment_key: "gate-refusal:studio-b-ai/webhook-router#811@fb604456955f",
+      enrollment_key: "gate-refusal:studio-b-ai/radio#811@fb604456955f",
       group_key: "merge-escalations",
       group_label: "merge escalations",
       member_label: "wr#811",
       detail:
-        "https://github.com/studio-b-ai/webhook-router/pull/811 · line-cap: code-fix: totalChangedLines 186 > 150 · +171/−15 · label `box` to merge; `hold` to park",
+        "https://github.com/studio-b-ai/radio/pull/811 · line-cap: code-fix: totalChangedLines 186 > 150 · +171/−15 · label `box` to merge; `hold` to park",
       originator: "pr-automerge-gate",
     });
   });
@@ -89,7 +89,7 @@ describe("enrollGateRefusal — the actual wire (#223) and every outcome", () =>
     const f = fetchSpy(200, { ok: true, created: true, enrollment_key: "k" });
     const lines: string[] = [];
     const out = await enrollGateRefusal(REFUSAL, { env: ENV, fetchImpl: f, log: (l) => lines.push(l) });
-    expect(out).toEqual({ outcome: "enrolled", created: true, key: "gate-refusal:studio-b-ai/webhook-router#811@fb604456955f" });
+    expect(out).toEqual({ outcome: "enrolled", created: true, key: "gate-refusal:studio-b-ai/radio#811@fb604456955f" });
     expect(f).toHaveBeenCalledTimes(1);
     const [url, init] = f.mock.calls[0] as [string, Init];
     expect(url).toBe("https://wr.example/internal/cos/decisions");
@@ -141,11 +141,11 @@ describe("enrollGateRefusal — the actual wire (#223) and every outcome", () =>
 describe("resolveGateRefusals — on merge, every head's line for the PR goes", () => {
   it("POSTs the PR's key prefix + resolution to /internal/cos/decisions/resolve", async () => {
     const f = fetchSpy(200, { ok: true, resolved: 2 });
-    const out = await resolveGateRefusals("studio-b-ai/webhook-router", 811, { env: ENV, fetchImpl: f, log: () => {} });
+    const out = await resolveGateRefusals("studio-b-ai/radio", 811, { env: ENV, fetchImpl: f, log: () => {} });
     expect(out).toEqual({ outcome: "resolved", count: 2 });
     const [url, init] = f.mock.calls[0] as [string, Init];
     expect(url).toBe("https://wr.example/internal/cos/decisions/resolve");
-    expect(JSON.parse(init.body)).toEqual({ key_prefix: "gate-refusal:studio-b-ai/webhook-router#811@", resolution: "merged" });
+    expect(JSON.parse(init.body)).toEqual({ key_prefix: "gate-refusal:studio-b-ai/radio#811@", resolution: "merged" });
     expect(init.headers.Authorization).toBe("Bearer tok-123");
   });
 

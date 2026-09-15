@@ -13,7 +13,7 @@
  */
 
 export interface TripwireArgs {
-  /** Target repo as owner/name (e.g. "studio-b-ai/webhook-router"). */
+  /** Target repo as owner/name (e.g. "studio-b-ai/radio"). */
   repo: string;
   /** Merged PR number in the target repo. */
   pr: number;
