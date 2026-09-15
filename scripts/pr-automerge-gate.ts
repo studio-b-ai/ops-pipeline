@@ -223,6 +223,20 @@ function commentOnPr(repo: string, pr: number, body: string): void {
   gh(["pr", "comment", String(pr), "--repo", repo, "--body", body]);
 }
 
+// crew-357: sensitive-path floor helper. Compiles regex patterns and returns the
+// paths that match any of them. A broken regex fails closed: ALL paths are returned
+// as sensitive (a broken guard must not wave through). Used by both the squasher
+// path's floor check and the train path's floor check.
+function sensitiveFilePaths(files: PrFile[], patterns: readonly string[]): string[] {
+  if (patterns.length === 0) return [];
+  try {
+    const regexes = patterns.map((src) => new RegExp(src));
+    return files.filter((f) => regexes.some((re) => re.test(f.path))).map((f) => f.path);
+  } catch {
+    return files.map((f) => f.path);
+  }
+}
+
 /** ops#190 B1: the gate's ONLY label writes — `automerge:code-fix` (standard repos,
  *  pre-merge, B2's trigger filter) and `candidate` (train-class repos, instead
  *  of a merge). Throws on failure; both callers treat that as fail-closed. */
@@ -507,6 +521,26 @@ async function evaluate(
     await resolveGateRefusals(repo, pr, { resolution: "held" });
     return;
   }
+
+  // ── Leg "sensitive-path" (crew-357): Kevin's key never lowers this floor.
+  // Runs BEFORE evaluateQueuedOverride so `queued` cannot bypass it — a `queued`
+  // PR touching a sensitive path is REFUSED with a card. Mirrors the same check
+  // inside classifyPrDiffClass but applies here on the floor where no override
+  // can reach past it. Previously asthetik-portal#80 merged over a `.github/**`
+  // denylist hit under a hand `queued` because this check only ran inside
+  // classifyPrDiffClass, which evaluateQueuedOverride bypasses entirely.
+  if (sensitivePathPatterns.length > 0) {
+    const matched = sensitiveFilePaths(prJson.files, sensitivePathPatterns);
+    if (matched.length > 0) {
+      const reasons = [`sensitive path(s) excluded by the floor: ${matched.join(", ")}`];
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: sensitive-path floor check refused — ${reasons.join("; ")}`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "class-match", reasons }));
+      await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "class-match", reasons, additions: prJson.additions, deletions: prJson.deletions });
+      postFlagCard(repo, pr, "class-match", prJson.headRefOid, reasons);
+      return;
+    }
+  }
+
   if (labels.includes(QUEUED_LABEL)) {
     const outcome = await evaluateQueuedOverride(repo, pr, prJson, labels);
     if (outcome !== "fall-through") return;
@@ -995,6 +1029,12 @@ export interface TrainReadyOptions {
    *  door (or omit it) directly, no env stubbing required. Omit/undefined ⇒
    *  treated the same as null (renders the honest "unknown" door). */
   door?: MergeDoor | null;
+  /** crew-357: regex source strings for paths this repo considers sensitive enough
+   *  to require a human regardless of label authority. Checked at the floor in
+   *  evaluateTrainReadyInner after merge-readiness and BEFORE the review leg —
+   *  a `queued` PR touching a sensitive path is refused even on the train path
+   *  (Kevin's key never lowers this floor). Omit/empty = no additional exclusion. */
+  sensitivePathPatterns?: readonly string[];
 }
 
 /**
@@ -1366,6 +1406,21 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     return { outcome: "refused", detail };
   }
 
+  // ── Sensitive-path floor (crew-357): Kevin's key never lowers this floor.
+  // Same check as the squasher path — runs BEFORE the review leg so a `queued`
+  // PR touching a sensitive path is refused on the train path too. The train
+  // path previously had no sensitive-path check at all; train entry
+  // sensitive_path_patterns in squasher-fleet-sweep.yml was always blank.
+  const spPatterns = opts.sensitivePathPatterns ?? [];
+  if (spPatterns.length > 0) {
+    const spMatched = sensitiveFilePaths(prJson.files, [...spPatterns]);
+    if (spMatched.length > 0) {
+      const detail = `sensitive-path floor check refused: ${spMatched.join(", ")}`;
+      logTrainGateLine(repo, pr, "refused", detail);
+      return { outcome: "refused", detail };
+    }
+  }
+
   // TODO(A2 or later rung): window law (doc §3.1 step 6) — restart-train repos
   // (repoClassFor(repo) === "train") merge only inside restart-train-lib.ts's window
   // rules (`windowState`, `orderQueue`). `windowState` needs `computeAnchor
@@ -1514,7 +1569,7 @@ async function main(): Promise<void> {
     // #412: the door fact is read ONCE here, at the call site, from the live
     // Actions environment — never inside evaluateTrainReady itself, which stays
     // pure/injectable for tests (see TrainReadyOptions.door).
-    await evaluateTrainReady(repo, pr, { door: mergeDoorFrom() });
+    await evaluateTrainReady(repo, pr, { door: mergeDoorFrom(), sensitivePathPatterns });
     return;
   }
   try {

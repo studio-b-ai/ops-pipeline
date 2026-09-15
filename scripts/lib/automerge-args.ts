@@ -102,9 +102,12 @@ export function parseArgs(argv: string[]): Args {
   // ignoring the other's flags. Presence is what matters, not validity: even
   // `--enabled-classes docs-comment` (the default value, explicitly passed)
   // combined with --train-ready signals a confused caller.
-  if (trainReady && (enabledClassesRaw !== undefined || sensitivePathFlagSeen || safePathGlobFlagSeen || requiredCheckFlagSeen)) {
+  // 2026-09-15 crew-357: --sensitive-path is now allowed with --train-ready — the
+  // sensitive-path floor check runs on BOTH the squasher and the train path (Kevin's
+  // key never lowers this floor). The other squasher-only flags stay mutually exclusive.
+  if (trainReady && (enabledClassesRaw !== undefined || safePathGlobFlagSeen || requiredCheckFlagSeen)) {
     throw new Error(
-      "--train-ready is mutually exclusive with --enabled-classes/--sensitive-path/--safe-path-glob/--required-check " +
+      "--train-ready is mutually exclusive with --enabled-classes/--safe-path-glob/--required-check " +
         "(A-side label-authority gate vs B-side squasher gate — one invocation evaluates exactly one)",
     );
   }

@@ -119,16 +119,18 @@ describe("parseArgs", () => {
     ).toThrow(/mutually exclusive/);
   });
 
-  it("throws when --train-ready is combined with --sensitive-path (mutual exclusion, fail-loud)", () => {
-    expect(() =>
-      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--sensitive-path", "\\.sql$", "--train-ready"]),
-    ).toThrow(/mutually exclusive/);
+  // crew-357: --sensitive-path is now allowed with --train-ready — the sensitive-path
+  // floor runs on BOTH the squasher and the train path (Kevin's key never lowers this floor).
+  it("allows --sensitive-path with --train-ready (crew-357: sensitive path is a floor check, not a squasher-only leg)", () => {
+    const args = parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--sensitive-path", "\\.sql$", "--train-ready"]);
+    expect(args.trainReady).toBe(true);
+    expect(args.sensitivePathPatterns).toEqual(["\\.sql$"]);
   });
 
-  it("throws even when the combined --sensitive-path value is whitespace-only (codex P2, A2 pass 1) — exclusion keys on flag PRESENCE, not on whether the value survived trimming", () => {
-    expect(() =>
-      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--sensitive-path", "   "]),
-    ).toThrow(/mutually exclusive/);
+  it("still drops a whitespace-only --sensitive-path value when combined with --train-ready (flag presence is not exclusion anymore; trimmmed-empty is still dropped)", () => {
+    const args = parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--sensitive-path", "   "]);
+    expect(args.trainReady).toBe(true);
+    expect(args.sensitivePathPatterns).toEqual([]);
   });
 
   it("still requires --repo/--pr in train mode (the mutual-exclusion check does not preempt required-arg validation)", () => {

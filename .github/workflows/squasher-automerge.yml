@@ -179,13 +179,20 @@ jobs:
           set -euo pipefail
           args=(--repo "$GATE_REPO" --pr "$GATE_PR_NUMBER")
           if [ "$GATE_TRAIN_READY" = "true" ]; then
-            # A-side label-authority mode (ops#190 A2): the squasher-only flags are
-            # deliberately NOT forwarded — parseArgs treats --train-ready combined
-            # with --enabled-classes/--sensitive-path as a caller misconfiguration
-            # and throws (mutual exclusion, fail-loud), and enabled_classes has a
-            # non-empty DEFAULT, so forwarding it unconditionally would break every
-            # train_ready invocation.
+            # A-side label-authority mode (ops#190 A2). --train-ready is accepted
+            # with --sensitive-path (crew-357: the sensitive-path floor runs on both
+            # paths — Kevin's key never lowers it). The other squasher-only flags
+            # (--enabled-classes/--safe-path-glob/--required-check) stay excluded —
+            # parseArgs treats those combined with --train-ready as a caller
+            # misconfiguration and throws (mutual exclusion, fail-loud).
             args+=(--train-ready)
+            if [ -n "$GATE_SENSITIVE_PATH_PATTERNS" ]; then
+              IFS=',' read -ra s_patterns <<< "$GATE_SENSITIVE_PATH_PATTERNS"
+              for p in "${s_patterns[@]}"; do
+                strimmed="$(echo -n "$p" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                [ -n "$strimmed" ] && args+=(--sensitive-path "$strimmed")
+              done
+            fi
           else
             if [ -n "$GATE_ENABLED_CLASSES" ]; then
               args+=(--enabled-classes "$GATE_ENABLED_CLASSES")
