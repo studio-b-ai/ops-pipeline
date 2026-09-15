@@ -84,6 +84,30 @@ jobs:
       - name: Tests
         run: npm test
 
+      # studio-b#112 leg 1 — the RELEASE-door ↔ backlog-watch invariant, enforced on the
+      # PR that would break it rather than reported up to a week later by a scheduled
+      # worker (Rule #29: automate deterministic-pass gates). Unlike every OTHER detector
+      # in this repo, this one needs no token and probes no live GitHub state: both of its
+      # inputs — scripts/squasher-fleet.json (the door registry) and
+      # scripts/backlog-managers.yaml (the watch registry) — are committed files right
+      # here in the checkout, so the drift is fully decidable from the diff and there is
+      # no permission to degrade.
+      #
+      # Deliberately a STEP in this already-required job, not a new workflow: this job is
+      # already a required status check on main with enforce_admins:true (see this file's
+      # header), so the step inherits both with zero branch-protection edits. A new
+      # workflow would need a new required context registered, and a required context
+      # that has never reported blocks every PR in the repo forever (Rules #198/#280).
+      #
+      # Exit codes (all three planted and observed before shipping, Rules #322/#471):
+      # 0 = coherent (current fixed state, population 11 doors vs 17 watch rows);
+      # 1 = drift (replayed the real pre-fix origin/main watch registry → named all four
+      # of claude-config-plane, lightsout, radio, toto with remediation text);
+      # 2 = could not run (malformed registry, and a non-boolean `train:"true"` that a
+      # naive truthy check would have swallowed) — fails CLOSED, never a silent pass.
+      - name: "Door/watch coherence — no merge door without a backlog watch"
+        run: npm run check:door-watch-coherence
+
   cfo_brief_regression:
     name: "CFO brief — July classification regression"
     runs-on: ubuntu-latest

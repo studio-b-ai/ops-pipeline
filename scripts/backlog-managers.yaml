@@ -57,6 +57,32 @@ repos:
     manager: "Engineer"
   - repo: "studio-b-ai/asthetik-marketing"
     manager: "Publicity"
+  # 2026-09-13 (Mechanic crew, studio-b#112 leg 1) — the RELEASE-door↔backlog-watch
+  # coherence fix. ops-pipeline#405 (merged 00:49:46Z) + #411 flipped `train: true` in
+  # squasher-fleet.json for cp · brain · radio · lightsout · client-asthetik · toto,
+  # opening an autonomous merge door on each. brain and client-asthetik were already
+  # watched above; these four were NOT, so the daily 12:00Z staleness leg structurally
+  # could not see them ("an unmapped repo simply isn't scanned", this file's header) —
+  # measured at the time: cp 17 open issues / 9 open PRs (1 DIRTY), radio 30 / 8 (3
+  # BLOCKED, 1 DIRTY, 2 UNSTABLE), lightsout 6 / 1, toto 0 / 1. A repo with a merge door
+  # and no backlog watch rots unobserved. `manager:` per kits/studio-b.yaml's
+  # `radio: {technical: mechanic}` — all six studio-b repos route their technical lane to
+  # the Mechanic seat (NOT invented; Rule #294). The invariant is now guarded in code, not
+  # just documented here: scripts/lib/door-watch-coherence.ts fails when the two
+  # registries drift again (Rule #159), and ships in the same PR as these rows so the
+  # already-drifted population is reconciled rather than grandfathered (Rule #381).
+  - repo: "studio-b-ai/claude-config-plane"
+    manager: "Mechanic"
+    note: "the runner/config plane — RELEASE leg on via ops#405"
+  - repo: "studio-b-ai/radio"
+    manager: "Mechanic"
+    note: "the radio line — RELEASE leg on via ops#405"
+  - repo: "studio-b-ai/lightsout"
+    manager: "Mechanic"
+    note: "the runner's own checkout — RELEASE leg on via ops#405"
+  - repo: "studio-b-ai/toto"
+    manager: "Mechanic"
+    note: "the cockpit glass — RELEASE leg on via ops#411; nothing live yet (#97 applies the moment it renders)"
 
 thresholds:
   p0p1_days: 2
