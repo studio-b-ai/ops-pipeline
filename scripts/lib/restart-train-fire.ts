@@ -55,11 +55,12 @@ import { pathMatchesAny } from "./timetable-gate.js";
 
 // ───────────────────────────── constants ─────────────────────────────
 
-// Kevin's ruled rename (2026-09-02, ONE operator vocabulary — see label-authority.ts):
-// train:ready → queued · train:hold → hold · train:in-flight → underway · train:candidate →
-// candidate. Constant names unchanged; values moved. Must equal label-authority.ts's
-// TRAIN_READY_LABEL / TRAIN_HOLD_LABEL (asserted in the tests).
-export const TRAIN_READY_LABEL = "queued";
+// Kevin's ruled rename (2026-09-15, "Box is the one key" — ONE human key; supersedes the
+// 2026-09-02 `queued` vocabulary, which reads as a transition-week alias in
+// label-authority.ts): train:ready → box · train:hold → hold · train:in-flight → underway ·
+// train:candidate → candidate. Constant names unchanged; values moved. Must equal
+// label-authority.ts's TRAIN_READY_LABEL / TRAIN_HOLD_LABEL (asserted in the tests).
+export const TRAIN_READY_LABEL = "box";
 export const TRAIN_HOLD_LABEL = "hold";
 export const TRAIN_IN_FLIGHT_LABEL = "underway";
 // NO train:failed label — Kevin's 2026-08-29 label consolidation ("if my only label is

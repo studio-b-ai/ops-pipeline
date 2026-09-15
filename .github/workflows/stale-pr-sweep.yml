@@ -10,7 +10,8 @@ name: Stale PR Sweep
 # (brain library/product/2026-09-12-merge-train-defect-org-sweep.md §"Also found") located
 # 7 CONFLICTING PRs and several 65-139h-stale PRs across the fleet -- by MANUAL probe only.
 # Nothing in the fleet watched for that class. The release door (squasher-fleet-sweep.yml)
-# only ever looks at PRs carrying `queued`; a PR nobody labels and nobody rebases is
+# only ever looks at PRs carrying the ready label (`box` since the 2026-09-15 one-key
+# rename, `queued` before it); a PR nobody labels and nobody rebases is
 # invisible to it forever. This is the watcher for exactly that blind spot.
 #
 # Fleet App token required for the SAME reason as backlog-staleness.yml and repo-hygiene.yml:

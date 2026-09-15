@@ -123,6 +123,7 @@ import {
   QUEUED_LABEL,
   HOLD_LABEL,
   QUEUED_LABEL_PAIR,
+  TRAIN_READY_ALIASES,
   type AuthorityTimelineItem,
   type AuthoritySnapshot,
   type StaleLabelAuthorityVerdict,
@@ -349,12 +350,17 @@ export async function independentReviewVote(diff: string, systemPrompt: string):
  * 2026-09-06 (Kevin, "that works" on the Engineer's door read): the HUMAN review
  * receipt. A `reviewed` label whose most recent LabeledEvent was applied by a
  * merge-authorized human (MERGE_AUTHORITY_LOGINS) AFTER the head commit satisfies
- * the independent-review leg in place of the model. Exactly the `queued` predicate
+ * the independent-review leg in place of the model. Exactly the `box` predicate
  * with the `reviewed`/`hold` pair: `hold` wins first; a bot's label never counts (the
- * fleet-bot exception is `queued`-only, and `reviewed` is not on its required list);
- * a commit or force-push after the label makes it stale; a truncated timeline refuses.
- * Returns the receipt text on success, null otherwise. Never throws: a timeline fetch
- * failure means "no receipt" — the model review runs as before.
+ * fleet-bot exception follows the train pair only, and `reviewed` is not on its
+ * required list); a commit or force-push after the label makes it stale; a truncated
+ * timeline refuses. Returns the receipt text on success, null otherwise. Never throws:
+ * a timeline fetch failure means "no receipt" — the model review runs as before.
+ *
+ * 2026-09-15 (RULED "Box is the one key", law 2): `reviewed` is RETIRED as a key —
+ * it stays honored as the review-leg RECEIPT for the transition week (then this pair
+ * leaves the vocabulary ~2026-09-22). The one human key is `box`: it opens this leg
+ * too, via `evaluateQueuedOverride` (law 1), which runs BEFORE the class legs below.
  */
 const REVIEWED_LABEL = "reviewed";
 function humanReviewReceipt(repo: string, pr: number, currentLabels: string[]): string | null {
@@ -494,12 +500,13 @@ async function evaluate(
   // The machinery legs above (OPEN, not draft, mergeStateStatus CLEAN, CI rollup clean,
   // complete file list) are the floor his word never lowers. Below them, `hold` parks
   // the PR — nothing else runs, and its open decision line(s) resolve as held so the
-  // block stops asking. `queued`, when it is HIS sha-pinned, GraphQL-attributed label
+  // block stops asking. `box`, when it is HIS sha-pinned, GraphQL-attributed label
   // (the same predicate the restart train uses: roster human, not a bot, no commit
   // after the label), overrides the DECISION-class legs (class-match / line-cap /
-  // named-checks / review) and merges sha-pinned. A stale `queued` (a push after his
+  // named-checks / review) and merges sha-pinned. A stale `box` (a push after his
   // word) is stripped with a receipt and the PR falls through to the normal legs,
-  // which re-refuse and re-ask on the NEW head.
+  // which re-refuse and re-ask on the NEW head. (2026-09-15 rename: the `queued`
+  // spelling reads as an alias for the transition week — TRAIN_READY_ALIASES.)
   if (labels.includes(HOLD_LABEL)) {
     const detail = `${HOLD_LABEL} is present — parked by Kevin's word; nothing merges while it stays`;
     console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}.`);
@@ -507,10 +514,10 @@ async function evaluate(
     await resolveGateRefusals(repo, pr, { resolution: "held" });
     return;
   }
-  if (labels.includes(QUEUED_LABEL)) {
+  if ([QUEUED_LABEL, ...TRAIN_READY_ALIASES].some((l) => labels.includes(l))) {
     const outcome = await evaluateQueuedOverride(repo, pr, prJson, labels);
     if (outcome !== "fall-through") return;
-    // fall-through: `queued` was present but not authorizing — the normal legs decide.
+    // fall-through: the ready label was present but not authorizing — the normal legs decide.
   }
 
   // ── Diff fetch + per-file classification (unchanged mechanics) — BEFORE any API spend ──
@@ -933,7 +940,7 @@ async function evaluate(
 
 const TRAIN_READY_REVIEW_SYSTEM = [
   "You are the FINAL automated review gate for a pull request a human maintainer has",
-  "already reviewed and explicitly labeled ready-to-merge (`queued`). You do not",
+  "already reviewed and explicitly labeled ready-to-merge (`box`). You do not",
   "merge anything yourself, and you do not re-litigate the human's judgment on ordinary",
   "code quality, style, or design choices — that decision has already been made by a",
   "human with merge authority. Your ONLY job is a narrow safety-net check for the",
@@ -1035,17 +1042,22 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
         // timeline — see evaluateTrainReadyInner for why that order).
         const recheckPr = fetchPr(repo, pr);
         const recheckTimeline = fetchAuthorityTimeline(repo, pr);
+        const recheckLabels = recheckPr.labels.map((l) => l.name);
         const recheck = evaluateLabelAuthority({
-          currentLabels: recheckPr.labels.map((l) => l.name),
+          currentLabels: recheckLabels,
           timeline: recheckTimeline.timeline,
           authorityLogins,
           truncated: recheckTimeline.truncated,
           labels: QUEUED_LABEL_PAIR,
         });
         if (!recheck.authorized && recheck.reason === "stale-label") {
-          removeStaleReadyLabel(repo, pr, QUEUED_LABEL);
-          postAuthorityReceipt(repo, pr, formatStaleLabelRemovalReceipt(recheck as StaleLabelAuthorityVerdict, prJson.headRefOid, QUEUED_LABEL));
-          console.log(`[queued] pr-automerge-gate ${repo}#${pr}: stale ${QUEUED_LABEL} removed — ${recheck.detail}`);
+          // Remove EVERY present ready-spelling (2026-09-15 rename): a stale `queued`
+          // alias is as removed as a stale `box` — removing only the new spelling
+          // would leave the old one stale-locked forever (fail-closed, but never healing).
+          const presentReady = [QUEUED_LABEL, ...TRAIN_READY_ALIASES].filter((l) => recheckLabels.includes(l));
+          for (const l of presentReady) removeStaleReadyLabel(repo, pr, l);
+          postAuthorityReceipt(repo, pr, formatStaleLabelRemovalReceipt(recheck as StaleLabelAuthorityVerdict, prJson.headRefOid, QUEUED_LABEL, presentReady.join("`, `")));
+          console.log(`[queued] pr-automerge-gate ${repo}#${pr}: stale ${presentReady.join("+")} removed — ${recheck.detail}`);
         } else {
           console.log(`[queued] pr-automerge-gate ${repo}#${pr}: stale on first read but not on the fresh re-check (${recheck.authorized ? "now authorized" : recheck.reason}) — nothing removed this cycle`);
         }
@@ -1120,16 +1132,17 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
     }
 
     const actor = revalidateVerdict.authorizingEvent.actorLogin;
+    const keySpelling = revalidateVerdict.authorizingEvent.label ?? QUEUED_LABEL;
     commentOnPr(
       repo,
       pr,
       [
-        "**`queued` — MERGED on Kevin's word** (ops-pipeline#260 leg 4)",
+        "**`box` — MERGED on Kevin's word** (ops-pipeline#260 leg 4; 2026-09-15 rename — one key)",
         "",
         "| Leg | Result |",
         "|---|---|",
         "| machinery: OPEN, not draft, mergeStateStatus CLEAN, CI rollup clean, complete file list | ✅ |",
-        `| authority (\`queued\` by \`${actor}\`, timeline position ${revalidateVerdict.authorizingEvent.position}, no commit after it) | ✅ |`,
+        `| authority (\`${keySpelling}\` by \`${actor}\`, timeline position ${revalidateVerdict.authorizingEvent.position}, no commit after it) | ✅ |`,
         "| decision legs (class-match / line-cap / named-checks / review) | ⏭ overridden by the label — the decision line carried the refusal reason |",
         "| revalidate: PR snapshot + authority timeline | ✅ no drift |",
         "",
@@ -1329,8 +1342,13 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
       // immediately above (`authorized` false via the first, `reason` matched via the
       // second); this cast is post-verified, not blind.
       const staleVerdict = recheckVerdict as StaleLabelAuthorityVerdict;
-      removeStaleReadyLabel(repo, pr);
-      postAuthorityReceipt(repo, pr, formatStaleLabelRemovalReceipt(staleVerdict, prJson.headRefOid));
+      // Remove EVERY present ready-spelling (2026-09-15 rename): a stale `queued`
+      // alias is as removed as a stale `box` — removing only the new spelling would
+      // leave the old one stale-locked forever (fail-closed, but never healing).
+      const recheckLabelNames = recheckPr.labels.map((l) => l.name);
+      const presentReady = [QUEUED_LABEL, ...TRAIN_READY_ALIASES].filter((l) => recheckLabelNames.includes(l));
+      for (const l of presentReady) removeStaleReadyLabel(repo, pr, l);
+      postAuthorityReceipt(repo, pr, formatStaleLabelRemovalReceipt(staleVerdict, prJson.headRefOid, QUEUED_LABEL, presentReady.join("`, `")));
       logTrainGateLine(repo, pr, "stale-label-removed", recheckVerdict.detail);
       return { outcome: "stale-label-removed", detail: recheckVerdict.detail };
     }

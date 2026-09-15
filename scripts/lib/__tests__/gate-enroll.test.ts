@@ -46,7 +46,7 @@ describe("buildEnrollment — the exact body the door receives", () => {
       group_label: "merge escalations",
       member_label: "wr#811",
       detail:
-        "https://github.com/studio-b-ai/webhook-router/pull/811 · line-cap: code-fix: totalChangedLines 186 > 150 · +171/−15 · label `queued` to merge; `hold` to park",
+        "https://github.com/studio-b-ai/webhook-router/pull/811 · line-cap: code-fix: totalChangedLines 186 > 150 · +171/−15 · label `box` to merge; `hold` to park",
       originator: "pr-automerge-gate",
     });
   });

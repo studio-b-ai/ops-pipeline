@@ -78,6 +78,7 @@
 
 import { gh, ensureLabel, listIssuesByLabel, openIssue, closeIssue } from "./lib/github-issues.js";
 import { TRAIN_READY_LABEL } from "./lib/restart-train-fire.js";
+import { TRAIN_READY_ALIASES } from "./lib/label-authority.js";
 import {
   evaluateTrainLiveness,
   formatLivenessIssueTitle,
@@ -153,23 +154,32 @@ interface GhPrNumberRow {
   number: number;
 }
 
-/** Open `train:ready` PRs across every ticket repo the train reads from. */
+/** Open ready-labeled PRs across every ticket repo the train reads from. One list per
+ *  ready spelling (2026-09-15 rename: canonical `box` + the transition-week `queued`
+ *  alias), merged unique by PR number — gh --label ANDs, so the OR needs two reads. */
 function fetchQueuedTickets(): LivenessQueuedTicket[] {
   const out: LivenessQueuedTicket[] = [];
   for (const repo of TICKET_REPOS) {
-    const raw = gh([
-      "pr", "list",
-      "--repo", repo,
-      "--label", TRAIN_READY_LABEL,
-      "--state", "open",
-      "--limit", String(QUEUE_LIST_LIMIT),
-      "--json", "number",
-    ]);
-    const rows = JSON.parse(raw) as GhPrNumberRow[];
-    if (rows.length === QUEUE_LIST_LIMIT) {
-      console.warn(`[train-liveness] WARN queue read hit the ${QUEUE_LIST_LIMIT} cap for ${repo} — count may be low`);
+    const seen = new Set<number>();
+    for (const spelling of [TRAIN_READY_LABEL, ...TRAIN_READY_ALIASES]) {
+      const raw = gh([
+        "pr", "list",
+        "--repo", repo,
+        "--label", spelling,
+        "--state", "open",
+        "--limit", String(QUEUE_LIST_LIMIT),
+        "--json", "number",
+      ]);
+      const rows = JSON.parse(raw) as GhPrNumberRow[];
+      if (rows.length === QUEUE_LIST_LIMIT) {
+        console.warn(`[train-liveness] WARN queue read hit the ${QUEUE_LIST_LIMIT} cap for ${repo} (${spelling}) — count may be low`);
+      }
+      for (const r of rows) {
+        if (seen.has(r.number)) continue;
+        seen.add(r.number);
+        out.push({ repo, number: r.number });
+      }
     }
-    for (const r of rows) out.push({ repo, number: r.number });
   }
   return out;
 }

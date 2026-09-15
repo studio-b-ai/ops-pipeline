@@ -29,12 +29,15 @@
  * Rule #412: an alert's prose is a write-time claim about scope — it drifts from its
  * signal, and here the signal was one leg while the prose spoke for all of them.
  *
- * THE CONTRACT. `reviewed` substitutes for the MODEL's vote; it is not a class override.
- * The only label that overrides a DECISION leg (class-match / line-cap / named-checks /
- * review) is `queued`, via `evaluateQueuedOverride` — sha-pinned, roster-attributed,
- * `hold` winning first. So the card names the door that actually opens THAT leg:
- *   - review      → `reviewed` (the human receipt stands in for the model) or `queued`
- *   - class-match / line-cap / named-checks → `queued` ONLY (`reviewed` cannot reach them)
+ * THE CONTRACT (2026-09-15, RULED "Box is the one key" — supersedes the two-word door
+ * this file was born to explain). ONE human key opens every DECISION leg (class-match /
+ * line-cap / named-checks / review): `box`, via `evaluateQueuedOverride` — sha-pinned,
+ * roster-attributed, `hold` winning first. `box` is `queued` renamed (the old spelling
+ * reads as an alias for the transition week); `reviewed` is RETIRED as a key — it stays
+ * honored as the review-leg RECEIPT for the same week (pr-automerge-gate.ts
+ * `humanReviewReceipt`), but no card ever says "Accept = reviewed" again (law 2). So the
+ * card names the leg from the door's own receipt and the one key that opens it:
+ *   - review / class-match / line-cap / named-checks → `box` (Accept = box)
  * Every card still names `hold` as the park, and stays idempotent per head sha.
  *
  * Pure — no gh, no network, no clock. The gate owns the I/O; this owns the words.
@@ -52,14 +55,15 @@ export function isCardLeg(leg: string): leg is CardLeg {
 }
 
 /**
- * The per-leg door sentence. `reviewed` appears ONLY for the review leg, because that is
- * the only leg whose predicate reads it (pr-automerge-gate.ts `humanReviewReceipt`).
+ * The per-leg door sentence (2026-09-15, "Box is the one key" law 5): every card names
+ * the leg that refused and reads "Accept = box" — the ONE key opens every decision leg,
+ * so no leg ever names a different word again. `reviewed` is never offered (law 2).
  */
 export function doorSentenceFor(leg: CardLeg): string {
   if (leg === "review") {
     return (
-      "_A human `reviewed` label on this head lets the next sweep merge " +
-      "(it stands in for the model's vote); `queued` also merges it; `hold` parks it. " +
+      "_**Accept = box.** A human `box` label on this head lets the next sweep merge " +
+      "(sha-pinned, it overrides every decision leg, this one included); `hold` parks it. " +
       "This is a blue card on the glass._"
     );
   }
@@ -70,9 +74,8 @@ export function doorSentenceFor(leg: CardLeg): string {
         ? "the diff is over this class's line cap"
         : "a named required check is not satisfied";
   return (
-    `_This refusal is a **${leg}** leg — ${what}, so \`reviewed\` does NOT clear it ` +
-    "(`reviewed` substitutes for the model's vote, which this PR never reached). " +
-    "Only a `queued` label from a merge-authorized human overrides a decision leg; `hold` parks it. " +
+    `_This refusal is a **${leg}** leg — ${what}. **Accept = box.** ` +
+    "A `box` label from a merge-authorized human on this head overrides a decision leg and lets the next sweep merge; `hold` parks it. " +
     "This is a blue card on the glass._"
   );
 }

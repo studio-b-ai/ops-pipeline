@@ -103,13 +103,15 @@ export function buildEnrollment(r: GateRefusal): EnrollmentBody {
     group_key: MERGE_ESCALATIONS_GROUP_KEY,
     group_label: MERGE_ESCALATIONS_GROUP_LABEL,
     member_label: `${shortRepo(r.repo)}#${r.pr}`,
-    // The verb names what WORKS today: the `queued` / `hold` LABEL on the PR is the
-    // authority the gate reads (leg 4). "reply `queued`" arrives when the envelope's
+    // The verb names what WORKS today: the `box` / `hold` LABEL on the PR is the
+    // authority the gate reads (leg 4; 2026-09-15 "Box is the one key" — `queued`
+    // reads as an alias for the transition week, `reviewed` is retired as a key).
+    // "reply `box`" arrives when the envelope's
     // reply→label path lands (Dispatcher seat) — until then that wording would be
     // prose broader than its signal (#412).
     detail:
       `https://github.com/${r.repo}/pull/${r.pr} · ${r.leg}: ${reason} · +${r.additions}/−${r.deletions}` +
-      " · label `queued` to merge; `hold` to park",
+      " · label `box` to merge; `hold` to park",
     originator: GATE_ORIGINATOR,
   };
 }

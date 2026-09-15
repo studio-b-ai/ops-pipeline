@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { formatMergeDoorLine, formatTrainMergeReceipt, mergeDoorFrom, type MergeDoor } from "../merge-door.js";
 
-// Rule #412: the `queued` — MERGED receipt used to hardcode "MERGED by the
+// Rule #412: the ready-label — MERGED receipt used to hardcode "MERGED by the
 // restart train" regardless of which workflow actually executed the merge —
 // the RUNG (who's authorized) and the DOOR (which run did it) are different
 // facts, and only the rung was ever named. Three seats inferred the door from
@@ -70,7 +70,7 @@ describe("formatMergeDoorLine", () => {
     expect(line).toContain("`squasher-automerge.yml`");
     expect(line).toContain("33909123456");
     expect(line).toContain("https://github.com/studio-b-ai/ops-pipeline/actions/runs/33909123456");
-    expect(line).toContain("rung: label-authority v2, ops#190 rung A1; one vocabulary 9/02");
+    expect(line).toContain("rung: label-authority v2, ops#190 rung A1; one key 2026-09-15 (`box`, `queued` was the 9/02 spelling)");
     expect(line).not.toContain("MERGED by the restart train");
   });
 
@@ -84,13 +84,13 @@ describe("formatMergeDoorLine", () => {
     expect(line).toContain("MERGED by the restart train");
     expect(line).toContain("`heritage-restart-train.yml`");
     expect(line).toContain("33910000001");
-    expect(line).toContain("rung: label-authority v2, ops#190 rung A1; one vocabulary 9/02");
+    expect(line).toContain("rung: label-authority v2, ops#190 rung A1; one key 2026-09-15 (`box`, `queued` was the 9/02 spelling)");
   });
 
   it("control: a null door (env absent) renders honestly as unknown, and still names the rung", () => {
     const line = formatMergeDoorLine(null);
     expect(line).toContain("(unknown — not run under Actions)");
-    expect(line).toContain("rung: label-authority v2, ops#190 rung A1; one vocabulary 9/02");
+    expect(line).toContain("rung: label-authority v2, ops#190 rung A1; one key 2026-09-15 (`box`, `queued` was the 9/02 spelling)");
     expect(line).not.toContain("MERGED by the restart train");
   });
 });

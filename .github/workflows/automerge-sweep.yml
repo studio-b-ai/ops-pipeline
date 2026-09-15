@@ -1,9 +1,11 @@
-name: Queued (train) auto-merge sweep
+name: Box (train) auto-merge sweep
 
-# ops#190 rung A2 — the FIRST caller of the A-side `queued` label-authority
+# ops#190 rung A2 — the FIRST caller of the A-side ready-label label-authority
 # gate (docs/plans/2026-08-28-automerge-b-plus-a-v2.md §3, rollout §6: "ops-pipeline
 # self-caller first"). A human with merge authority (MERGE_AUTHORITY_LOGINS,
-# initially kbibelhausen) applies `queued` to a PR; this sweep evaluates it
+# initially kbibelhausen) applies `box` to a PR (2026-09-15 "Box is the one key" —
+# the `queued` spelling reads as an alias for the transition week); this sweep
+# evaluates it
 # through evaluateTrainReady (scripts/pr-automerge-gate.ts): GraphQL-attributed
 # LabeledEvent authority (never comment text, never timestamps) → merge-readiness +
 # CI rollup → independent Claude Sonnet 5 review (exactly CLEAN) → snapshot +
@@ -43,7 +45,7 @@ on:
   workflow_dispatch:
     inputs:
       pr_number:
-        description: "Optional: evaluate ONLY this PR number instead of sweeping every open `queued` PR (the train label — one vocabulary, 9/02)."
+        description: "Optional: evaluate ONLY this PR number instead of sweeping every open `box` PR (the train label — one key, 2026-09-15; `queued` reads as an alias for the transition week)."
         required: false
         type: string
 
@@ -92,18 +94,22 @@ jobs:
           # them here would just hide refusal receipts). Re-list at evaluation time
           # (Rule #182); --limit 100 because gh pr list defaults to 30 and
           # truncates silently (Rule #331).
-          # Label = `queued` (Kevin's 2026-09-02 one-vocabulary rename of train:ready; scripts/lib/label-authority.ts).
-          ALL=$(gh pr list --repo "$REPO" --state open --label "queued" --limit 100 --json number --jq '[.[].number]')
+          # Label = `box` (Kevin's 2026-09-15 one-key rename of `queued`; scripts/lib/label-authority.ts).
+          # The `queued` spelling reads as an ALIAS for the transition week — one list
+          # per spelling, merged unique (gh --label ANDs, so the OR needs two reads).
+          BOXL=$(gh pr list --repo "$REPO" --state open --label "box" --limit 100 --json number --jq '[.[].number]')
+          ALIASL=$(gh pr list --repo "$REPO" --state open --label "queued" --limit 100 --json number --jq '[.[].number]')
+          ALL=$(jq -c -n --argjson a "$BOXL" --argjson b "$ALIASL" '$a + $b | unique')
           N=$(printf '%s' "$ALL" | jq 'length')
-          echo "Sweep found ${N} open queued PR(s)."
+          echo "Sweep found ${N} open box PR(s) (box=$(printf '%s' "$BOXL" | jq 'length') queued-alias=$(printf '%s' "$ALIASL" | jq 'length'))."
           if [ "$N" -gt "$MAX_FANOUT" ]; then
-            echo "::warning::queued sweep capped at ${MAX_FANOUT} of ${N} open labeled PRs; $((N - MAX_FANOUT)) NOT evaluated this cycle (re-listed next sweep)."
+            echo "::warning::box sweep capped at ${MAX_FANOUT} of ${N} open labeled PRs; $((N - MAX_FANOUT)) NOT evaluated this cycle (re-listed next sweep)."
             ALL=$(printf '%s' "$ALL" | jq -c ".[:${MAX_FANOUT}]")
           fi
           echo "prs=$(printf '%s' "$ALL" | jq -c .)" >> "$GITHUB_OUTPUT"
 
   evaluate:
-    name: "Evaluate queued (train) gate"
+    name: "Evaluate box (train) gate"
     needs: determine-prs
     # Implicit success() is the wanted semantic (#320 considered): a failed
     # listing must not fall through into evaluation.

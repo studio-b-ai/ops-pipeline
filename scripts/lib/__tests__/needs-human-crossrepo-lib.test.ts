@@ -316,7 +316,7 @@ describe("twinLabelsFrom (2026-09-06 — twins inherit the origin's routing labe
   });
 
   it("known-BAD: routing-STATE labels never travel (needs-human, lane:*, train state, decisions)", () => {
-    expect(twinLabelsFrom([{ name: "needs-human" }, { name: "lane:engineer" }, { name: "queued" }, { name: "reviewed" }, { name: "underway" }, { name: "candidate" }, { name: "hold" }, { name: "veto" }, { name: "wontfix" }])).toEqual([]);
+    expect(twinLabelsFrom([{ name: "needs-human" }, { name: "lane:engineer" }, { name: "box" }, { name: "queued" }, { name: "reviewed" }, { name: "underway" }, { name: "candidate" }, { name: "hold" }, { name: "veto" }, { name: "wontfix" }])).toEqual([]);
   });
 
   it("control: no labels / undefined / empty names → [] (an unlabeled origin files an unlabeled twin, as before)", () => {

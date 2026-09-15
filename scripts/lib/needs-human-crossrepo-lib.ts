@@ -293,8 +293,9 @@ export function crossRepoRecallDisposition(input: CrossRepoRecallDecisionInput):
  *  nothing, so a real bug became an unlabeled default-pool issue and vanished from the
  *  `bug` count). Routing-relevant labels travel; routing-STATE labels do not:
  *  `needs-human` (the twin is the human path's OUTPUT, not another input), `lane:*`
- *  (the target repo's own lane manager routes it), `underway`/`candidate`/`queued`/
- *  `reviewed`/`hold` (train state), `veto`/`wontfix` (a decision on the origin). */
+ *  (the target repo's own lane manager routes it), `underway`/`candidate`/`box`/`queued`/
+ *  `reviewed`/`hold` (train state — `box` is the one key since 2026-09-15; `queued` is
+ *  its transition-week alias, `reviewed` its retired receipt), `veto`/`wontfix` (a decision on the origin). */
 const TWIN_LABEL_ALLOW = new Set(["bug", "enhancement", "zoom-intake", "P0", "P1", "P2", "P3"]);
 
 export function twinLabelsFrom(originLabels: ReadonlyArray<{ name?: string | null } | string> | null | undefined): string[] {
