@@ -75,6 +75,11 @@ export type GateReceiptLeg =
   // whose non-terminal state then deltas the gate's own revalidate. A decision leg,
   // not a wait: the loop cannot clear itself, so a human owns the outcome.
   | "flap-guard"
+  /** 2026-09-15 NEW-1: the floor Kevin's key never lowers — a queued/box PR
+   *  touching a sensitive path is refused with a card. This leg runs BEFORE
+   *  evaluateQueuedOverride and on the train path, so the sensitive-path check
+   *  is never overrideable by a label. */
+  | "sensitive-path"
   | "other";
 
 export interface GateReceiptInput {
