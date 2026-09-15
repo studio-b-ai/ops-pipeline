@@ -93,12 +93,15 @@ import {
   classifyPrDiffClass,
   codeFixRevalidateDeltas,
   evaluateMergeReadiness,
+  findActionRequiredChecks,
+  actionRequiredRuns,
   gateDecisionForClass,
   isRollupClean,
   parseUnifiedDiff,
   reconcileFileClasses,
   repoClassFor,
   requiredChecksSatisfied,
+  type ActionRunItem,
   type GateFile,
   type PrDiffClass,
   type RollupItem,
@@ -217,6 +220,48 @@ function fetchDiffBySha(repo: string, baseRefName: string, headRefOid: string): 
 
 function mergePr(repo: string, pr: number, headRefOid: string): void {
   gh(["pr", "merge", String(pr), "--repo", repo, "--squash", "--match-head-commit", headRefOid]);
+}
+
+/**
+ * stint #361: query the Actions runs API for the PR's head commit, filtering to the
+ * runs parked at `conclusion === "action_required"` (workflow approval pending).
+ * These cause `mergeStateStatus === "UNSTABLE"` while the check-runs rollup reads
+ * clean — the rollup cannot see them (client-asthetik#372: gitleaks, Require review
+ * label action_required 45h with SUCCESS/SKIPPED in the rollup).
+ *
+ * Returns an empty array on any error — a card-miss on a transient API hiccup is the
+ * acceptable risk; the next sweep retries. Dedupes by (id, name).
+ */
+function fetchActionRequiredRuns(repo: string, headSha: string): { name: string; url: string }[] {
+  try {
+    const raw = gh(["api", `repos/${repo}/actions/runs?head_sha=${headSha}&per_page=100`]);
+    const parsed = JSON.parse(raw) as { workflow_runs?: ActionRunItem[] };
+    const runs = parsed.workflow_runs ?? [];
+    return actionRequiredRuns(runs).map((r) => ({ name: r.name, url: r.url }));
+  } catch (e) {
+    console.log(`[info] pr-automerge-gate ${repo}: action_required run fetch failed (${e instanceof Error ? e.message : String(e)}) — assuming none`);
+    return [];
+  }
+}
+
+/**
+ * stint #361: build the card-friendly names for the human-clearable cause of a
+ * non-CLEAN mergeStateStatus. Primarily the Actions runs API (workflow runs awaiting
+ * approval), secondarily the check-runs rollup (status contexts parked at
+ * ACTION_REQUIRED). Returns the click-line ready for a card or null if nothing found.
+ */
+function actionRequiredClickLine(repo: string, headSha: string, rollup: RollupItem[]): string | null {
+  const runs = fetchActionRequiredRuns(repo, headSha);
+  const checks = findActionRequiredChecks(rollup);
+  const needs = [
+    ...runs.map((r) => (r.url ? `\`${r.name}\` ([approve & run](${r.url}))` : `\`${r.name}\``)),
+    ...checks.filter((n) => !runs.some((r) => r.name === n)).map((n) => `\`${n}\``),
+  ];
+  if (needs.length === 0) return null;
+  return (
+    `workflow approval pending: ${needs.join(", ")} — open ` +
+    `https://github.com/${repo}/actions and click "Approve and run" on each awaiting run.`
+  );
 }
 
 function commentOnPr(repo: string, pr: number, body: string): void {
@@ -463,10 +508,19 @@ async function evaluate(
   });
   if (!readiness.ready) {
     const detail = readiness.detail;
+    const clickLine = actionRequiredClickLine(repo, prJson.headRefOid, prJson.statusCheckRollup);
     console.log(`[wait] pr-automerge-gate ${repo}#${pr}: short-circuit — ${detail}. No diff fetch, no review call.`);
     console.log(
       formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "ci-rollup", reasons: [detail] }),
     );
+    // 2026-09-15 stint #361: a non-CLEAN mergeStateStatus whose cause is a workflow run
+    // awaiting approval (action_required) is human-clearable — card it instead of burying
+    // it in the ride bucket for 45 h (client-asthetik#372). The `merge-ready` card leg names
+    // the click.
+    if (clickLine) {
+      postFlagCard(repo, pr, "merge-ready", prJson.headRefOid, [detail, clickLine]);
+      await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "merge-ready", reasons: [detail, clickLine], additions: prJson.additions, deletions: prJson.deletions });
+    }
     return;
   }
 
@@ -1363,6 +1417,12 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   if (!readiness.ready) {
     const detail = `not merge-ready (${readiness.detail})`;
     logTrainGateLine(repo, pr, "refused", detail);
+    // stint #361: card human-clearable merge-readiness causes (workflow approval pending)
+    const clickLine = actionRequiredClickLine(repo, prJson.headRefOid, prJson.statusCheckRollup);
+    if (clickLine) {
+      postFlagCard(repo, pr, "merge-ready", prJson.headRefOid, [detail, clickLine]);
+      await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "merge-ready", reasons: [detail, clickLine], additions: prJson.additions, deletions: prJson.deletions });
+    }
     return { outcome: "refused", detail };
   }
 

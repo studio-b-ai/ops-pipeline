@@ -106,7 +106,7 @@ describe("idempotency markers are per (leg, head)", () => {
 });
 
 describe("isCardLeg admits exactly the decision legs", () => {
-  it.each(["review", "class-match", "line-cap", "named-checks"])("%s earns a card", (leg) => {
+  it.each(["review", "class-match", "line-cap", "named-checks", "merge-ready"])("%s earns a card", (leg) => {
     expect(isCardLeg(leg)).toBe(true);
   });
 

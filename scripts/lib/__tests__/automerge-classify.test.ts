@@ -6,6 +6,8 @@ import {
   withoutLabelWokenReruns,
   compileSafePathGlob,
   evaluateMergeReadiness,
+  findActionRequiredChecks,
+  actionRequiredRuns,
   gateDecision,
   gateDecisionForClass,
   isRollupClean,
@@ -815,6 +817,91 @@ describe("evaluateMergeReadiness (ci-rollup leg — Rule #471 both-directions co
 
   it("declines a non-CLEAN mergeStateStatus (BLOCKED)", () => {
     expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "BLOCKED" }).ready).toBe(false);
+  });
+});
+
+describe("actionRequiredRuns (stint #361 — the Actions API source, not the rollup)", () => {
+  it("names the two #372 blockers — gitleaks + Require review label (known-good from the live API)", () => {
+    const runs = actionRequiredRuns([
+      { id: 34330185037, name: "gitleaks", conclusion: "action_required", html_url: "https://github.com/studio-b-ai/client-asthetik/actions/runs/34330185037" },
+      { id: 34330185084, name: "Require review label", conclusion: "action_required", html_url: "https://github.com/studio-b-ai/client-asthetik/actions/runs/34330185084" },
+      { id: 34742082938, name: "Require review label", conclusion: "success" },
+    ]);
+    expect(runs).toHaveLength(2);
+    expect(runs[0].name).toBe("gitleaks");
+    expect(runs[0].key).toBe("id:34330185037");
+    expect(runs[0].url).toContain("34330185037");
+    expect(runs[1].name).toBe("Require review label");
+  });
+
+  it("negative control: a clean run set returns nothing", () => {
+    expect(actionRequiredRuns([
+      { id: 1, name: "build", conclusion: "success" },
+      { id: 2, name: "test", conclusion: "success" },
+    ])).toEqual([]);
+  });
+
+  it("dedupes by id, tolerates unnamed runs, and tolerates missing id by falling back to name", () => {
+    expect(actionRequiredRuns([
+      { id: 100, name: "dup", conclusion: "action_required" },
+      { id: 100, name: "dup", conclusion: "action_required" },
+      { name: "only-name", conclusion: "action_required" },
+      { conclusion: "action_required" },
+    ])).toEqual([
+      { key: "id:100", name: "dup", url: "" },
+      { key: "name:only-name", name: "only-name", url: "" },
+      { key: "name:(unnamed run)", name: "(unnamed run)", url: "" },
+    ]);
+  });
+
+  it("ignores in-progress, cancelled, and missing-conclusion entries", () => {
+    expect(actionRequiredRuns([
+      { id: 1, name: "in-progress", conclusion: null },
+      { id: 2, name: "cancelled", conclusion: "cancelled" },
+      { name: "no-conclusion" },
+    ])).toEqual([]);
+  });
+});
+
+describe("findActionRequiredChecks (the rollup secondary source)", () => {
+  // client-asthetik#372's real shape: two suite check-runs sitting in ACTION_REQUIRED
+  // (awaiting workflow approval), which makes mergeStateStatus UNSTABLE and the gate
+  // refuse with no card. The helper names them so the card can name the click.
+  it("names each ACTION_REQUIRED check-run (the #372 known-good)", () => {
+    const names = findActionRequiredChecks([
+      { status: "COMPLETED", conclusion: "SUCCESS", name: "build" },
+      { status: "COMPLETED", conclusion: "ACTION_REQUIRED", name: "deploy (production)" },
+      { status: "COMPLETED", conclusion: "ACTION_REQUIRED", name: "smoke (production)" },
+    ]);
+    expect(names).toEqual(["deploy (production)", "smoke (production)"]);
+  });
+
+  it("negative control (#322): a fully-green rollup returns NO names", () => {
+    expect(
+      findActionRequiredChecks([
+        { status: "COMPLETED", conclusion: "SUCCESS", name: "build" },
+        { status: "COMPLETED", conclusion: "NEUTRAL", name: "lint" },
+        { status: "COMPLETED", conclusion: "SKIPPED", name: "optional" },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("negative control: a still-running check is NOT action-required", () => {
+    expect(findActionRequiredChecks([{ status: "IN_PROGRESS", conclusion: null, name: "build" }])).toEqual([]);
+  });
+
+  it("recognizes the legacy commit-status shape too", () => {
+    expect(findActionRequiredChecks([{ state: "ACTION_REQUIRED", context: "deploy" }])).toEqual(["deploy"]);
+  });
+
+  it("dedupes the same check name and tolerates an unnamed entry", () => {
+    expect(
+      findActionRequiredChecks([
+        { status: "COMPLETED", conclusion: "ACTION_REQUIRED", name: "deploy" },
+        { status: "COMPLETED", conclusion: "ACTION_REQUIRED", name: "deploy" },
+        { status: "COMPLETED", conclusion: "ACTION_REQUIRED" },
+      ]),
+    ).toEqual(["deploy", "(unnamed check)"]);
   });
 });
 

@@ -42,9 +42,9 @@
 
 /** The refusal legs that can carry a card. Mirrors gate-enroll's DECISION_LEGS: a
  *  machinery leg (truncation, held, eligibility, head-moved) is not a human's to clear. */
-export type CardLeg = "review" | "class-match" | "line-cap" | "named-checks";
+export type CardLeg = "review" | "class-match" | "line-cap" | "named-checks" | "merge-ready";
 
-const CARD_LEGS: ReadonlySet<string> = new Set<CardLeg>(["review", "class-match", "line-cap", "named-checks"]);
+const CARD_LEGS: ReadonlySet<string> = new Set<CardLeg>(["review", "class-match", "line-cap", "named-checks", "merge-ready"]);
 
 /** True when `leg` is a refusal a human label can clear — i.e. one that earns a card. */
 export function isCardLeg(leg: string): leg is CardLeg {
@@ -60,6 +60,15 @@ export function doorSentenceFor(leg: CardLeg): string {
     return (
       "_A human `reviewed` label on this head lets the next sweep merge " +
       "(it stands in for the model's vote); `queued` also merges it; `hold` parks it. " +
+      "This is a blue card on the glass._"
+    );
+  }
+  if (leg === "merge-ready") {
+    return (
+      "_This refusal is at the **merge-ready** leg — the PR is not in a mergeable state " +
+      "(draft, closed, CI not clean, mergeStateStatus not CLEAN, or workflow runs awaiting " +
+      "approval). The detail names the clearable cause. `queued` from a merge-authorized " +
+      "human still overrides when the cause clears; `hold` parks it. " +
       "This is a blue card on the glass._"
     );
   }

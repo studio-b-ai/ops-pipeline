@@ -75,6 +75,10 @@ export type GateReceiptLeg =
   // whose non-terminal state then deltas the gate's own revalidate. A decision leg,
   // not a wait: the loop cannot clear itself, so a human owns the outcome.
   | "flap-guard"
+  // 2026-09-15 stint #361: a non-CLEAN mergeStateStatus (UNSTABLE, UNKNOWN) with
+  // human-clearable causes (pending workflow approval) is a decision, not a wait —
+  // it cards the click instead of silently refusing for 45 h (client-asthetik#372).
+  | "merge-ready"
   | "other";
 
 export interface GateReceiptInput {

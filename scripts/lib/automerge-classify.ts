@@ -1209,6 +1209,75 @@ export function evaluateMergeReadiness(input: MergeReadinessInput): { ready: boo
   return { ready, detail };
 }
 
+/**
+ * stint #361 (2026-09-15): human-clearable merge-readiness defect detection.
+ *
+ * `mergeStateStatus === "UNSTABLE"` on an otherwise-green PR is usually a workflow run
+ * awaiting manual approval (`conclusion: "action_required"`). The check-runs
+ * `statusCheckRollup` CANNOT see this: client-asthetik#372's rollup read
+ * `state=SUCCESS` (Require review label=SUCCESS, Auto-qualifier=SKIPPED) while
+ * `mergeStateStatus` stayed UNSTABLE for 6 days, because the blocking `gitleaks`
+ * workflow run never produced a check-run at all (it is parked awaiting approval).
+ * The authoritative source is the Actions runs API
+ * (`gh api repos/{repo}/actions/runs?head_sha={sha}`), whose runs carry
+ * `conclusion: "action_required"`.
+ *
+ * This pure filter names those runs so the card can name the click. It takes the
+ * raw runs array so it is unit-testable without gh (#223 — no self-assembled payload).
+ */
+export interface ActionRunItem {
+  id?: number;
+  name?: string;
+  html_url?: string;
+  conclusion?: string | null;
+}
+
+/** A run awaiting manual approval — the thing the human must click. */
+export interface ActionRequiredRun {
+  /** Marker: `id:<n>` when the API supplied an id, else `name:<name>` — never empty. */
+  key: string;
+  name: string;
+  url: string;
+}
+
+/**
+ * Filters Actions workflow runs down to the ones parked at `conclusion === "action_required"`,
+ * deduped by id (falling back to name when no id is present). Anything else — success,
+ * failure, cancelled, in_progress, or an unrecognized shape — is not a clearance ask.
+ */
+export function actionRequiredRuns(runs: readonly ActionRunItem[]): ActionRequiredRun[] {
+  const seen = new Set<string>();
+  const out: ActionRequiredRun[] = [];
+  for (const run of runs) {
+    if (run.conclusion !== "action_required") continue;
+    const name = run.name && run.name.trim() !== "" ? run.name : "(unnamed run)";
+    const key = run.id !== undefined ? `id:${run.id}` : `name:${name}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ key, name, url: run.html_url ?? "" });
+  }
+  return out;
+}
+
+/**
+ * Secondary source: a check-run (or legacy status) whose OWN conclusion is
+ * ACTION_REQUIRED. When GitHub surfaces the approval as a check-run rather than only a
+ * workflow run, this catches it — the `action_required` state is a valid check
+ * conclusion. Returns the names so the card can name the click.
+ */
+export function findActionRequiredChecks(rollup: RollupItem[]): string[] {
+  return rollup
+    .filter((item) => {
+      // Check-run shape: status COMPLETED + conclusion ACTION_REQUIRED
+      if (item.status === "COMPLETED" && item.conclusion === "ACTION_REQUIRED") return true;
+      // Legacy commit-status shape could also carry ACTION_REQUIRED
+      if (item.state === "ACTION_REQUIRED") return true;
+      return false;
+    })
+    .map((item) => item.name ?? item.context ?? "(unnamed check)")
+    .filter((n, i, arr) => arr.indexOf(n) === i); // dedupe by name
+}
+
 // ───────────────── code-fix revalidate-then-merge (ops#190 B1, doc §4.1 move 5) ─────────────────
 
 /** The PR fields the revalidate leg re-fetches immediately before the merge API call

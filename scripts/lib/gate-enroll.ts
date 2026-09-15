@@ -45,7 +45,7 @@ export const GATE_ORIGINATOR = "pr-automerge-gate";
 // re-enter the same loop — so a human decides the merge (or fixes the repo's
 // label-triggered CI). Enrolling it is what makes an otherwise-silent permanent stall
 // visible.
-const DECISION_LEGS: ReadonlySet<GateReceiptLeg> = new Set(["class-match", "line-cap", "named-checks", "review", "flap-guard"]);
+const DECISION_LEGS: ReadonlySet<GateReceiptLeg> = new Set(["class-match", "line-cap", "named-checks", "review", "flap-guard", "merge-ready"]);
 
 /** True iff a refusal on this leg is a decision Kevin can make (vs a transient wait). */
 export function isDecisionLeg(leg: GateReceiptLeg): boolean {
