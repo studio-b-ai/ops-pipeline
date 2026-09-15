@@ -265,7 +265,7 @@ export const REPO_LANE_MANAGER: Readonly<Record<string, string>> = {
   "studio-b-ai/claude-hooks": "mechanic",
   "studio-b-ai/client-asthetik": "mechanic",
   "studio-b-ai/acuops-pipeline": "mechanic",
-  "studio-b-ai/webhook-router": "engineer",
+  "studio-b-ai/radio": "engineer",
   "studio-b-ai/bolt-wms": "engineer",
   "studio-b-ai/studiob": "engineer",
   "studio-b-ai/studiob-price-sync": "engineer",
