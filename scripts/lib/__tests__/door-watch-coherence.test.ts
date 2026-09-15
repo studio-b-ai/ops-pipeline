@@ -22,7 +22,7 @@ const LIVE_DOOR_ROWS: DoorRegistryRow[] = [
   { repo: "studio-b-ai/studiob-price-sync", train: true },
   { repo: "studio-b-ai/asthetik-trade-theme", train: true },
   { repo: "studio-b-ai/asthetik-portal", train: true },
-  { repo: "studio-b-ai/webhook-router", train: true },
+  { repo: "studio-b-ai/radio", train: true },
   { repo: "studio-b-ai/ops-pipeline", train: false },
   { repo: "studio-b-ai/acuops-pipeline", train: false },
   { repo: "studio-b-ai/acudev", train: false },
@@ -40,7 +40,7 @@ const LIVE_DOOR_ROWS: DoorRegistryRow[] = [
 /** backlog-managers.yaml's `repos:` list BEFORE this PR widened it — the drifted state. */
 const WATCHED_BEFORE: string[] = [
   "studio-b-ai/ops-pipeline",
-  "studio-b-ai/webhook-router",
+  "studio-b-ai/radio",
   "studio-b-ai/client-asthetik",
   "studio-b-ai/acuops-pipeline",
   "studio-b-ai/acudev",
