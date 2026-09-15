@@ -387,6 +387,27 @@ function humanReviewReceipt(repo: string, pr: number, currentLabels: string[]): 
   }
 }
 
+// ─────────────────────── sensitive-path floor (NEW-1, 2026-09-15) ───────────────────────
+
+/**
+ * Sensitive-path check — on the FLOOR for BOTH the squasher and train paths.
+ * Ruling law 1: a `box`/`queued` override must NOT merge over sensitive paths.
+ * Returns the list of sensitive files (paths) if any match; empty array = clean.
+ * Never throws: a malformed regex fails closed (reports the first pattern as sensitive
+ * even though it didn't match a real file — the caller decides the message).
+ */
+function checkSensitivePaths(filePaths: string[], patterns: string[]): { hit: boolean; files: string[]; error?: string } {
+  if (!patterns || patterns.length === 0) return { hit: false, files: [] };
+  let res: RegExp[];
+  try {
+    res = patterns.map((src) => new RegExp(src));
+  } catch (err) {
+    return { hit: true, files: [], error: `invalid sensitivePathPatterns regex (${err instanceof Error ? err.message : String(err)})` };
+  }
+  const hits = filePaths.filter((p) => res.some((re) => re.test(p)));
+  return { hit: hits.length > 0, files: hits };
+}
+
 async function evaluate(
   repo: string,
   pr: number,
@@ -514,7 +535,21 @@ async function evaluate(
     await resolveGateRefusals(repo, pr, { resolution: "held" });
     return;
   }
+
+  // ── Sensitive-path floor (NEW-1, 2026-09-15): runs BEFORE `box`/`queued` override —
+  // the floor his word never lowers. A PR touching a sensitive path is refused with a
+  // card regardless of the label; `box` opens every DECISION leg EXCEPT this floor.
   if ([QUEUED_LABEL, ...TRAIN_READY_ALIASES].some((l) => labels.includes(l))) {
+    const spc = checkSensitivePaths(prJson.files.map((f) => f.path), sensitivePathPatterns);
+    if (spc.hit) {
+      const detail = spc.error ?? `sensitive path(s): ${spc.files.join(", ")} — the floor Kevin's key never lowers (NEW-1)`;
+      const reasons = spc.error ? [spc.error] : spc.files.map((p) => `sensitive path: ${p}`);
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${QUEUED_LABEL} present but sensitive-path floor refuses — ${detail}`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "class-match", reasons }));
+      await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "class-match", reasons, additions: prJson.additions, deletions: prJson.deletions });
+      postFlagCard(repo, pr, "class-match", prJson.headRefOid, reasons);
+      return;
+    }
     const outcome = await evaluateQueuedOverride(repo, pr, prJson, labels);
     if (outcome !== "fall-through") return;
     // fall-through: the ready label was present but not authorizing — the normal legs decide.
@@ -1002,6 +1037,11 @@ export interface TrainReadyOptions {
    *  door (or omit it) directly, no env stubbing required. Omit/undefined ⇒
    *  treated the same as null (renders the honest "unknown" door). */
   door?: MergeDoor | null;
+  /** NEW-1 (2026-09-15): sensitive-path regex patterns — the floor check for the
+   *  train path (mirrors the squasher path's own floor check above `evaluateQueuedOverride`).
+   *  A PR touching any matching path is refused with a card before the authority leg
+   *  runs. Empty/omitted = no sensitive-path check. */
+  sensitivePathPatterns?: string[];
 }
 
 /**
@@ -1265,6 +1305,19 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   if (prJson.state !== "OPEN" || prJson.isDraft) {
     const detail = `not evaluable (state=${prJson.state} isDraft=${prJson.isDraft})`;
     logTrainGateLine(repo, pr, "refused", detail);
+    return { outcome: "refused", detail };
+  }
+
+  // ── Sensitive-path floor (NEW-1, 2026-09-15): mirrors the squasher path's floor
+  // check — runs BEFORE the authority leg. A `box` on a PR touching a sensitive path
+  // is refused with a card; `box` never lowers this floor.
+  const spc = checkSensitivePaths(prJson.files.map((f) => f.path), opts.sensitivePathPatterns ?? []);
+  if (spc.hit) {
+    const detail = spc.error ?? `sensitive path(s): ${spc.files.join(", ")} — the floor Kevin's key never lowers (NEW-1)`;
+    const reasons = spc.error ? [spc.error] : spc.files.map((p) => `sensitive path: ${p}`);
+    logTrainGateLine(repo, pr, "refused", detail);
+    await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "class-match", reasons, additions: prJson.additions, deletions: prJson.deletions });
+    postFlagCard(repo, pr, "class-match", prJson.headRefOid, reasons);
     return { outcome: "refused", detail };
   }
 
@@ -1532,7 +1585,7 @@ async function main(): Promise<void> {
     // #412: the door fact is read ONCE here, at the call site, from the live
     // Actions environment — never inside evaluateTrainReady itself, which stays
     // pure/injectable for tests (see TrainReadyOptions.door).
-    await evaluateTrainReady(repo, pr, { door: mergeDoorFrom() });
+    await evaluateTrainReady(repo, pr, { door: mergeDoorFrom(), sensitivePathPatterns });
     return;
   }
   try {

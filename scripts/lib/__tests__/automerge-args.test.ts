@@ -119,16 +119,16 @@ describe("parseArgs", () => {
     ).toThrow(/mutually exclusive/);
   });
 
-  it("throws when --train-ready is combined with --sensitive-path (mutual exclusion, fail-loud)", () => {
-    expect(() =>
-      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--sensitive-path", "\\.sql$", "--train-ready"]),
-    ).toThrow(/mutually exclusive/);
+  it("allows --sensitive-path with --train-ready (NEW-1: sensitive-path is on the floor for both gates)", () => {
+    const args = parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--sensitive-path", "\\.sql$", "--train-ready"]);
+    expect(args.trainReady).toBe(true);
+    expect(args.sensitivePathPatterns).toEqual(["\\.sql$"]);
   });
 
-  it("throws even when the combined --sensitive-path value is whitespace-only (codex P2, A2 pass 1) — exclusion keys on flag PRESENCE, not on whether the value survived trimming", () => {
-    expect(() =>
-      parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--sensitive-path", "   "]),
-    ).toThrow(/mutually exclusive/);
+  it("whitespace-only --sensitive-path with --train-ready is silently dropped (NEW-1: still allowed, but the empty entry vanishes per the existing trim rule)", () => {
+    const args = parseArgs(["--repo", "studio-b-ai/ops-pipeline", "--pr", "9", "--train-ready", "--sensitive-path", "   "]);
+    expect(args.trainReady).toBe(true);
+    expect(args.sensitivePathPatterns).toEqual([]);
   });
 
   it("still requires --repo/--pr in train mode (the mutual-exclusion check does not preempt required-arg validation)", () => {

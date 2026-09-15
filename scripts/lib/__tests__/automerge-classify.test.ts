@@ -656,6 +656,15 @@ describe("classifyPrDiffClass", () => {
     expect(result.reasons.some((r) => r.includes("invalid sensitivePathPatterns regex"))).toBe(true);
   });
 
+  it("passes a PR touching ONLY safe paths when sensitivePathPatterns is configured — the positive control (#471 NEW-1) proving the floor's deny-only guard can also PASS", () => {
+    const result = classifyPrDiffClass({
+      files: [{ path: "docs/plans/safe.md", fileClass: "doc" }],
+      totalChangedLines: 3,
+      sensitivePathPatterns: ["^\\.github/", "^Customization/"],
+    });
+    expect(result.prClass).toBe("docs-comment");
+  });
+
   // ───── Positives ─────
 
   it("resolves docs-comment for the unchanged doc|comment-only shape at <=10 lines (regression: byte-identical to the original #279 gate)", () => {
