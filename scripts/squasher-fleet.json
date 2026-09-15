@@ -1,13 +1,14 @@
 {
-  "_comment": "ops#250 — squasher fleet sweep registry (docs/plans/2026-08-31-ops250-squasher-fleet-sweep.md §2.3). Per-repo gate inputs migrated VERBATIM from the retired per-repo caller workflows (extracted from each repo's origin/main, 2026-08-31). This file is enumeration + gate inputs ONLY — it is NOT class policy: repoClassFor() in scripts/lib/automerge-classify.ts stays the source of truth for train-class/code-fix partitioning. `train: true` = the retired caller had a train_ready leg; the sweep then also enumerates open `queued` PRs for that repo (train invocations pass ONLY train_ready — required_checks/enabled_classes never apply in train mode). Absent optional fields fall back to the reusable gate's own defaults (enabled_classes is written explicitly because the sweep passes inputs positionally — an empty string would OVERRIDE the workflow_call default, not invoke it). 2026-09-06 (Kevin 'go'): code-fix enabled with safe_path_globs on bolt-wms (src/**), studiob (packages/api/src/**) and studiob-price-sync (src/** — extensions/** deliberately OUTSIDE: the checkout extension is customer-facing); asthetik-trade-theme and asthetik-portal stay docs-comment because a storefront/portal change without a QA receipt is Kevin's hand (#475); the code-fix line cap is 400 (automerge-classify.ts); required_checks name each repo's substantive CI job(s) (codex P2 on the door PR: an empty list leaves the named-checks leg fail-closed and the class inert). 2026-09-09 (Kevin 'widen', Engineer sitting — the 46-PR pile-up read: 32 of 46 would have auto-merged under these rules): safe_path_globs widened to scripts/** + docs/** (bolt-wms, studiob, price-sync, webhook-router), studiob to packages/*/src/**; test-only + ci-infra enabled where missing; asthetik-trade-theme gets code-fix on theme paths (a merge only syncs the STAGING theme — the live push stays a Kevin door, #352/#475); asthetik-portal stays without code-fix (Railway auto-deploys main = live, #475); ops-pipeline stays without code-fix (the door must not auto-edit itself); price-sync extensions/** stays out (customer-facing checkout). 2026-09-12 (Kevin 'I want to see all these PRs merged if they're legit and safe' — TP sitting, the org sweep read: 16 green fleet-internal PRs waiting ≈490h across 8 repos, 0 touching a #97 surface/secret/rulebook): the RELEASE leg (`train: true` = the `queued` label door, F1 word: release) is flipped on for claude-config-plane + brain and added for radio, lightsout, client-asthetik at docs-comment squasher scope — the release leg ignores classes anyway; these three earn code-fix only after their own required_checks are named. Library/product/2026-09-12-merge-train-defect-org-sweep.md in the brain is the baseline the next sweep must beat. 2026-09-14 (stint #316, Mechanic — \"the door cannot merge the Principal's guard repos\"): claude-hooks gains code-fix with safe_path_globs \"*.py\" (every hook + test lives top-level, one dir deep — the built-in denylist backstop still refuses auth/middleware/pricing-shaped filenames, migrations, and anything under .github/, so a hook whose OWN NAME collides with those markers still waits for a human) and required_checks \"syntax\" (the repo's one CI job, .github/workflows/python-syntax.yml — named check must be strictly SUCCESS on the head commit, ops#190 B1). settings.json is NOT a path in claude-hooks (it lives in claude-config-plane, already sensitive-pathed there) — a hook's registration (the settings.json entry that wires a merged hook file into an event) is a SEPARATE act on claude-config-plane's live runner branch, never a door PR; see shift-runner/opencode-seat/RULES.md there for the written rule. This entry governs only claude-hooks' own hook-file content. 2026-09-15 stint #361 (L2D-12 — one PR, one door): an optional `door` field names which train owns the repo's `queued` merge authority — `fleet` (default, absent field = fleet) or `restart` (the Heritage restart train, heritage-restart-train.yml). client-asthetik is door:restart because its merges ride the restart train's spacing law (deploy window, at-most-one-in-flight); the fleet sweep must NOT enumerate or merge its `queued` PRs, because a fleet merge bypasses that law (client-asthetik#392 merged outside the restart train's spacing law — L2D-12 clause 3). studiob is `train: false` and door:fleet (its merges are door-less, handled by evaluateQueuedOverride); a future routing of studiob through the restart train's door (if its deploy coupling is restored) would set `door: restart` here without touching the train/code-fix partition. `door` is orthogonal to `train` — `train: true` powers the code-fix→candidate partition and is unchanged; `door: restart` means the `queued` enumeration gate lives elsewhere.",
+  "_comment": "ops#250 \u2014 squasher fleet sweep registry (docs/plans/2026-08-31-ops250-squasher-fleet-sweep.md \u00a72.3). Per-repo gate inputs migrated VERBATIM from the retired per-repo caller workflows (extracted from each repo's origin/main, 2026-08-31). This file is enumeration + gate inputs ONLY \u2014 it is NOT class policy: repoClassFor() in scripts/lib/automerge-classify.ts stays the source of truth for train-class/code-fix partitioning. `train: true` = the retired caller had a train_ready leg; the sweep then also enumerates open `queued` PRs for that repo (train invocations pass ONLY train_ready \u2014 required_checks/enabled_classes never apply in train mode). Absent optional fields fall back to the reusable gate's own defaults (enabled_classes is written explicitly because the sweep passes inputs positionally \u2014 an empty string would OVERRIDE the workflow_call default, not invoke it). 2026-09-06 (Kevin 'go'): code-fix enabled with safe_path_globs on bolt-wms (src/**), studiob (packages/api/src/**) and studiob-price-sync (src/** \u2014 extensions/** deliberately OUTSIDE: the checkout extension is customer-facing); asthetik-trade-theme and asthetik-portal stay docs-comment because a storefront/portal change without a QA receipt is Kevin's hand (#475); the code-fix line cap is 400 (automerge-classify.ts); required_checks name each repo's substantive CI job(s) (codex P2 on the door PR: an empty list leaves the named-checks leg fail-closed and the class inert). 2026-09-09 (Kevin 'widen', Engineer sitting \u2014 the 46-PR pile-up read: 32 of 46 would have auto-merged under these rules): safe_path_globs widened to scripts/** + docs/** (bolt-wms, studiob, price-sync, webhook-router), studiob to packages/*/src/**; test-only + ci-infra enabled where missing; asthetik-trade-theme gets code-fix on theme paths (a merge only syncs the STAGING theme \u2014 the live push stays a Kevin door, #352/#475); asthetik-portal stays without code-fix (Railway auto-deploys main = live, #475); ops-pipeline stays without code-fix (the door must not auto-edit itself); price-sync extensions/** stays out (customer-facing checkout). 2026-09-12 (Kevin 'I want to see all these PRs merged if they're legit and safe' \u2014 TP sitting, the org sweep read: 16 green fleet-internal PRs waiting \u2248490h across 8 repos, 0 touching a #97 surface/secret/rulebook): the RELEASE leg (`train: true` = the `queued` label door, F1 word: release) is flipped on for claude-config-plane + brain and added for radio, lightsout, client-asthetik at docs-comment squasher scope \u2014 the release leg ignores classes anyway; these three earn code-fix only after their own required_checks are named. Library/product/2026-09-12-merge-train-defect-org-sweep.md in the brain is the baseline the next sweep must beat. 2026-09-14 (stint #316, Mechanic \u2014 \"the door cannot merge the Principal's guard repos\"): claude-hooks gains code-fix with safe_path_globs \"*.py\" (every hook + test lives top-level, one dir deep \u2014 the built-in denylist backstop still refuses auth/middleware/pricing-shaped filenames, migrations, and anything under .github/, so a hook whose OWN NAME collides with those markers still waits for a human) and required_checks \"syntax\" (the repo's one CI job, .github/workflows/python-syntax.yml \u2014 named check must be strictly SUCCESS on the head commit, ops#190 B1). settings.json is NOT a path in claude-hooks (it lives in claude-config-plane, already sensitive-pathed there) \u2014 a hook's registration (the settings.json entry that wires a merged hook file into an event) is a SEPARATE act on claude-config-plane's live runner branch, never a door PR; see shift-runner/opencode-seat/RULES.md there for the written rule. This entry governs only claude-hooks' own hook-file content. 2026-09-15 stint #361 (L2D-12 \u2014 one PR, one door): a `door` field on EVERY row names which train owns the repo's `queued` merge authority \u2014 `fleet` or `restart` (the Heritage restart train, heritage-restart-train.yml). client-asthetik is door:restart because its merges ride the restart train's spacing law (deploy window, at-most-one-in-flight); the fleet sweep must NOT enumerate or merge its `queued` PRs, because a fleet merge bypasses that law (client-asthetik#392 merged outside the restart train's spacing law \u2014 L2D-12 clause 3). studiob is `train: false` and door:fleet (its merges are door-less, handled by evaluateQueuedOverride); a future routing of studiob through the restart train's door (if its deploy coupling is restored) would set `door: restart` here without touching the train/code-fix partition. `door` is orthogonal to `train` \u2014 `train: true` powers the code-fix\u2192candidate partition and is unchanged; `door: restart` means the `queued` enumeration gate lives elsewhere. It is written explicitly on every row; the sweep still reads it as `jq -r \\\".door // \"fleet\"\\\"` so an absent field on a future row fails safe to fleet.",
   "repos": [
     {
       "repo": "studio-b-ai/bolt-wms",
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
       "safe_path_globs": "src/**,scripts/**,docs/**",
-      "required_checks": "Client — TypeScript + Build,Server — TypeScript + Tests",
-      "train": true
+      "required_checks": "Client \u2014 TypeScript + Build,Server \u2014 TypeScript + Tests",
+      "train": true,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/studiob",
@@ -15,7 +16,8 @@
       "sensitive_path_patterns": "",
       "safe_path_globs": "packages/*/src/**,scripts/**,docs/**",
       "required_checks": "Build + boot + probe,tsc --noEmit (SDK drift guard) (api),turbo run test (all workspace suites)",
-      "train": false
+      "train": false,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/studiob-price-sync",
@@ -23,7 +25,8 @@
       "sensitive_path_patterns": "",
       "safe_path_globs": "src/**,scripts/**,docs/**",
       "required_checks": "Extension bundle + type baseline",
-      "train": true
+      "train": true,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/asthetik-trade-theme",
@@ -31,7 +34,8 @@
       "sensitive_path_patterns": "",
       "safe_path_globs": "sections/**,snippets/**,assets/**,templates/**,layout/**,locales/**",
       "required_checks": "Theme check + schema limits",
-      "train": true
+      "train": true,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/asthetik-portal",
@@ -39,7 +43,8 @@
       "sensitive_path_patterns": "",
       "safe_path_globs": "src/**",
       "required_checks": "build-and-test",
-      "train": true
+      "train": true,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/webhook-router",
@@ -47,15 +52,17 @@
       "sensitive_path_patterns": "^\\.github/actions/,(^|/)(auth|credential|secret|token)",
       "safe_path_globs": "src/**,tests/**,scripts/**,docs/**",
       "required_checks": "Build & Check,Cross-System QA / API Tests (Vitest)",
-      "train": true
+      "train": true,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/ops-pipeline",
       "enabled_classes": "docs-comment,test-only,code-fix",
       "sensitive_path_patterns": "(^|/)squasher-fleet\\.json$|(^|/)label-authority\\.ts$|(^|/)\\.github/workflows/",
       "safe_path_globs": "scripts/**",
-      "required_checks": "Scripts — typecheck + tests",
-      "train": false
+      "required_checks": "Scripts \u2014 typecheck + tests",
+      "train": false,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/acuops-pipeline",
@@ -63,7 +70,8 @@
       "sensitive_path_patterns": "",
       "safe_path_globs": "",
       "required_checks": "",
-      "train": false
+      "train": false,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/acudev",
@@ -71,7 +79,8 @@
       "sensitive_path_patterns": "",
       "safe_path_globs": "",
       "required_checks": "",
-      "train": false
+      "train": false,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/note-intelligence",
@@ -79,7 +88,8 @@
       "sensitive_path_patterns": "",
       "safe_path_globs": "",
       "required_checks": "",
-      "train": false
+      "train": false,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/brain",
@@ -87,7 +97,8 @@
       "sensitive_path_patterns": "scripts/lanes-row-edit.py,(^|/)(LANES|QUEUE|SHIPPED)\\.md",
       "safe_path_globs": "",
       "required_checks": "",
-      "train": true
+      "train": true,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/claude-config-plane",
@@ -95,7 +106,8 @@
       "sensitive_path_patterns": "(^|/)(settings\\.json|shift-runner/shifts\\.yaml|config-push/)",
       "safe_path_globs": "bin/**,shift-runner/**,skills/**,.gitignore",
       "required_checks": "syntax",
-      "train": true
+      "train": true,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/roundhouse",
@@ -103,7 +115,8 @@
       "sensitive_path_patterns": "",
       "safe_path_globs": "",
       "required_checks": "",
-      "train": false
+      "train": false,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/claude-hooks",
@@ -111,19 +124,22 @@
       "sensitive_path_patterns": "",
       "safe_path_globs": "*.py",
       "required_checks": "syntax",
-      "train": false
+      "train": false,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/radio",
       "enabled_classes": "docs-comment,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
-      "train": true
+      "train": true,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/lightsout",
       "enabled_classes": "docs-comment,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
-      "train": true
+      "train": true,
+      "door": "fleet"
     },
     {
       "repo": "studio-b-ai/client-asthetik",
@@ -138,7 +154,8 @@
       "sensitive_path_patterns": "^\\.github/actions/",
       "safe_path_globs": "src/**",
       "required_checks": "qa",
-      "train": true
+      "train": true,
+      "door": "fleet"
     }
   ]
 }
