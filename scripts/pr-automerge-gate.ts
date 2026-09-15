@@ -1314,7 +1314,10 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   const spc = checkSensitivePaths(prJson.files.map((f) => f.path), opts.sensitivePathPatterns ?? []);
   if (spc.hit) {
     const detail = spc.error ?? `sensitive path(s): ${spc.files.join(", ")} — the floor Kevin's key never lowers (NEW-1)`;
+    const reasons = spc.error ? [spc.error] : spc.files.map((p) => `sensitive path: ${p}`);
     logTrainGateLine(repo, pr, "refused", detail);
+    await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "class-match", reasons, additions: prJson.additions, deletions: prJson.deletions });
+    postFlagCard(repo, pr, "class-match", prJson.headRefOid, reasons);
     return { outcome: "refused", detail };
   }
 
