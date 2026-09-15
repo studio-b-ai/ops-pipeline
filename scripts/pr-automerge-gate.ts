@@ -1232,38 +1232,6 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     return { outcome: "refused", detail };
   }
 
-  // crew-352: the squasher path's UNKNOWN re-read (lines 410-433) was missing here —
-  // after a sibling merge, GitHub transiently reports mergeStateStatus=UNKNOWN while
-  // recomputing mergeability. A single-pass read refused "not merge-ready
-  // (mergeStateStatus=UNKNOWN)" on 5 PRs across the 01:34Z fleet sweep (brain#308/#309,
-  // radio#1036/#1046, bolt-wms#2270); all read CLEAN minutes later — a whole sweep
-  // lost. Re-read up to 3 times at 20s intervals when CI is already green, matching
-  // the squasher path exactly. Fail-closed if it stays UNKNOWN after all retries.
-  if (prJson.mergeStateStatus === "UNKNOWN") {
-    const unkCiClean = isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo));
-    if (unkCiClean) {
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        execFileSync("sleep", ["20"]);
-        prJson = fetchPr(repo, pr);
-        console.log(
-          `[info] pr-automerge-gate ${repo}#${pr}: mergeStateStatus was UNKNOWN — ` +
-            `re-read ${attempt}/3 after 20s → ${prJson.mergeStateStatus}`,
-        );
-        if (prJson.mergeStateStatus !== "UNKNOWN") break;
-      }
-      if (prJson.mergeStateStatus === "UNKNOWN") {
-        console.log(
-          `[wait] pr-automerge-gate ${repo}#${pr}: mergeStateStatus still UNKNOWN after 3 re-reads (60s total) — fail-closed`,
-        );
-      }
-    } else {
-      console.log(
-        `[info] pr-automerge-gate ${repo}#${pr}: mergeStateStatus is UNKNOWN but CI not clean — ` +
-          `skipping re-read (UNKNOWN + !ciClean = unmergeable either way)`,
-      );
-    }
-  }
-
   const currentLabels = prJson.labels.map((l) => l.name);
 
   const timelineFetch: { timeline: AuthorityTimelineItem[]; truncated: boolean } = fetchAuthorityTimeline(repo, pr);
