@@ -148,6 +148,14 @@ jobs:
             if [ -n "${ONLY_REPO:-}" ] && [ "$repo" != "$ONLY_REPO" ]; then continue; fi
 
             train_flag=$(jq -r '.train' <<<"$repo_json")
+            # 2026-09-15 stint #361 (L2D-12 — one PR, one door): the `door` field (absent → "fleet")
+            # names which train owns this repo's `queued` merge authority. When "restart", the fleet
+            # sweep must NOT enumerate `queued` PRs — their door is the Heritage restart train
+            # (heritage-restart-train.yml), whose spacing law (deploy window) a fleet merge would
+            # bypass (client-asthetik#392 was merged outside the restart train's spacing law).
+            # `door` is orthogonal to `train`: a `train: true, door: restart` repo keeps its
+            # code-fix→candidate partition while routing `queued` through the restart train.
+            door=$(jq -r '.door // "fleet"' <<<"$repo_json")
             # 2026-09-13 (Kevin "both fixes approved", ops#409): `fleet-internal` PRs are ENUMERATED with bugsquasher — the runner
             # classified them; the gate (GATE_AUTHORITY_CLASSES) decides. Without this line the class existed but was never evaluated
             # (first firing 06:38Z: 6 labeled PRs, 0 evaluated — #464/#465, the predicate is part of the receipt).
@@ -155,24 +163,28 @@ jobs:
             fi_=$(gh pr list --repo "$repo" --label fleet-internal --state open --json number --limit 100 --jq '[.[].number]')
             sq=$(jq -c -n --argjson a "$sq" --argjson b "$fi_" '$a + $b | unique')
             tr='[]'
-            if [ "$train_flag" = "true" ]; then
+            if [ "$train_flag" = "true" ] && [ "$door" != "restart" ]; then
               # `queued` = Kevin's 2026-09-02 one-vocabulary rename of train:ready (scripts/lib/label-authority.ts).
               tr=$(gh pr list --repo "$repo" --label 'queued' --state open --json number --limit 100 --jq '[.[].number]')
             fi
 
             # ops#294: a pr_number-scoped "evaluate NOW" dispatch against a `queued`
-            # PR in a train:false repo is NOT this sweep's to merge — that repo's
-            # `queued` door is the restart train (heritage-restart-train.yml), and
-            # printing the same blind `queued(train)=0` this sweep prints for an
-            # unlabeled PR cost three wrong claims on studiob#655 (#464/#465 class).
-            # Detected ONLY on this exact dispatch shape — never the scheduled cron,
-            # never a train:true repo (tr already answers those) — with one targeted
-            # gh call scoped to the single dispatched PR. Wording contract + tests:
-            # scripts/lib/squasher-fleet-not-the-door.ts.
+            # PR where this sweep is NOT its door — a train:false repo or a door:restart
+            # repo — must not print the same blind `queued(train)=0` receipt line as a
+            # PR carrying no label (stint #361 expands the door gate from train:false
+            # alone to any repo whose `door` is "restart"; the fleet sweep is not the
+            # door for client-asthetik's `queued` PRs — the restart train is).
+            # Detected ONLY on this exact dispatch shape — never the scheduled cron —
+            # with one targeted gh call scoped to the single dispatched PR. Wording
+            # contract + tests: scripts/lib/squasher-fleet-not-the-door.ts.
             only_pr_carries_queued=false
-            if [ -n "${ONLY_PR:-}" ] && [ "$train_flag" != "true" ]; then
-              only_pr_carries_queued=$(gh pr view "$ONLY_PR" --repo "$repo" --json labels \
-                --jq 'any(.labels[]; .name == "queued")' 2>/dev/null || echo false)
+            fleet_is_not_the_door=false
+            if [ "$door" != "fleet" ] || [ "$train_flag" != "true" ]; then
+              fleet_is_not_the_door=true
+              if [ -n "${ONLY_PR:-}" ]; then
+                only_pr_carries_queued=$(gh pr view "$ONLY_PR" --repo "$repo" --json labels \
+                  --jq 'any(.labels[]; .name == "queued")' 2>/dev/null || echo false)
+              fi
             fi
 
             if [ -n "${ONLY_PR:-}" ]; then
@@ -184,8 +196,12 @@ jobs:
             # distinguishable from a blind instrument — these lines ARE the
             # enumeration receipt. (Message-clarity only — the exit code below is
             # unaffected either branch; this never fails the sweep.)
-            if [ -n "${ONLY_PR:-}" ] && [ "$train_flag" != "true" ] && [ "$only_pr_carries_queued" = "true" ]; then
-              echo "queued PR $repo#$ONLY_PR is not this sweep's to merge (fleet registry train:false) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
+            if [ "$fleet_is_not_the_door" = "true" ] && [ -n "${ONLY_PR:-}" ] && [ "$only_pr_carries_queued" = "true" ]; then
+              if [ "$door" = "restart" ]; then
+                echo "queued PR $repo#$ONLY_PR is not this sweep's to merge (fleet registry door:restart) — its door is the Heritage restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
+              else
+                echo "queued PR $repo#$ONLY_PR is not this sweep's to merge (fleet registry train:false) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
+              fi
             else
               echo "$repo: bugsquasher+fleet-internal=$(jq length <<<"$sq") queued(train)=$(jq length <<<"$tr")"
             fi
