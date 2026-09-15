@@ -5,7 +5,7 @@
       "repo": "studio-b-ai/bolt-wms",
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
-      "safe_path_globs": "src/**,scripts/**,docs/**",
+      "safe_path_globs": "src/**,scripts/**,docs/**,hubspot/src/**,client/src/**",
       "required_checks": "Client — TypeScript + Build,Server — TypeScript + Tests",
       "train": true
     },
@@ -35,9 +35,9 @@
     },
     {
       "repo": "studio-b-ai/asthetik-portal",
-      "enabled_classes": "docs-comment,ci-infra,test-only",
+      "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "",
-      "safe_path_globs": "src/**",
+      "safe_path_globs": "src/**,scripts/**,client/src/**",
       "required_checks": "build-and-test",
       "train": true
     },
@@ -45,13 +45,13 @@
       "repo": "studio-b-ai/radio",
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/,(^|/)(auth|credential|secret|token)",
-      "safe_path_globs": "src/**,tests/**,scripts/**,docs/**",
+      "safe_path_globs": "src/**,tests/**,scripts/**,docs/**,mcp/**,routines/**,public/**",
       "required_checks": "Build & Check,Cross-System QA / API Tests (Vitest)",
       "train": true
     },
     {
       "repo": "studio-b-ai/ops-pipeline",
-      "enabled_classes": "docs-comment,test-only,code-fix",
+      "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "(^|/)squasher-fleet\\.json$|(^|/)label-authority\\.ts$|(^|/)\\.github/workflows/",
       "safe_path_globs": "scripts/**",
       "required_checks": "Scripts — typecheck + tests",
@@ -129,7 +129,7 @@
       "repo": "studio-b-ai/toto",
       "enabled_classes": "docs-comment,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
-      "safe_path_globs": "src/**",
+      "safe_path_globs": "src/**,gate/**,scripts/**,qa/**,src-tauri/src/**",
       "required_checks": "qa",
       "train": true
     }
