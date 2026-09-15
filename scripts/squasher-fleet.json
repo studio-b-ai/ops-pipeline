@@ -53,7 +53,7 @@
       "repo": "studio-b-ai/ops-pipeline",
       "enabled_classes": "docs-comment,test-only,code-fix",
       "sensitive_path_patterns": "(^|/)squasher-fleet\\.json$|(^|/)label-authority\\.ts$|(^|/)\\.github/workflows/",
-      "safe_path_globs": "scripts/**",
+      "safe_path_globs": "scripts/**,docs/**",
       "required_checks": "Scripts — typecheck + tests",
       "train": false
     },
