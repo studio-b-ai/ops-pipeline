@@ -206,6 +206,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
       sensitive_path_patterns: "^\\.github/actions/",
       safe_path_globs: "src/**",
       required_checks: "Client — TypeScript + Build,Server — TypeScript + Tests",
+      check_path_globs: "",
     };
 
     const ordered = orderFleetSweepEntries([entry], { maxFanout: 20, perRepoCap: 5, runOffset: 0 });
