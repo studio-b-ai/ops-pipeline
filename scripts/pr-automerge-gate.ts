@@ -387,6 +387,74 @@ function humanReviewReceipt(repo: string, pr: number, currentLabels: string[]): 
   }
 }
 
+/**
+ * Filters `requiredChecks` by path dependencies: a check whose `glob` matches
+ * NONE of the PR's changed files is excluded (it could never have triggered).
+ *
+ * Each entry in `pathDeps` is `"<check name>=<glob>"`.  The glob is matched
+ * against every changed file path via miniglob (supports `**` for any depth,
+ * `*` within a segment, `?` for a single char).
+ */
+function filterRequiredChecksByPathDeps(
+  checks: string[],
+  pathDeps: string[],
+  prFiles: string[],
+): { checks: string[]; skipped: { check: string; glob: string }[] } {
+  const depMap = new Map<string, string>();
+  for (const entry of pathDeps) {
+    const eq = entry.indexOf("=");
+    if (eq === -1) continue;
+    const name = entry.slice(0, eq).trim();
+    const glob = entry.slice(eq + 1).trim();
+    if (name && glob) depMap.set(name, glob);
+  }
+
+  if (depMap.size === 0) return { checks, skipped: [] };
+
+  const kept: string[] = [];
+  const skipped: { check: string; glob: string }[] = [];
+  for (const check of checks) {
+    const glob = depMap.get(check);
+    if (glob === undefined) {
+      kept.push(check);
+      continue;
+    }
+    const re = globToRegex(glob);
+    if (prFiles.some((f) => re.test(f))) {
+      kept.push(check);
+    } else {
+      skipped.push({ check, glob });
+    }
+  }
+  return { checks: kept, skipped };
+}
+
+/**
+ * Converts a simple glob (supports `**`, `*`, `?`) to a RegExp anchored
+ * to the full string.
+ */
+function globToRegex(glob: string): RegExp {
+  let p = "";
+  let i = 0;
+  while (i < glob.length) {
+    if (glob.startsWith("**", i)) {
+      p += ".*";
+      i += 2;
+    } else if (glob[i] === "*") {
+      p += "[^/]*";
+      i += 1;
+    } else if (glob[i] === "?") {
+      p += ".";
+      i += 1;
+    } else {
+      const ch = glob[i];
+      p += ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      i += 1;
+    }
+  }
+  return new RegExp(`^${p}$`);
+}
+
 async function evaluate(
   repo: string,
   pr: number,
@@ -394,6 +462,7 @@ async function evaluate(
   sensitivePathPatterns: string[],
   safePathGlobs: string[],
   requiredChecks: string[],
+  requiredChecksPathDeps: string[],
 ): Promise<void> {
   // ops#190 B1 misconfiguration tripwire (loud, non-fatal): 'code-fix' enabled with
   // no safe_path_globs is a VALID but INERT configuration (allowlist-primary,
@@ -600,7 +669,18 @@ async function evaluate(
   // skip allowlist sanctions it elsewhere, NEUTRAL is not SUCCESS, and an EMPTY
   // required_checks list fails closed (the class can never merge without one).
   if (prClass === "code-fix") {
-    const namedChecks = requiredChecksSatisfied(prJson.statusCheckRollup, requiredChecks);
+    const effectiveChecks = filterRequiredChecksByPathDeps(
+      requiredChecks,
+      requiredChecksPathDeps,
+      prJson.files.map((f: { path: string }) => f.path),
+    );
+    if (effectiveChecks.skipped.length > 0) {
+      console.log(
+        `[info] pr-automerge-gate ${repo}#${pr}: path-dependency skips: ` +
+          effectiveChecks.skipped.map((s) => `'${s.check}' (no file matches ${s.glob})`).join("; "),
+      );
+    }
+    const namedChecks = requiredChecksSatisfied(prJson.statusCheckRollup, effectiveChecks.checks);
     if (!namedChecks.ok) {
       console.log(
         `[wait] pr-automerge-gate ${repo}#${pr}: named-checks leg failed (review NOT invoked — no spend): ` +
@@ -1519,7 +1599,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
  * misconfiguration/bug worth a red CI run), not swallowed into a silent "wait".
  */
 async function main(): Promise<void> {
-  const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, trainReady } = parseArgs(process.argv.slice(2));
+  const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps, trainReady } = parseArgs(process.argv.slice(2));
   // ops#190 rung A2: `--train-ready` routes to the A-side label-authority gate.
   // `evaluateTrainReady` NEVER throws (its wrapper is the fail-closed catch-all —
   // every outcome, including unexpected errors, resolves to a refusal with its own
@@ -1536,7 +1616,7 @@ async function main(): Promise<void> {
     return;
   }
   try {
-    await evaluate(repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks);
+    await evaluate(repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.log(
