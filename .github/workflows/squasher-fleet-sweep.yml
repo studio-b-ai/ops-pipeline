@@ -159,39 +159,27 @@ jobs:
             sq=$(jq -c -n --argjson a "$sq" --argjson b "$fi_" '$a + $b | unique')
             # `box` is Kevin's one human key (label-authority.ts; RULED 2026-09-15 01:1xZ, no alias since
             # 05:5xZ: "no more train ready, no queued ... should be picked up by the cron in any repo").
-            # It is THIS sweep's to merge in every repo — the registry's legacy `train` field no longer
-            # gates it. One exception, because another cron owns the merge and observes the deploy:
-            # studio-b-ai/studiob (the restart train, inside the after-hours window — restart-train.ts).
+            # It is THIS sweep's to merge in every repo except:
+            #   1. studio-b-ai/studiob — the restart train (heritage-restart-train.yml) owns the merge + deploy observe
+            #   2. door:restart repos (2026-09-15 stint #361 L2D-12 — one PR, one door): the `door` field
+            #      in squasher-fleet.json names which train owns the repo's `box` merge authority.
+            #      door:restart repos (currently client-asthetik) route through the restart train's
+            #      spacing law — a fleet merge would bypass it (client-asthetik#392 merged outside
+            #      the restart train's spacing law).
+            door=$(jq -r '.door // "fleet"' <<<"$repo_json")
             owns_box=true
-            if [ "$repo" = "studio-b-ai/studiob" ]; then owns_box=false; fi
+            if [ "$repo" = "studio-b-ai/studiob" ] || [ "$door" = "restart" ]; then owns_box=false; fi
             tr='[]'
             if [ "$owns_box" = "true" ]; then
               tr=$(gh pr list --repo "$repo" --label 'box' --state open --json number --limit 100 --jq '[.[].number]')
-              # client-asthetik: a merge on a PUBLISH path (acuops-build.yml's push trigger set) publishes
-              # to the Heritage production tenant — the restart train owns those inside the ruled Wed-noon
-              # band (#486, restart-train-fire.ts PUBLISH paths). Everything else in the repo is this sweep's.
-              if [ "$repo" = "studio-b-ai/client-asthetik" ] && [ "$tr" != "[]" ]; then
-                kept='[]'
-                for n in $(jq -r '.[]' <<<"$tr"); do
-                  if gh pr view "$n" --repo "$repo" --json files --jq '.files[].path' 2>/dev/null | grep -qE '^(acumatica/Customization/|src/|acumatica/acuops\.yaml$|acumatica/instance-manifest\.json$)'; then
-                    echo "$repo#$n: box on a PUBLISH path — the restart train's to merge (heritage-restart-train.yml, Wed-noon band #486), not this sweep's"
-                  else
-                    kept=$(jq -c --argjson p "$n" '. + [$p]' <<<"$kept")
-                  fi
-                done
-                tr="$kept"
-              fi
             fi
 
-            # ops#294: a pr_number-scoped "evaluate NOW" dispatch against a box PR in
-            # studiob is NOT this sweep's to merge — that repo's box door is the
-            # restart train (heritage-restart-train.yml), and
-            # printing the same blind `box(train)=0` this sweep prints for an
-            # unlabeled PR cost three wrong claims on studiob#655 (#464/#465 class).
-            # Detected ONLY on this exact dispatch shape — never the scheduled cron,
-            # never a train:true repo (tr already answers those) — with one targeted
-            # gh call scoped to the single dispatched PR. Wording contract + tests:
-            # scripts/lib/squasher-fleet-not-the-door.ts.
+            # ops#294 + stint #361: a pr_number-scoped "evaluate NOW" dispatch against a box PR in
+            # a repo this sweep does NOT own (studiob or door:restart) is NOT this sweep's to merge —
+            # printing the same blind `box=0` this sweep prints for an unlabeled PR cost three wrong
+            # claims on studiob#655 (#464/#465 class). Detected ONLY on this exact dispatch shape —
+            # never the scheduled cron, never an owns_box repo — with one targeted gh call scoped to
+            # the single dispatched PR. Wording contract + tests: scripts/lib/squasher-fleet-not-the-door.ts.
             only_pr_carries_ready=false
             if [ -n "${ONLY_PR:-}" ] && [ "$owns_box" != "true" ]; then
               only_pr_carries_ready=$(gh pr view "$ONLY_PR" --repo "$repo" --json labels \
@@ -208,7 +196,9 @@ jobs:
             # enumeration receipt. (Message-clarity only — the exit code below is
             # unaffected either branch; this never fails the sweep.)
             if [ -n "${ONLY_PR:-}" ] && [ "$owns_box" != "true" ] && [ "$only_pr_carries_ready" = "true" ]; then
-              echo "box PR $repo#$ONLY_PR is not this sweep's to merge (the restart train owns studiob) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
+              reason="train:false (studiob)"
+              if [ "$door" = "restart" ]; then reason="door:restart"; fi
+              echo "box PR $repo#$ONLY_PR is not this sweep's to merge (fleet registry $reason) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
             else
               echo "$repo: bugsquasher+fleet-internal=$(jq length <<<"$sq") box=$(jq length <<<"$tr")"
             fi

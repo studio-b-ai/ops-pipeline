@@ -120,10 +120,11 @@
       "train": true
     },
     {
-      "repo": "studio-b-ai/client-asthetik",
-      "enabled_classes": "docs-comment",
-      "sensitive_path_patterns": "^\\.github/actions/",
-      "train": true
+"repo": "studio-b-ai/client-asthetik",
+    "enabled_classes": "docs-comment",
+    "sensitive_path_patterns": "^\\.github/actions/",
+    "train": true,
+    "door": "restart"
     },
     {
       "repo": "studio-b-ai/toto",

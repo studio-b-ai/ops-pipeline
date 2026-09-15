@@ -11,8 +11,8 @@
  * silence (#279).
  *
  * WHICH legs are decisions (the ruling's list: line cap, sensitive path, review
- * finding, missing/red check, class-match miss):
- *   class-match · line-cap · named-checks · review        → ENROLL
+ * finding, missing/red check, class-match miss, merge-ready state):
+ *   class-match · line-cap · named-checks · review · merge-ready  → ENROLL
  * and which are NOT (a wait or a machinery state, never Kevin's call):
  *   ci-rollup (draft / CI pending / cold mergeability cache) · truncation ·
  *   eligibility ("not in the squasher's lane at all") · other (crash bucket)
@@ -45,7 +45,7 @@ export const GATE_ORIGINATOR = "pr-automerge-gate";
 // re-enter the same loop — so a human decides the merge (or fixes the repo's
 // label-triggered CI). Enrolling it is what makes an otherwise-silent permanent stall
 // visible.
-const DECISION_LEGS: ReadonlySet<GateReceiptLeg> = new Set(["class-match", "line-cap", "named-checks", "review", "flap-guard"]);
+const DECISION_LEGS: ReadonlySet<GateReceiptLeg> = new Set(["class-match", "line-cap", "named-checks", "review", "flap-guard", "merge-ready"]);
 
 /** True iff a refusal on this leg is a decision Kevin can make (vs a transient wait). */
 export function isDecisionLeg(leg: GateReceiptLeg): boolean {
