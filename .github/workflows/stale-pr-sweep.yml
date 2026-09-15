@@ -1,0 +1,124 @@
+name: Stale PR Sweep
+
+# studio-b#112 sub-leg c ("stale sweep — Fri 15Z: any PR >7d with no motion -> yellow
+# stale-pr:<repo>#N; CONFLICTING >48h -> the owning seat rebases or closes in its next
+# lap"). Full design lives in scripts/stale-pr-sweep.ts's and
+# scripts/lib/stale-pr-classify.ts's header comments; this workflow only mints the fleet
+# App token (backlog-staleness.yml's pattern, copied verbatim) and runs the worker with it.
+#
+# WHY this exists: the 2026-09-12 org sweep
+# (brain library/product/2026-09-12-merge-train-defect-org-sweep.md §"Also found") located
+# 7 CONFLICTING PRs and several 65-139h-stale PRs across the fleet -- by MANUAL probe only.
+# Nothing in the fleet watched for that class. The release door (squasher-fleet-sweep.yml)
+# only ever looks at PRs carrying `queued`; a PR nobody labels and nobody rebases is
+# invisible to it forever. This is the watcher for exactly that blind spot.
+#
+# Fleet App token required for the SAME reason as backlog-staleness.yml and repo-hygiene.yml:
+# this worker reads OPEN PRS across MULTIPLE org repos (scripts/backlog-managers.yaml's repo
+# list), which a repo-scoped ambient GITHUB_TOKEN structurally cannot do -- it only sees the
+# one repo a workflow runs in. studiob-fleet-bot's installation-level issues:write +
+# metadata:read + pull_requests:read covers every read (PR list, issue list, label list) and
+# every write (open/comment/close the per-repo aggregate issue) this worker performs.
+#
+# FLAGS-ONLY (the classify lib's Law): this leg opens/comments/closes ISSUES and never
+# touches a PR -- it does not rebase, close, or merge one. Rule #97 is therefore not in play:
+# no live customer-facing surface is reachable from here, and the door that DOES merge
+# (squasher-fleet-sweep.yml) is a separate workflow this one cannot invoke.
+
+on:
+  schedule:
+    # Friday 15:00 UTC -- GH Actions cron is UTC-only (Rule #94). Weekly, deliberately:
+    # the thresholds are 7d/48h, so a daily cadence would re-report the same findings six
+    # extra times before any of them could plausibly change (Rule #448 -- the check cadence
+    # must beat the SLA, and a 7-day SLA is beaten comfortably by a weekly sweep).
+    - cron: "0 15 * * 5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real reads throughout (every configured repo's open-PR list + issue list) -- zero issue mutations, preview only"
+        required: false
+        type: boolean
+        default: true
+      now:
+        description: "ISO 8601 timestamp overriding the clock (the #464/#471 plant ladder) -- omit for the real current time"
+        required: false
+        type: string
+        default: ""
+      repos:
+        description: "Comma-separated repo allowlist (e.g. studio-b-ai/ops-pipeline) to scope this run to a subset of backlog-managers.yaml's repos -- omit for the full fleet"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stale-pr-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: "Stale PR sweep -- fleet-internal rot watch (fleet App token)"
+    runs-on: ubuntu-latest
+    # Rule #356: >=3x the estimate. A full-fleet run is 13 repos x (1 PR list + 1 issue
+    # list + at most 1 mutation); observed dry-run wall time is well under a minute.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: "Install deps"
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted UNCONDITIONALLY -- including on a dry run: Rule #376, a dry run that reads
+      # nothing proves nothing, and every read this worker does (per-repo open-PR list,
+      # per-repo issue list) needs real org-wide access the ambient GITHUB_TOKEN
+      # structurally cannot provide.
+      - name: "Mint fleet installation token"
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: "Fail loud if the fleet token did not mint"
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token -- check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
+          exit 1
+
+      # Untrusted free-text workflow_dispatch inputs (`now`, `repos`) travel through env:
+      # as real OS-level env vars and are referenced QUOTED -- never text-substituted into
+      # the script body. GitHub Actions substitutes ${{ }} into the shell source BEFORE the
+      # shell runs, so a dispatcher-supplied value containing `$(...)`, backticks, or `;`
+      # would otherwise execute as shell syntax with the just-minted fleet App token live in
+      # GH_TOKEN. `dry_run` stays a direct ${{ }} substitution because it is boolean-typed --
+      # that expression can only ever produce the literal '--dry-run' or ''. (Identical
+      # reasoning to backlog-staleness.yml, where it was a codex pass-1 P1.)
+      - name: "Run stale-pr sweep"
+        id: run_worker
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          DRY_RUN_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+          NOW_INPUT: ${{ inputs.now }}
+          REPOS_INPUT: ${{ inputs.repos }}
+        run: |
+          args=()
+          if [ -n "$DRY_RUN_FLAG" ]; then args+=("--dry-run"); fi
+          if [ -n "$NOW_INPUT" ]; then args+=(--now "$NOW_INPUT"); fi
+          if [ -n "$REPOS_INPUT" ]; then args+=(--repos "$REPOS_INPUT"); fi
+          npx tsx stale-pr-sweep.ts "${args[@]}"
+
+      # Rule #356: a timeout kill reports "cancelled" SILENTLY unless a SEPARATE if: always()
+      # step names the terminal status explicitly.
+      - name: "Report terminal status"
+        if: always()
+        run: |
+          echo "stale-pr-sweep workflow terminal status: ${{ job.status }} (run_worker outcome: ${{ steps.run_worker.outcome }})"
