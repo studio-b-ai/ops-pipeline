@@ -197,8 +197,9 @@ import {
   type WorkflowJobLike,
   type WorkflowRunLike,
 } from "./lib/restart-train-fire.js";
-import { isRollupClean, evaluateMergeReadiness, type RollupItem } from "./lib/automerge-classify.js";
+import { isRollupClean, evaluateMergeReadiness, actionRequiredRuns, findActionRequiredChecks, type RollupItem, type ActionRunItem } from "./lib/automerge-classify.js";
 import { loadTrainSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
+import { buildFlagCard, type CardLeg } from "./lib/gate-flag-card.js";
 import { parseArgs, parseTarget, CALENDAR_REPO, CALENDAR_ISSUE, type Flags } from "./lib/restart-train-args.js";
 
 const TICKET_REPOS = ["studio-b-ai/studiob", "studio-b-ai/client-asthetik"] as const;
@@ -812,6 +813,70 @@ async function postClickDue(
 }
 
 /**
+ * stint #361 L2D-12: card a queue-head PR whose mergeStateStatus is non-CLEAN because
+ * workflow runs are awaiting approval (action_required). The gate's `merge-ready` card
+ * leg already handles this inside the fleet sweep, but the restart train is the sole door
+ * for `restart-train`-door repos — so it must also card the human-clearable cause rather
+ * than post only a silent HELD line (client-asthetik#372, 45h under the restart train).
+ *
+ * Idempotent per (merge-ready, headSha) — a re-run pastes no duplicate.
+ * Post-guarded by `--post` like every other write this worker makes.
+ */
+function cardActionRequiredFor(
+  ticket: { repo: string; number: number },
+  headSha: string,
+  rollup: RollupItem[],
+  readinessDetail: string,
+  post: boolean,
+): void {
+  let reqs: { name: string; url: string }[] = [];
+  try {
+    const raw = gh(["api", `repos/${ticket.repo}/actions/runs?head_sha=${headSha}&per_page=100`]);
+    const parsed = JSON.parse(raw) as { workflow_runs?: ActionRunItem[] };
+    reqs = actionRequiredRuns(parsed.workflow_runs ?? []).map((r) => ({ name: r.name, url: r.url }));
+  } catch (e) {
+    console.log(`[restart-train] action_required query failed for ${ticket.repo}#${ticket.number}: ${e instanceof Error ? e.message : String(e)} — no card this tick`);
+    return;
+  }
+  const checks = findActionRequiredChecks(rollup);
+  const needs = [
+    ...reqs.map((r) => (r.url ? `${r.name} (approve & run: ${r.url})` : r.name)),
+    ...checks.filter((n) => !reqs.some((r) => r.name === n)),
+  ];
+  if (needs.length === 0) {
+    console.log(`[restart-train] action_required: no awaiting runs or checks found for ${ticket.repo}#${ticket.number} — no card`);
+    return;
+  }
+  const clickLine = `workflow approval pending: ${needs.join(", ")} — open https://github.com/${ticket.repo}/actions and click "Approve and run" on each awaiting run.`;
+  const reasons = [readinessDetail, clickLine];
+  const card = buildFlagCard({ leg: "merge-ready" as CardLeg, headSha, reasons });
+
+  if (!post) {
+    console.log(`[restart-train] action_required: WOULD card ${ticket.repo}#${ticket.number} (--post not set): ${clickLine}`);
+    return;
+  }
+
+  try {
+    const jq = `[.comments[].body | select(contains("${card.marker}"))] | length`;
+    const prior = gh(["pr", "view", String(ticket.number), "--repo", ticket.repo, "--json", "comments", "--jq", jq]).trim();
+    if (prior !== "0") {
+      console.log(`[restart-train] action_required: ${ticket.repo}#${ticket.number} already carded at this head — not reposting`);
+      return;
+    }
+  } catch {
+    console.log(`[restart-train] action_required: card dedup probe failed for ${ticket.repo}#${ticket.number} — posting card (fail-open on dedup)`);
+  }
+
+  try {
+    postAuthorityReceipt(ticket.repo, ticket.number, card.body);
+    gh(["api", "-X", "POST", `repos/${ticket.repo}/issues/${ticket.number}/labels`, "-f", "labels[]=needs-human"]);
+    console.log(`[restart-train] action_required: carded ${ticket.repo}#${ticket.number} (merge-ready, head=${headSha.slice(0, 7)}) — ${clickLine}`);
+  } catch (e) {
+    console.log(`[restart-train] action_required: card post failed for ${ticket.repo}#${ticket.number}: ${(e as Error).message.split("\n")[0]}`);
+  }
+}
+
+/**
  * Rung 1 Leg B (ops-pipeline#172) — only called when `--page` is set (`main()` gates the call
  * itself; without the flag this function never runs, and behavior stays byte-identical to rung
  * 0 / Leg A). Gate order, cheapest/no-I/O first:
@@ -851,6 +916,17 @@ async function maybePage(
   const clearance = windowState(nowIso, ticket.repoClass, anchor.anchorIso);
   if (!clearance.clear) {
     console.log(`[restart-train] --page: queue head ${ticket.repo}#${ticket.number} window not clear yet — ${clearance.reason}`);
+    // 2026-09-15 stint #361 L2D-12: the window law (spacing, business hours, blackout) prevents
+    // merging and CLICK DUE, but it must NOT prevent carding action_required — the human needs
+    // the clickable approval URLs while waiting for the window (client-asthetik#372, 45h outside
+    // business hours with gitleaks approval silent because the CI rollup was never fetched).
+    try {
+      const prJson = await fetchQueueHeadRollup(ticket.repo, ticket.number);
+      await cardActionRequiredFor(ticket, prJson.headRefOid, prJson.statusCheckRollup,
+        `window not clear — ${clearance.reason}`, post);
+    } catch (e) {
+      console.log(`[restart-train] --page: window-blocked card probe failed for ${ticket.repo}#${ticket.number}: ${e instanceof Error ? e.message : String(e)}`);
+    }
     return;
   }
 
@@ -876,6 +952,10 @@ async function maybePage(
     console.log(
       `[restart-train] --page: queue head ${ticket.repo}#${ticket.number} rollup not green (${readiness.detail}) — not paging (Rule #89)`,
     );
+    // 2026-09-15 stint #361 L2D-12: a non-CLEAN mergeStateStatus whose cause is
+    // workflow approval (action_required) is human-clearable — card it so the human
+    // sees the click, not just a silent HELD line (client-asthetik#372, 45h).
+    await cardActionRequiredFor(ticket, prJson.headRefOid, prJson.statusCheckRollup, readiness.detail, post);
     await postHeldIfNotDuped(target, `queue head ${ticket.repo}#${ticket.number} rollup not green — not paging`, post);
     return;
   }

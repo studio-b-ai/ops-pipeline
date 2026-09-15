@@ -147,9 +147,9 @@ describe("pr-automerge-gate.ts actually wires the card at every decision leg", (
 
   it("routes every decision-leg refusal through one carding helper", () => {
     // Call sites: the classification refusal (carries class-match AND line-cap via its
-    // resolved `leg`), the not-enabled-class refusal, named-checks, review — 4 total.
+    // resolved `leg`), the not-enabled-class refusal, named-checks, review, merge-ready (2 sites) — 6 total.
     const calls = src.match(/^\s*postFlagCard\(/gm) ?? [];
-    expect(calls.length).toBeGreaterThanOrEqual(4);
+    expect(calls.length).toBeGreaterThanOrEqual(6);
   });
 
   it("cards the review leg AND at least one pre-review decision leg", () => {
@@ -158,6 +158,7 @@ describe("pr-automerge-gate.ts actually wires the card at every decision leg", (
     expect(src).toMatch(/postFlagCard\(repo, pr, "review",/);
     expect(src).toMatch(/postFlagCard\(repo, pr, "class-match",/);
     expect(src).toMatch(/postFlagCard\(repo, pr, "named-checks",/);
+    expect(src).toMatch(/postFlagCard\(repo, pr, "merge-ready",/);
     // The classification site passes the resolved leg variable (class-match | line-cap).
     expect(src).toMatch(/postFlagCard\(repo, pr, leg,/);
   });

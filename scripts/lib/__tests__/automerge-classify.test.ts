@@ -1,17 +1,19 @@
 import { describe, expect, it } from "vitest";
 import {
+  actionRequiredRuns,
   classifyDiffFile,
   classifyPrDiffClass,
   codeFixRevalidateDeltas,
-  withoutLabelWokenReruns,
   compileSafePathGlob,
   evaluateMergeReadiness,
+  findActionRequiredChecks,
   gateDecision,
   gateDecisionForClass,
   isRollupClean,
   reconcileFileClasses,
   repoClassFor,
   requiredChecksSatisfied,
+  withoutLabelWokenReruns,
   type GateFile,
   type GateInput,
   type GateInputV2,
@@ -1420,5 +1422,91 @@ describe("classifyPrDiffClass — vault-doc class (brain#239 doc 4 leg B, 2026-0
     });
     expect(result.prClass).toBeNull();
     expect(result.reasons.some((r) => r.includes("vault-doc") && r.includes("outside vault allowlist"))).toBe(true);
+  });
+});
+
+// ── actionRequiredRuns + findActionRequiredChecks (stint #361, L2D-12) ──
+
+describe("actionRequiredRuns — the Actions API source, not the rollup", () => {
+  // Positive control: the real #372 runs (two action_required in the check-runs rollup).
+  it("positive control: real client-asthetik#372 shape — two action_required, one is in-progress (skipped)", () => {
+    const runs = actionRequiredRuns([
+      { id: 34330185037, name: "gitleaks", conclusion: "action_required", html_url: "https://github.com/studio-b-ai/client-asthetik/actions/runs/34330185037" },
+      { id: 34330185084, name: "Require review label", conclusion: "action_required", html_url: "https://github.com/studio-b-ai/client-asthetik/actions/runs/34330185084" },
+      { id: 34330185035, name: "Auto-qualifier", conclusion: "skipped" },
+      { id: 34313907056, name: "Require review label", conclusion: "success" },
+    ]);
+    expect(runs).toHaveLength(2);
+    expect(runs.map((r) => r.name)).toEqual(["gitleaks", "Require review label"]);
+    expect(runs[0].url).toBe("https://github.com/studio-b-ai/client-asthetik/actions/runs/34330185037");
+  });
+
+  // Negative controls
+  it("negative: success, failure, cancelled, in_progress — none are action_required", () => {
+    expect(actionRequiredRuns([
+      { id: 1, name: "ci", conclusion: "success" },
+      { id: 2, name: "test", conclusion: "failure" },
+      { id: 3, name: "lint", conclusion: "cancelled" },
+    ])).toHaveLength(0);
+
+    expect(actionRequiredRuns([
+      { id: 4, name: "build", conclusion: null },
+    ])).toHaveLength(0);
+  });
+
+  it("dedup: same-name runs collapse to one keyed by id", () => {
+    const runs = actionRequiredRuns([
+      { id: 100, name: "dup", conclusion: "action_required" },
+      { id: 100, name: "dup", conclusion: "action_required" },
+      { name: "only-name", conclusion: "action_required" },
+      { conclusion: "action_required" },
+    ]);
+    expect(runs).toHaveLength(3);
+    expect(runs[0].key).toBe("id:100");
+    expect(runs[1].key).toBe("name:only-name");
+    expect(runs[2].key).toBe("name:(unnamed run)");
+  });
+
+  it("empty input returns empty", () => {
+    expect(actionRequiredRuns([])).toHaveLength(0);
+  });
+});
+
+describe("findActionRequiredChecks — the check-run rollup source", () => {
+  it("positive: a COMPLETED+ACTION_REQUIRED check-run is found", () => {
+    const found = findActionRequiredChecks([
+      { name: "CI", status: "COMPLETED", conclusion: "ACTION_REQUIRED" },
+      { name: "lint", status: "COMPLETED", conclusion: "SUCCESS" },
+    ]);
+    expect(found).toEqual(["CI"]);
+  });
+
+  it("positive: a legacy status with state=ACTION_REQUIRED is found", () => {
+    const found = findActionRequiredChecks([
+      { context: "travis-ci", state: "ACTION_REQUIRED" },
+    ]);
+    expect(found).toEqual(["travis-ci"]);
+  });
+
+  it("negative: SUCCESS, FAILURE, NEUTRAL, PENDING, null are not found", () => {
+    const found = findActionRequiredChecks([
+      { name: "a", status: "COMPLETED", conclusion: "SUCCESS" },
+      { name: "b", status: "COMPLETED", conclusion: "FAILURE" },
+      { name: "c", status: "COMPLETED", conclusion: "NEUTRAL" },
+      { name: "d", status: "IN_PROGRESS", conclusion: null },
+    ]);
+    expect(found).toHaveLength(0);
+  });
+
+  it("dedup: same-name entries collapse", () => {
+    const found = findActionRequiredChecks([
+      { name: "dup", status: "COMPLETED", conclusion: "ACTION_REQUIRED" },
+      { name: "dup", status: "COMPLETED", conclusion: "SUCCESS" },
+    ]);
+    expect(found).toEqual(["dup"]);
+  });
+
+  it("empty input returns empty", () => {
+    expect(findActionRequiredChecks([])).toHaveLength(0);
   });
 });

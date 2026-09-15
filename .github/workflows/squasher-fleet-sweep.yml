@@ -159,32 +159,20 @@ jobs:
             sq=$(jq -c -n --argjson a "$sq" --argjson b "$fi_" '$a + $b | unique')
             # `box` is Kevin's one human key (label-authority.ts; RULED 2026-09-15 01:1xZ, no alias since
             # 05:5xZ: "no more train ready, no queued ... should be picked up by the cron in any repo").
-            # It is THIS sweep's to merge in every repo — the registry's legacy `train` field no longer
-            # gates it. One exception, because another cron owns the merge and observes the deploy:
-            # studio-b-ai/studiob (the restart train, inside the after-hours window — restart-train.ts).
+            # It is THIS sweep's to merge in every repo EXCEPT those whose door is `restart-train`
+            # (studiob, client-asthetik), where the restart train is the sole door — one repo, one door
+            # (mechanic stint #361, L2D-12). The `door` field in the registry is authoritative; repos
+            # without it default to `fleet-sweep`.
+            door=$(jq -r '.door // "fleet-sweep"' <<<"$repo_json")
             owns_box=true
-            if [ "$repo" = "studio-b-ai/studiob" ]; then owns_box=false; fi
+            if [ "$door" = "restart-train" ]; then owns_box=false; fi
             tr='[]'
             if [ "$owns_box" = "true" ]; then
               tr=$(gh pr list --repo "$repo" --label 'box' --state open --json number --limit 100 --jq '[.[].number]')
-              # client-asthetik: a merge on a PUBLISH path (acuops-build.yml's push trigger set) publishes
-              # to the Heritage production tenant — the restart train owns those inside the ruled Wed-noon
-              # band (#486, restart-train-fire.ts PUBLISH paths). Everything else in the repo is this sweep's.
-              if [ "$repo" = "studio-b-ai/client-asthetik" ] && [ "$tr" != "[]" ]; then
-                kept='[]'
-                for n in $(jq -r '.[]' <<<"$tr"); do
-                  if gh pr view "$n" --repo "$repo" --json files --jq '.files[].path' 2>/dev/null | grep -qE '^(acumatica/Customization/|src/|acumatica/acuops\.yaml$|acumatica/instance-manifest\.json$)'; then
-                    echo "$repo#$n: box on a PUBLISH path — the restart train's to merge (heritage-restart-train.yml, Wed-noon band #486), not this sweep's"
-                  else
-                    kept=$(jq -c --argjson p "$n" '. + [$p]' <<<"$kept")
-                  fi
-                done
-                tr="$kept"
-              fi
             fi
 
-            # ops#294: a pr_number-scoped "evaluate NOW" dispatch against a box PR in
-            # studiob is NOT this sweep's to merge — that repo's box door is the
+            # ops#294: a pr_number-scoped "evaluate NOW" dispatch against a box PR in a
+            # restart-train-door repo is NOT this sweep's to merge — its door is the
             # restart train (heritage-restart-train.yml), and
             # printing the same blind `box(train)=0` this sweep prints for an
             # unlabeled PR cost three wrong claims on studiob#655 (#464/#465 class).
@@ -208,7 +196,7 @@ jobs:
             # enumeration receipt. (Message-clarity only — the exit code below is
             # unaffected either branch; this never fails the sweep.)
             if [ -n "${ONLY_PR:-}" ] && [ "$owns_box" != "true" ] && [ "$only_pr_carries_ready" = "true" ]; then
-              echo "box PR $repo#$ONLY_PR is not this sweep's to merge (the restart train owns studiob) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
+              echo "box PR $repo#$ONLY_PR is not this sweep's to merge (the restart train owns this repo) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
             else
               echo "$repo: bugsquasher+fleet-internal=$(jq length <<<"$sq") box=$(jq length <<<"$tr")"
             fi
@@ -234,10 +222,16 @@ jobs:
           # failure never fails the sweep: it is logged and the registry leg above stands (#465: the count
           # line is the receipt either way).
           registered=$(jq -c '[.repos[].repo]' "$CONFIG")
+          # 2026-09-15 (mechanic stint #361): repos whose door is restart-train are the restart
+          # train's sole responsibility — the org-wide search also skips them (the restart train
+          # enumerates box on those repos every 5 minutes). Build the list from the registry.
+          restart_train_repos=$(jq -c '[.repos[] | select(.door == "restart-train") | .repo]' "$CONFIG")
           orgq='org:studio-b-ai is:pr is:open label:box'
           if [ -n "${ONLY_REPO:-}" ]; then orgq="repo:$ONLY_REPO is:pr is:open label:box"; fi
           if orgbox=$(gh api -X GET search/issues -f q="$orgq" -f per_page=100 --jq '[.items[] | {repo: (.repository_url | sub("^https://api.github.com/repos/"; "")), n: .number}]' 2>/dev/null); then
-            extra=$(jq -c --argjson reg "$registered" '[.[] | select((.repo as $r | $reg | index($r)) == null) | select(.repo != "studio-b-ai/studiob")]' <<<"$orgbox")
+            # Excludes BOTH registered and restart-train-door repos — the registry leg handles the
+            # former, the restart train handles the latter.
+            extra=$(jq -c --argjson reg "$registered" --argjson rtr "$restart_train_repos" '[.[] | select((.repo as $r | $reg | index($r)) == null) | select((.repo as $r | $rtr | index($r)) == null)]' <<<"$orgbox")
             if [ -n "${ONLY_PR:-}" ]; then extra=$(jq -c --argjson p "$ONLY_PR" '[.[] | select(.n == $p)]' <<<"$extra"); fi
             echo "org-wide box (repos outside the registry): $(jq length <<<"$extra") — $(jq -r '[.[] | "\(.repo)#\(.n)"] | join(" ")' <<<"$extra")"
             entries=$(jq -c --argjson x "$extra" '. + ($x | map({repo: .repo, pr_number: (.n | tostring), train_ready: true, enabled_classes: "", sensitive_path_patterns: "", safe_path_globs: "", required_checks: ""}))' <<<"$entries")
