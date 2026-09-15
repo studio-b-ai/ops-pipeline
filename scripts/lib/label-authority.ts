@@ -47,35 +47,50 @@ import { execFileSync } from "node:child_process";
 // ───────────────────────────── label constants ─────────────────────────────
 
 /**
- * ONE operator vocabulary (Kevin's ruled rename, 2026-09-02 ~04:0xZ "go", recorded in the 8/19
- * restart-train canon; live-evidenced the same day when he labeled studiob#631 `reviewed`, removed
- * it 35s later and applied `queued` — "do I need to be applying reviewed or queued? let's get the
- * language correct"): `queued` = merge-and-deploy it · `hold` = park it · `candidate` (was
- * train:candidate) · `underway` (was train:in-flight). The TRAIN pair and the squasher gate's
- * pair are therefore the SAME labels — a `queued` on a client-asthetik ticket is read by the
- * restart train (window law at MERGE); a `queued` on a squasher PR in a fleet repo is read by
- * the squasher gate (window law at DEPLOY for studiob, #480). The constant NAMES stay so every
- * call site reads as before; only the values moved.
+ * ONE human key on GitHub: `box` = merge it (RULED 2026-09-15 ~01:1xZ, "Box is the one key" —
+ * brain library/supplementary-regulations/2026-09-15-box-is-the-one-key.md; Kevin: "this is why
+ * I've told you to consolidate all of that to box as a label"). `box` is `queued` RENAMED, not a
+ * third word: Kevin's sha-pinned, GraphQL-attributed `box` opens every DECISION leg of the door
+ * (class-match · line-cap · named-checks · review); `hold` = park it; `needs-human` is the door's
+ * ask, never a human's word. The floor never lowers: a red CI rollup refuses whatever the label
+ * says (#459). Superseded vocabulary: `queued` (the 2026-09-02 one-vocabulary rename of
+ * train:ready) is read as an ALIAS for the transition week; `reviewed` (the review-leg human
+ * receipt, 2026-09-06 "that works") stays honored as a RECEIPT for the same week — then both
+ * leave the vocabulary (~2026-09-22). The constant NAMES stay so every call site reads as before;
+ * only the values moved.
  */
-export const TRAIN_READY_LABEL = "queued";
+export const TRAIN_READY_LABEL = "box";
 export const TRAIN_HOLD_LABEL = "hold";
 
 /**
- * ops-pipeline#260 leg 4 — the squasher-class pair. Kevin's `queued` on a PR the gate REFUSED
+ * ops-pipeline#260 leg 4 — the squasher-class pair. Kevin's `box` on a PR the gate REFUSED
  * (line cap, sensitive path, review finding, named check) is his word on the decision line: the
  * sweep merges it, sha-pinned to the head he labeled, through the SAME predicate below (roster
  * human, not a bot, no commit after the label). `hold` parks it — hold wins, always.
  */
-export const QUEUED_LABEL = "queued";
+export const QUEUED_LABEL = "box";
 export const HOLD_LABEL = "hold";
+
+/**
+ * The transition-week alias (2026-09-15 ruling, law 4): the old `queued` spelling still
+ * authorizes as the ready label while the fleet is renamed — a LABELED/UNLABELED event for an
+ * alias counts exactly as one for the ready label, and the receipt names the spelling that
+ * actually keyed it. ONE WEEK ONLY: after ~2026-09-22 this list empties and `box` is the only
+ * spelling the door reads. `reviewed` is deliberately NOT here — it was never a train key, only
+ * the review-leg receipt (pr-automerge-gate.ts `humanReviewReceipt`).
+ */
+export const TRAIN_READY_ALIASES: readonly string[] = ["queued"];
 
 /** The (ready, hold) label pair the predicate evaluates. Defaults = the train pair. */
 export interface AuthorityLabelPair {
   ready: string;
   hold: string;
+  /** Transition spellings that still authorize as `ready`. Omit = no aliases (the `reviewed`
+   *  receipt pair reads exactly one spelling). */
+  readyAliases?: readonly string[];
 }
-export const TRAIN_LABEL_PAIR: AuthorityLabelPair = { ready: TRAIN_READY_LABEL, hold: TRAIN_HOLD_LABEL };
-export const QUEUED_LABEL_PAIR: AuthorityLabelPair = { ready: QUEUED_LABEL, hold: HOLD_LABEL };
+export const TRAIN_LABEL_PAIR: AuthorityLabelPair = { ready: TRAIN_READY_LABEL, hold: TRAIN_HOLD_LABEL, readyAliases: TRAIN_READY_ALIASES };
+export const QUEUED_LABEL_PAIR: AuthorityLabelPair = { ready: QUEUED_LABEL, hold: HOLD_LABEL, readyAliases: TRAIN_READY_ALIASES };
 
 // ───────────────────────────── authority roster (doc §3.2) ─────────────────────────────
 
@@ -89,12 +104,14 @@ export const QUEUED_LABEL_PAIR: AuthorityLabelPair = { ready: QUEUED_LABEL, hold
 export const MERGE_AUTHORITY_LOGINS: readonly string[] = ["kbibelhausen"];
 
 /**
- * 2026-09-06 (Kevin, "go" on the Engineer's strictness read): the ONE bot whose `queued`
+ * 2026-09-06 (Kevin, "go" on the Engineer's strictness read): the ONE bot whose ready label
  * counts, and ONLY on a PR that currently carries every label in
  * GATE_AUTHORITY_REQUIRED_LABELS — `candidate` is the gate's own tripwire (applied in the
  * same gate run, after every leg passed) and `bugsquasher` marks the squasher class. Any
  * other bot, or this bot on a PR missing either label, is still refused categorically.
  * `hold` still wins before this is ever consulted; the staleness leg still applies after.
+ * (2026-09-15: the label the bot applies is now `box`; its transition-week `queued`
+ * applications authorize through the alias below.)
  */
 export const GATE_AUTHORITY_LOGIN = "studiob-fleet-bot[bot]";
 export const GATE_AUTHORITY_REQUIRED_LABELS: readonly string[] = ["bugsquasher", "candidate"];
@@ -166,8 +183,8 @@ export interface AuthorityTimelineItem {
 
 export interface AuthorityInput {
   /** The PR's CURRENT label names — a fresh, direct fetch (e.g. `gh pr view --json
-   *  labels`), independent of the timeline. `train:hold`/`train:ready` presence is
-   *  read from HERE, never inferred from the timeline walk. */
+   *  labels`), independent of the timeline. Ready/hold presence is read from HERE,
+   *  never inferred from the timeline walk. */
   currentLabels: string[];
   /** Every relevant timeline item, in server chronological order (oldest first),
    *  each carrying its own `position` (see AuthorityTimelineItem). */
@@ -201,7 +218,7 @@ export type AuthorityRefusalReason =
 
 export type AuthorityVerdict =
   | { authorized: false; reason: AuthorityRefusalReason; detail: string }
-  | { authorized: true; authorizingEvent: { actorLogin: string; position: number } };
+  | { authorized: true; authorizingEvent: { actorLogin: string; position: number; label?: string } };
 
 /**
  * The narrowed shape of an `AuthorityVerdict` specifically for `reason: "stale-label"`
@@ -226,11 +243,11 @@ export interface StaleLabelAuthorityVerdict {
  * produces `input.timeline`/`input.truncated` lives in `fetchAuthorityTimeline`
  * below, kept separate so this core is directly unit-testable):
  *
- *   1. `train:ready` present AND `train:hold` absent in `currentLabels` — hold wins,
- *      ALWAYS, checked before anything else (a PR can be ready-labeled and
- *      simultaneously held; hold must win the reported reason too, not just the
- *      outcome).
- *   2. Walk the timeline's LABELED/UNLABELED events for `train:ready` in order,
+ *   1. The ready label (`box`, or its transition alias) present AND `hold` absent in
+ *      `currentLabels` — hold wins, ALWAYS, checked before anything else (a PR can be
+ *      ready-labeled and simultaneously held; hold must win the reported reason too,
+ *      not just the outcome).
+ *   2. Walk the timeline's LABELED/UNLABELED events for the ready label in order,
  *      tracking who currently "owns" the label (LABELED sets the owner, UNLABELED
  *      clears it) — the survivor at the end of the walk is "the LAST LabeledEvent
  *      with no subsequent UnlabeledEvent for it". That event's `actorLogin`:
@@ -252,6 +269,12 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
   const { currentLabels, timeline, authorityLogins, truncated } = input;
   const READY = input.labels?.ready ?? TRAIN_READY_LABEL;
   const HOLD = input.labels?.hold ?? TRAIN_HOLD_LABEL;
+  // Transition-week aliases (2026-09-15): the train pair reads `queued` as `box` for one
+  // week. An explicit pair WITHOUT readyAliases (the `reviewed` receipt pair) reads exactly
+  // one spelling — aliases never leak onto a receipt that was only ever one word.
+  const ALIASES = input.labels?.readyAliases ?? (input.labels === undefined ? TRAIN_READY_ALIASES : []);
+  const READY_SPELLINGS = [READY, ...ALIASES];
+  const SPELLING_NOTE = ALIASES.length > 0 ? ` (or the transition alias ${ALIASES.map((a) => `\`${a}\``).join(", ")})` : "";
 
   // ── Step 1: label state, read DIRECTLY from currentLabels (no timeline dependency
   // at all) — checked first because it's the cheapest possible check and because
@@ -260,8 +283,8 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
   if (currentLabels.includes(HOLD)) {
     return { authorized: false, reason: "hold-present", detail: `${HOLD} is present on the PR — hold wins, always, regardless of any other leg.` };
   }
-  if (!currentLabels.includes(READY)) {
-    return { authorized: false, reason: "no-ready-label", detail: `${READY} is not present in the PR's current labels.` };
+  if (!READY_SPELLINGS.some((l) => currentLabels.includes(l))) {
+    return { authorized: false, reason: "no-ready-label", detail: `${READY}${SPELLING_NOTE} is not present in the PR's current labels.` };
   }
 
   // ── Timeline data-integrity gate, BEFORE any reasoning about its contents (Rule
@@ -283,17 +306,20 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
     return {
       authorized: false,
       reason: "no-authorizing-event",
-      detail: `${READY} is present on the PR but the timeline returned zero LABELED/UNLABELED/commit/force-push events to attribute it to.`,
+      detail: `${READY}${SPELLING_NOTE} is present on the PR but the timeline returned zero LABELED/UNLABELED/commit/force-push events to attribute it to.`,
     };
   }
 
-  // ── Step 2: walk LABELED/UNLABELED events for train:ready, in the given order, to
-  // find the current surviving applier — "the LAST LabeledEvent with no subsequent
-  // UnlabeledEvent for it". A later relabel by a DIFFERENT actor correctly supersedes
-  // an earlier one; an intervening unlabel-then-relabel is exactly "last event wins".
+  // ── Step 2: walk LABELED/UNLABELED events for the ready label (any spelling), in the
+  // given order, to find the current surviving applier — "the LAST LabeledEvent with no
+  // subsequent UnlabeledEvent for it". A later relabel by a DIFFERENT actor correctly
+  // supersedes an earlier one; an intervening unlabel-then-relabel is exactly "last event
+  // wins". An UNLABELED for ANY tracked spelling clears the owner: real timelines cannot
+  // contain an UnlabeledEvent for a spelling that was never on the PR, so cross-spelling
+  // clears only ever appear in fabricated data — where clearing is the fail-closed answer.
   let currentApplier: AuthorityTimelineItem | null = null;
   for (const item of timeline) {
-    if (item.label !== READY) continue;
+    if (item.label === undefined || !READY_SPELLINGS.includes(item.label)) continue;
     if (item.type === "LABELED") {
       currentApplier = item;
     } else if (item.type === "UNLABELED") {
@@ -302,7 +328,7 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
   }
 
   if (!currentApplier) {
-    // currentLabels says train:ready is applied, but no net-surviving LABELED event
+    // currentLabels says the ready label is applied, but no net-surviving LABELED event
     // for it exists in this (complete, non-truncated, non-empty) timeline — an
     // inconsistent state (e.g. GraphQL replication lag, or the label was set through
     // some path that doesn't emit a timeline event). Fail closed rather than assume
@@ -310,7 +336,7 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
     return {
       authorized: false,
       reason: "no-authorizing-event",
-      detail: `${READY} is present on the PR but no LabeledEvent for it survives to the end of the timeline walk (every LabeledEvent found was superseded by a later UnlabeledEvent).`,
+      detail: `${READY}${SPELLING_NOTE} is present on the PR but no LabeledEvent for it survives to the end of the timeline walk (every LabeledEvent found was superseded by a later UnlabeledEvent).`,
     };
   }
 
@@ -320,11 +346,12 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
   // is refused even if some future misconfiguration puts a bot string inside the
   // roster passed as `authorityLogins` (doc FORBIDDEN: "ANY actorLogin ending in
   // [bot] refused categorically").
-  // 2026-09-06: the ONE exception — the fleet gate's own `queued` on a PR that carries
+  // 2026-09-06: the ONE exception — the fleet gate's own ready label on a PR that carries
   // its `candidate` tripwire AND `bugsquasher` (isGateAuthorizedActor); every other bot,
   // and this bot on any other PR, is still refused here.
-  // The exception is `queued`-ONLY: for any other ready label (the `reviewed` human
-  // receipt, 2026-09-06 "that works") a bot actor is refused as before.
+  // The exception follows the TRAIN pair ONLY (`box`, and its `queued` alias during the
+  // transition week): for any other ready label (the `reviewed` human receipt,
+  // 2026-09-06 "that works") a bot actor is refused as before.
   const gateActor = READY === TRAIN_READY_LABEL && isGateAuthorizedActor(actorLogin, currentLabels);
   if (actorLogin.endsWith("[bot]") && !gateActor) {
     return {
@@ -360,7 +387,7 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
     };
   }
 
-  return { authorized: true, authorizingEvent: { actorLogin, position: currentApplier.position } };
+  return { authorized: true, authorizingEvent: { actorLogin, position: currentApplier.position, label: currentApplier.label } };
 }
 
 // ───────────────────────────── revalidate-drift comparator (doc §3.1 step 7) ─────────────────────────────
@@ -818,13 +845,19 @@ export function codeFixLabelFlap(
 }
 
 /**
- * Formats the write-only receipt posted when a stale `train:ready` label is removed.
+ * Formats the write-only receipt posted when a stale ready label is removed.
  * Pure (no I/O) — `evaluateTrainReady` calls this to build the body, then passes the
  * result to `postAuthorityReceipt`.
+ *
+ * `label` is the re-apply guidance (always the canonical `box` post-2026-09-15 — new
+ * words are never written in the old spelling). `removed` names the spelling(s) the
+ * caller actually stripped, which during the transition week can be the `queued`
+ * alias — the receipt's first line is a claim about what was REMOVED (#412), so it
+ * names that, never the canonical spelling by default.
  */
-export function formatStaleLabelRemovalReceipt(verdict: StaleLabelAuthorityVerdict, headRefOid: string, label: string = TRAIN_READY_LABEL): string {
+export function formatStaleLabelRemovalReceipt(verdict: StaleLabelAuthorityVerdict, headRefOid: string, label: string = TRAIN_READY_LABEL, removed?: string): string {
   return [
-    `**\`${label}\` removed — stale label** (label-authority v2, ops#190 rung A1)`,
+    `**\`${removed ?? label}\` removed — stale label** (label-authority v2, ops#190 rung A1)`,
     "",
     verdict.detail,
     "",

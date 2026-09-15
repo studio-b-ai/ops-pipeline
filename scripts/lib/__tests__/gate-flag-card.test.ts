@@ -20,32 +20,41 @@ const HEAD_302 = "49629dbb6adf7c538b081495139007537d06b26e";
  * `reviewed` on its head and was refused at `class-match`; the card on it promised
  * "a human `reviewed` label on this head lets the next sweep merge", which is only
  * true at the review leg. #412: prose is a claim about scope.
+ *
+ * 2026-09-15 (RULED "Box is the one key"): ONE human key opens every decision leg —
+ * `box`. Every card names the leg that refused and reads "Accept = box" (law 5);
+ * `reviewed` is retired as a key and no card ever offers it again (law 2).
  */
-describe("the card names the door that actually opens THAT leg", () => {
-  it("review leg: `reviewed` is offered (it substitutes for the model's vote)", () => {
+describe("the card names the one key that opens THAT leg", () => {
+  it("review leg: Accept = box — the one key, sha-pinned, overrides every decision leg", () => {
     const s = doorSentenceFor("review");
-    expect(s).toContain("`reviewed`");
-    expect(s).toContain("stands in for the model");
+    expect(s).toContain("Accept = box");
+    expect(s).toContain("`box`");
     expect(s).toContain("`hold` parks it");
+    // Law 2: `reviewed` is never offered as a key again.
+    expect(s).not.toContain("`reviewed`");
+    expect(s).not.toContain("Accept = reviewed");
   });
 
   it.each(["class-match", "line-cap", "named-checks"] as const)(
-    "%s leg: the card says `reviewed` does NOT clear it, and names `queued` instead",
+    "%s leg: the card names the leg, reads Accept = box, and never offers `reviewed`",
     (leg) => {
       const s = doorSentenceFor(leg);
-      // The NEGATIVE control for this instrument (#322): the wrong-door promise must be
-      // absent as a promise. `reviewed` may only appear inside the explicit denial.
-      expect(s).toContain("does NOT clear it");
-      expect(s).toContain("`queued`");
-      expect(s).not.toContain("lets the next sweep merge");
+      expect(s).toContain(`**${leg}** leg`);
+      expect(s).toContain("Accept = box");
+      expect(s).toContain("`box` label from a merge-authorized human");
       expect(s).toContain("`hold` parks it");
+      // Law 2 negative control (#322): the retired key is absent as a promise.
+      expect(s).not.toContain("`reviewed`");
+      expect(s).not.toContain("Accept = reviewed");
     },
   );
 
-  it("no non-review card ever promises the reviewed door", () => {
-    for (const leg of ["class-match", "line-cap", "named-checks"] as const) {
+  it("no card of any leg ever promises the retired reviewed door", () => {
+    for (const leg of ["review", "class-match", "line-cap", "named-checks"] as const) {
       const { body } = buildFlagCard({ leg, headSha: "a".repeat(40), reasons: ["r"] });
       expect(body).not.toMatch(/A human `reviewed` label on this head lets the next sweep merge/);
+      expect(body).not.toContain("Accept = reviewed");
     }
   });
 });
@@ -197,11 +206,11 @@ describe("claude-config-plane#302 refuses at class-match, and the card matches",
     expect(res.reasons.join(" ")).toContain("settings.json");
   });
 
-  it("the card for that refusal names `queued`, never the reviewed door Kevin acted on", () => {
+  it("the card for that refusal reads Accept = box, never the retired reviewed door Kevin acted on", () => {
     const res = classifyPrDiffClass({ files, totalChangedLines: 42, additions: 42, ...registry });
     const card = buildFlagCard({ leg: "class-match", headSha: HEAD_302, reasons: res.reasons });
     expect(card.body).not.toMatch(/`reviewed` label on this head lets the next sweep merge/);
-    expect(card.body).toContain("`queued`");
+    expect(card.body).toContain("Accept = box");
     expect(card.body).toContain("settings.json");
   });
 

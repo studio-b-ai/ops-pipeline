@@ -1,5 +1,5 @@
 /**
- * The `queued` — MERGED receipt's DOOR line (Rule #412 fix, Dispatcher ask
+ * The `box` — MERGED receipt's DOOR line (Rule #412 fix, Dispatcher ask
  * 9/04): the receipt used to hardcode "MERGED by the restart train" regardless
  * of which GitHub Actions workflow actually executed the merge. The RUNG
  * (label-authority v2 A1, ops#190 — WHO is authorized to merge) and the DOOR
@@ -8,7 +8,7 @@
  * the door. Three seats inferred the door from that wrong name on
  * webhook-router#891/#900 (15:24Z) and bolt-wms#2148 (19:17Z) — the real door
  * was squasher-fleet-sweep.yml (hourly ~:16, fleet-wide over every open
- * `queued` PR); heritage-restart-train.yml is the door only for its OWN
+ * ready-labeled PR); heritage-restart-train.yml is the door only for its OWN
  * ticket repos and never calls evaluateTrainReady at all (it has its own,
  * separate fire()/receipt path in restart-train.ts — see that file's header).
  *
@@ -24,7 +24,7 @@
 export type MergeDoor = { workflowFile: string; runId: string; runUrl: string };
 
 const RESTART_TRAIN_WORKFLOW_FILE = "heritage-restart-train.yml";
-const RUNG_NOTE = "label-authority v2, ops#190 rung A1; one vocabulary 9/02";
+const RUNG_NOTE = "label-authority v2, ops#190 rung A1; one key 2026-09-15 (`box`, `queued` was the 9/02 spelling)";
 
 /**
  * Pulls the `<file>` segment out of `GITHUB_WORKFLOW_REF`
@@ -65,12 +65,12 @@ export function mergeDoorFrom(env: NodeJS.ProcessEnv = process.env): MergeDoor |
  */
 export function formatMergeDoorLine(door: MergeDoor | null): string {
   if (!door) {
-    return `**\`queued\` — MERGED** · door: (unknown — not run under Actions) · rung: ${RUNG_NOTE}`;
+    return `**\`box\` — MERGED** · door: (unknown — not run under Actions) · rung: ${RUNG_NOTE}`;
   }
   const title =
     door.workflowFile === RESTART_TRAIN_WORKFLOW_FILE
-      ? "**`queued` — MERGED by the restart train**"
-      : "**`queued` — MERGED**";
+      ? "**`box` — MERGED by the restart train**"
+      : "**`box` — MERGED**";
   return `${title} · door: \`${door.workflowFile}\` [run ${door.runId}](${door.runUrl}) · rung: ${RUNG_NOTE}`;
 }
 
@@ -85,7 +85,7 @@ export type TrainMergeReceiptFacts = {
 };
 
 /**
- * The full `queued` — MERGED receipt body. Pulled out to a pure function (was
+ * The full `box` — MERGED receipt body. Pulled out to a pure function (was
  * inlined in pr-automerge-gate.ts) so the #412 door-line fix is unit-testable
  * without standing up that file's whole `gh`/Anthropic-mocked evaluation path —
  * this is the entire template, byte-for-byte, so a test can assert the door

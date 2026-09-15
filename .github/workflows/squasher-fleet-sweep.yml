@@ -17,11 +17,12 @@ name: Squasher fleet auto-merge sweep
 #
 # Fleet registry: scripts/squasher-fleet.json — per-repo gate inputs migrated
 # verbatim from the retired callers. Enumeration covers `bugsquasher` PRs for every
-# fleet repo and `queued` PRs for repos whose retired caller had a train leg.
+# fleet repo and `box` PRs (plus the transition-week `queued` alias, 2026-09-15
+# "Box is the one key") for repos whose retired caller had a train leg.
 # Gate semantics are UNCHANGED (the gate script is zero-diff — every read/write
 # already flows through its gh() helper and takes --repo explicitly); only the cron
 # residence and the merging token change. Authority is unchanged too: train merges
-# still require a human's GraphQL-attributed `queued` label, and squasher
+# still require a human's GraphQL-attributed ready label, and squasher
 # merges still pass every classification leg.
 #
 # TRIGGER SHAPE mirrors automerge-sweep.yml (ops#23 lessons): scheduled sweep at
@@ -45,7 +46,7 @@ on:
         required: false
         type: string
       pr_number:
-        description: "Optional (requires repo): evaluate ONLY this PR number. The PR must carry `bugsquasher` or `queued` — the label filter is the enumeration."
+        description: "Optional (requires repo): evaluate ONLY this PR number. The PR must carry `bugsquasher` or `box` (or the transition-week `queued` alias) — the label filter is the enumeration."
         required: false
         type: string
 
@@ -72,7 +73,7 @@ jobs:
 
       # ops#327: the ordering step invokes scripts/lib/fleet-sweep-order.ts (the
       # pure-core / I/O-glue split matching squasher-fleet-not-the-door.ts —
-      # `queued` first fleet-wide, per-repo cap, round-robin rotation of the
+      # `box` (train) first fleet-wide, per-repo cap, round-robin rotation of the
       # bugsquasher group; the test suite lives with the function).
       - name: Setup Node
         uses: actions/setup-node@v5
@@ -106,7 +107,7 @@ jobs:
           ONLY_PR: ${{ inputs.pr_number }}
           MAX_FANOUT: "50"   # 9/13: 47 labeled PRs, 20 evaluated → 27 never seen per tick; Principal sitting
           # ops#327: no single repo can crowd more than PER_REPO_CAP entries into
-          # either group (queued, bugsquasher) inside the global fanout — so one
+          # either group (box/train, bugsquasher) inside the global fanout — so one
           # repo's backlog cannot starve the rest. 5 leaves headroom for four
           # fleet repos to each contribute at the cap and still fit under 20.
           PER_REPO_CAP: "5"
@@ -156,23 +157,27 @@ jobs:
             sq=$(jq -c -n --argjson a "$sq" --argjson b "$fi_" '$a + $b | unique')
             tr='[]'
             if [ "$train_flag" = "true" ]; then
-              # `queued` = Kevin's 2026-09-02 one-vocabulary rename of train:ready (scripts/lib/label-authority.ts).
-              tr=$(gh pr list --repo "$repo" --label 'queued' --state open --json number --limit 100 --jq '[.[].number]')
+              # `box` = Kevin's 2026-09-15 one-key rename of `queued` (scripts/lib/label-authority.ts);
+              # the `queued` spelling reads as an ALIAS for the transition week — one list
+              # per spelling, merged unique (gh --label ANDs, so the OR needs two reads).
+              boxl=$(gh pr list --repo "$repo" --label 'box' --state open --json number --limit 100 --jq '[.[].number]')
+              aliasl=$(gh pr list --repo "$repo" --label 'queued' --state open --json number --limit 100 --jq '[.[].number]')
+              tr=$(jq -c -n --argjson a "$boxl" --argjson b "$aliasl" '$a + $b | unique')
             fi
 
-            # ops#294: a pr_number-scoped "evaluate NOW" dispatch against a `queued`
+            # ops#294: a pr_number-scoped "evaluate NOW" dispatch against a ready-labeled
             # PR in a train:false repo is NOT this sweep's to merge — that repo's
-            # `queued` door is the restart train (heritage-restart-train.yml), and
-            # printing the same blind `queued(train)=0` this sweep prints for an
+            # ready-label door is the restart train (heritage-restart-train.yml), and
+            # printing the same blind `box(train)=0` this sweep prints for an
             # unlabeled PR cost three wrong claims on studiob#655 (#464/#465 class).
             # Detected ONLY on this exact dispatch shape — never the scheduled cron,
             # never a train:true repo (tr already answers those) — with one targeted
             # gh call scoped to the single dispatched PR. Wording contract + tests:
             # scripts/lib/squasher-fleet-not-the-door.ts.
-            only_pr_carries_queued=false
+            only_pr_carries_ready=false
             if [ -n "${ONLY_PR:-}" ] && [ "$train_flag" != "true" ]; then
-              only_pr_carries_queued=$(gh pr view "$ONLY_PR" --repo "$repo" --json labels \
-                --jq 'any(.labels[]; .name == "queued")' 2>/dev/null || echo false)
+              only_pr_carries_ready=$(gh pr view "$ONLY_PR" --repo "$repo" --json labels \
+                --jq 'any(.labels[]; .name == "box" or .name == "queued")' 2>/dev/null || echo false)
             fi
 
             if [ -n "${ONLY_PR:-}" ]; then
@@ -184,10 +189,10 @@ jobs:
             # distinguishable from a blind instrument — these lines ARE the
             # enumeration receipt. (Message-clarity only — the exit code below is
             # unaffected either branch; this never fails the sweep.)
-            if [ -n "${ONLY_PR:-}" ] && [ "$train_flag" != "true" ] && [ "$only_pr_carries_queued" = "true" ]; then
-              echo "queued PR $repo#$ONLY_PR is not this sweep's to merge (fleet registry train:false) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
+            if [ -n "${ONLY_PR:-}" ] && [ "$train_flag" != "true" ] && [ "$only_pr_carries_ready" = "true" ]; then
+              echo "box PR $repo#$ONLY_PR is not this sweep's to merge (fleet registry train:false) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
             else
-              echo "$repo: bugsquasher+fleet-internal=$(jq length <<<"$sq") queued(train)=$(jq length <<<"$tr")"
+              echo "$repo: bugsquasher+fleet-internal=$(jq length <<<"$sq") box(train)=$(jq length <<<"$tr")"
             fi
 
             # Train entries pass ONLY train_ready — the squasher inputs are blanked
@@ -209,18 +214,18 @@ jobs:
             echo "No open labeled PRs anywhere in the fleet this cycle (per-repo counts above are the receipt)."
           fi
 
-          # ops#327: order for this cycle — queued (train) FIRST fleet-wide,
+          # ops#327: order for this cycle — box (train) FIRST fleet-wide,
           # per-repo cap inside each group, round-robin rotation of the
           # bugsquasher group by run_number, global fanout applied last. The
           # ordering logic (pure) + tests live in scripts/lib/fleet-sweep-order.ts.
-          # The old "first-20-in-enumeration-order" cap starved queued PRs in a
+          # The old "first-20-in-enumeration-order" cap starved train-labeled PRs in a
           # stable order (issue #327 — webhook-router#915 at entry 28 of 30 was
           # never evaluated); a per-repo cap alone can't fix that without the
-          # queued-first rule (Kevin's door word is never behind bot PRs).
+          # train-first rule (Kevin's door word is never behind bot PRs).
           entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-order.ts "$MAX_FANOUT" "$PER_REPO_CAP" "$RUN_OFFSET")
           ordered_count=$(jq length <<<"$entries")
           if [ "$ordered_count" -lt "$count" ]; then
-            echo "::warning::Fanout applied: $count labeled PRs found, $ordered_count evaluated this cycle (per-repo cap=$PER_REPO_CAP, global cap=$MAX_FANOUT, run_offset=$RUN_OFFSET; #327 — queued-first, round-robin rotation of the bugsquasher group). The hourly cron rotates the tail into subsequent windows."
+            echo "::warning::Fanout applied: $count labeled PRs found, $ordered_count evaluated this cycle (per-repo cap=$PER_REPO_CAP, global cap=$MAX_FANOUT, run_offset=$RUN_OFFSET; #327 — train-first, round-robin rotation of the bugsquasher group). The hourly cron rotates the tail into subsequent windows."
           fi
           echo "entries=$entries" >> "$GITHUB_OUTPUT"
 

@@ -23,11 +23,12 @@
  *
  * The Mechanic fix has three legs, all pure list transformations:
  *
- *   A. `queued` first. Fleet-wide, every train_ready entry sorts before every
- *      bugsquasher entry. Kevin's label is the door word and never queues
+ *   A. `box` (train) first. Fleet-wide, every train_ready entry sorts before every
+ *      bugsquasher entry. Kevin's label is the door word (2026-09-15: `box`;
+ *      `queued` reads as the transition-week alias) and never queues
  *      behind bot PRs — the reusable gate refuses a train-mode invocation
  *      for a repo whose registry entry is train:false, so mis-tagged
- *      `queued` entries are rejected at the gate, not the sort.
+ *      train entries are rejected at the gate, not the sort.
  *   B. Per-repo cap inside the bugsquasher group only. The train group is
  *      exempt from per-repo capping — Kevin's door-word label is never
  *      silently dropped behind a per-repo limit (the global fanout still
@@ -62,7 +63,7 @@ export interface OrderOptions {
   /**
    * Per-repo cap applied INSIDE each group (train, bugsquasher) before the
    * global cap. Applied independently to each group so one repo with a
-   * bugsquasher backlog cannot starve a queued entry from another repo.
+   * bugsquasher backlog cannot starve a train entry from another repo.
    */
   perRepoCap: number;
   /**

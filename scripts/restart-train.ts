@@ -169,6 +169,7 @@ import {
   postAuthorityReceipt,
   formatStaleLabelRemovalReceipt,
   hasAuthoritySnapshotDrifted,
+  TRAIN_READY_ALIASES,
   type AuthoritySnapshot,
   type AuthorityTimelineItem,
   type StaleLabelAuthorityVerdict,
@@ -456,22 +457,35 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
   const tickets: Ticket[] = [];
   const authorityLogins = resolveAuthorityLogins();
   for (const repo of TICKET_REPOS) {
+    // 2026-09-15 rename ("Box is the one key", law 4): enumerate the canonical `box`
+    // AND the transition-week `queued` alias — one list per spelling, merged unique by
+    // PR number (gh --label ANDs multiple flags, so one call cannot OR them). Tonight's
+    // already-applied `queued` labels stay visible to the train for the alias week.
     let prsJson: string;
     try {
-      prsJson = gh([
-        "pr",
-        "list",
-        "--repo",
-        repo,
-        "--label",
-        TRAIN_READY_LABEL,
-        "--state",
-        "open",
-        "--json",
-        "number,headRefOid,labels",
-        "--limit",
-        "50",
-      ]);
+      const lists = [TRAIN_READY_LABEL, ...TRAIN_READY_ALIASES].map((spelling) =>
+        gh([
+          "pr",
+          "list",
+          "--repo",
+          repo,
+          "--label",
+          spelling,
+          "--state",
+          "open",
+          "--json",
+          "number,headRefOid,labels",
+          "--limit",
+          "50",
+        ]),
+      );
+      const seen = new Map<number, { number: number; headRefOid: string; labels: Array<{ name: string }> }>();
+      for (const out of lists) {
+        for (const row of JSON.parse(out) as Array<{ number: number; headRefOid: string; labels: Array<{ name: string }> }>) {
+          if (!seen.has(row.number)) seen.set(row.number, row);
+        }
+      }
+      prsJson = JSON.stringify([...seen.values()]);
     } catch (err) {
       throw classifyReadError(err, `pull_requests:read (${repo} ${TRAIN_READY_LABEL} list)`);
     }
@@ -509,10 +523,14 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
           // required even though the runtime shape is already exactly right.
           const staleVerdict = verdict as StaleLabelAuthorityVerdict;
           if (post) {
-            removeStaleReadyLabel(repo, pr.number);
-            postAuthorityReceipt(repo, pr.number, formatStaleLabelRemovalReceipt(staleVerdict, pr.headRefOid));
+            // Remove EVERY present ready-spelling (2026-09-15 rename): a stale `queued`
+            // alias is as removed as a stale `box` — removing only the new spelling
+            // would leave the old one stale-locked forever.
+            const presentReady = [TRAIN_READY_LABEL, ...TRAIN_READY_ALIASES].filter((l) => currentLabels.includes(l));
+            for (const l of presentReady) removeStaleReadyLabel(repo, pr.number, l);
+            postAuthorityReceipt(repo, pr.number, formatStaleLabelRemovalReceipt(staleVerdict, pr.headRefOid, TRAIN_READY_LABEL, presentReady.join("`, `")));
             console.log(
-              `[restart-train] ${repo}#${pr.number}: stale ${TRAIN_READY_LABEL} removed + receipt posted — ${verdict.detail}`,
+              `[restart-train] ${repo}#${pr.number}: stale ${presentReady.join("+")} removed + receipt posted — ${verdict.detail}`,
             );
           } else {
             console.log(

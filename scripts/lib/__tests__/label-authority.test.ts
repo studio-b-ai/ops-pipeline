@@ -8,6 +8,7 @@ import {
   resolveAuthorityLogins,
   TRAIN_HOLD_LABEL,
   TRAIN_READY_LABEL,
+  TRAIN_READY_ALIASES,
   QUEUED_LABEL,
   HOLD_LABEL,
   QUEUED_LABEL_PAIR,
@@ -127,7 +128,7 @@ describe("evaluateLabelAuthority", () => {
         labels: { ready: "reviewed", hold: TRAIN_HOLD_LABEL },
       }),
     );
-    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1 } });
+    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1, label: "reviewed" } });
   });
 
   it("the fleet bot's `reviewed` never counts — the gate exception is `queued`-only, even with bugsquasher + candidate", () => {
@@ -174,7 +175,7 @@ describe("evaluateLabelAuthority", () => {
         timeline: [commitAt(0), labeledBy(GATE_AUTHORITY_LOGIN, 1)],
       }),
     );
-    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: GATE_AUTHORITY_LOGIN, position: 1 } });
+    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: GATE_AUTHORITY_LOGIN, position: 1, label: TRAIN_READY_LABEL } });
   });
 
   it("still refuses the fleet bot's queued when `candidate` is missing (no gate tripwire)", () => {
@@ -224,7 +225,7 @@ describe("evaluateLabelAuthority", () => {
 
   it("authorizes when train:ready was labeled by a roster actor with no later commit/force-push", () => {
     const verdict = evaluateLabelAuthority(baseAuthorityInput());
-    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1 } });
+    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1, label: TRAIN_READY_LABEL } });
   });
 
   it("refuses a bot actor categorically, even when the bot login is (hypothetically) present in the roster", () => {
@@ -274,7 +275,7 @@ describe("evaluateLabelAuthority", () => {
         timeline: [commitAt(0), labeledBy("kbibelhausen", 1), unlabeledBy("kbibelhausen", 2), labeledBy("kbibelhausen", 3)],
       }),
     );
-    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 3 } });
+    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 3, label: TRAIN_READY_LABEL } });
   });
 
   it("flags stale-label on relabel followed by a commit", () => {
@@ -342,14 +343,14 @@ describe("evaluateLabelAuthority", () => {
         timeline: [labeledBy("kbibelhausen", 0, "bugsquasher"), labeledBy("kbibelhausen", 1, TRAIN_READY_LABEL)],
       }),
     );
-    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1 } });
+    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1, label: TRAIN_READY_LABEL } });
   });
 
   it("ignores multiple commits BEFORE the authorizing label (only a LATER one makes it stale)", () => {
     const verdict = evaluateLabelAuthority(
       baseAuthorityInput({ timeline: [commitAt(0), commitAt(1), forcePushAt(2), labeledBy("kbibelhausen", 3)] }),
     );
-    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 3 } });
+    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 3, label: TRAIN_READY_LABEL } });
   });
 });
 
@@ -365,7 +366,7 @@ describe("evaluateLabelAuthority — the queued/hold pair (ops-pipeline#260 leg 
     });
 
   it("authorizes Kevin's `queued` with no later commit — the same predicate, a different pair", () => {
-    expect(evaluateLabelAuthority(queuedInput())).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1 } });
+    expect(evaluateLabelAuthority(queuedInput())).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1, label: QUEUED_LABEL } });
   });
 
   it("`hold` wins over `queued`, always, and wins the REASON", () => {
@@ -384,12 +385,45 @@ describe("evaluateLabelAuthority — the queued/hold pair (ops-pipeline#260 leg 
     expect(verdict).toMatchObject({ authorized: false, reason: "bot-actor" });
   });
 
-  it("ONE vocabulary (Kevin 2026-09-02): the train pair IS the queued/hold pair — same labels, one predicate", () => {
-    expect(TRAIN_READY_LABEL).toBe("queued");
+  it("ONE vocabulary (2026-09-15 'Box is the one key', law 4): the train pair IS the box/hold pair — `box` is `queued` RENAMED, not a third word", () => {
+    expect(TRAIN_READY_LABEL).toBe("box");
     expect(TRAIN_HOLD_LABEL).toBe("hold");
-    expect({ ready: TRAIN_READY_LABEL, hold: TRAIN_HOLD_LABEL }).toEqual(QUEUED_LABEL_PAIR);
-    // A stale `train:ready` (the OLD name) on a PR is invisible to the predicate — the cutover
-    // re-labels open PRs; anything missed simply never authorizes (fail-closed, never a merge).
+    expect(QUEUED_LABEL).toBe("box");
+    expect({ ready: TRAIN_READY_LABEL, hold: TRAIN_HOLD_LABEL, readyAliases: TRAIN_READY_ALIASES }).toEqual(QUEUED_LABEL_PAIR);
+    // The transition week: the old `queued` spelling still authorizes (the alias), and the
+    // receipt names the spelling that actually keyed it.
+    expect(TRAIN_READY_ALIASES).toEqual(["queued"]);
+    const alias = evaluateLabelAuthority(
+      baseAuthorityInput({ currentLabels: ["queued"], timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "queued")] }),
+    );
+    expect(alias).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1, label: "queued" } });
+    // `hold` still wins over the alias spelling.
+    const aliasHeld = evaluateLabelAuthority(
+      baseAuthorityInput({ currentLabels: ["queued", TRAIN_HOLD_LABEL], timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "queued")] }),
+    );
+    expect(aliasHeld).toMatchObject({ authorized: false, reason: "hold-present" });
+    // A stale `queued` alias (a commit after it) is stale exactly as a stale `box` is.
+    const aliasStale = evaluateLabelAuthority(
+      baseAuthorityInput({ currentLabels: ["queued"], timeline: [labeledBy("kbibelhausen", 0, "queued"), commitAt(1)] }),
+    );
+    expect(aliasStale).toMatchObject({ authorized: false, reason: "stale-label" });
+    // An explicit pair WITHOUT readyAliases (the `reviewed` receipt) reads exactly one
+    // spelling — the alias never leaks onto it: a `queued` on a reviewed-pair read is
+    // no-ready-label, and a `reviewed` is invisible to the train pair.
+    const reviewedPairSeesQueued = evaluateLabelAuthority(
+      baseAuthorityInput({
+        currentLabels: ["queued"],
+        timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "queued")],
+        labels: { ready: "reviewed", hold: TRAIN_HOLD_LABEL },
+      }),
+    );
+    expect(reviewedPairSeesQueued).toMatchObject({ authorized: false, reason: "no-ready-label" });
+    const trainPairSeesReviewed = evaluateLabelAuthority(
+      baseAuthorityInput({ currentLabels: ["reviewed"], timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "reviewed")] }),
+    );
+    expect(trainPairSeesReviewed).toMatchObject({ authorized: false, reason: "no-ready-label" });
+    // A stale `train:ready` (the pre-9/02 name) on a PR is invisible to the predicate — the
+    // cutover re-labels open PRs; anything missed simply never authorizes (fail-closed, never a merge).
     const old = evaluateLabelAuthority(
       baseAuthorityInput({ currentLabels: ["train:ready"], timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "train:ready")] }),
     );
@@ -400,11 +434,16 @@ describe("evaluateLabelAuthority — the queued/hold pair (ops-pipeline#260 leg 
     expect(evaluateLabelAuthority(baseAuthorityInput())).toEqual(evaluateLabelAuthority(baseAuthorityInput({ labels: { ready: TRAIN_READY_LABEL, hold: TRAIN_HOLD_LABEL } })));
   });
 
-  it("formatStaleLabelRemovalReceipt names the label it removed (default = queued, the train's label)", () => {
+  it("formatStaleLabelRemovalReceipt names the label it removed (default = box, the train's label; `removed` names the spelling actually stripped)", () => {
     const verdict: StaleLabelAuthorityVerdict = { authorized: false, reason: "stale-label", detail: "d" };
-    expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL)).toContain("**`queued` removed — stale label**");
-    expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL)).toContain("Re-apply `queued`");
-    expect(formatStaleLabelRemovalReceipt(verdict, "abc")).toContain("**`queued` removed — stale label**");
+    expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL)).toContain("**`box` removed — stale label**");
+    expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL)).toContain("Re-apply `box`");
+    expect(formatStaleLabelRemovalReceipt(verdict, "abc")).toContain("**`box` removed — stale label**");
+    // Transition week: the re-apply guidance is always the canonical `box`, but the first
+    // line names the spelling(s) actually removed — a stale `queued` alias reads as itself.
+    expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL, "queued")).toContain("**`queued` removed — stale label**");
+    expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL, "queued")).toContain("Re-apply `box`");
+    expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL, "box`, `queued")).toContain("**`box`, `queued` removed — stale label**");
   });
 
   it("restart-train-fire's constants agree with label-authority's (two files, one vocabulary — #235)", async () => {
@@ -567,7 +606,7 @@ describe("fetchAuthorityTimeline pagination (bolt-wms#2120 label loop, 2026-09-0
       truncated,
       labels: { ready: "reviewed", hold: TRAIN_HOLD_LABEL },
     });
-    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1 } });
+    expect(verdict).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1, label: "reviewed" } });
   });
 
   it("planted (fail-closed): a timeline deeper than the page bound is still reported truncated and the evaluator REFUSES", () => {
