@@ -394,6 +394,7 @@ async function evaluate(
   sensitivePathPatterns: string[],
   safePathGlobs: string[],
   requiredChecks: string[],
+  checkPathGlobs: string[],
 ): Promise<void> {
   // ops#190 B1 misconfiguration tripwire (loud, non-fatal): 'code-fix' enabled with
   // no safe_path_globs is a VALID but INERT configuration (allowlist-primary,
@@ -600,7 +601,10 @@ async function evaluate(
   // skip allowlist sanctions it elsewhere, NEUTRAL is not SUCCESS, and an EMPTY
   // required_checks list fails closed (the class can never merge without one).
   if (prClass === "code-fix") {
-    const namedChecks = requiredChecksSatisfied(prJson.statusCheckRollup, requiredChecks);
+    const namedChecks = requiredChecksSatisfied(prJson.statusCheckRollup, requiredChecks, {
+      changedFiles: prJson.files.map((f) => f.path),
+      checkPathGlobs,
+    });
     if (!namedChecks.ok) {
       console.log(
         `[wait] pr-automerge-gate ${repo}#${pr}: named-checks leg failed (review NOT invoked — no spend): ` +
@@ -1519,7 +1523,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
  * misconfiguration/bug worth a red CI run), not swallowed into a silent "wait".
  */
 async function main(): Promise<void> {
-  const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, trainReady } = parseArgs(process.argv.slice(2));
+  const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, checkPathGlobs, trainReady } = parseArgs(process.argv.slice(2));
   // ops#190 rung A2: `--train-ready` routes to the A-side label-authority gate.
   // `evaluateTrainReady` NEVER throws (its wrapper is the fail-closed catch-all —
   // every outcome, including unexpected errors, resolves to a refusal with its own
@@ -1536,7 +1540,7 @@ async function main(): Promise<void> {
     return;
   }
   try {
-    await evaluate(repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks);
+    await evaluate(repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, checkPathGlobs);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.log(
