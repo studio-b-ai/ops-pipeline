@@ -87,6 +87,11 @@ on:
         required: false
         type: string
         default: ""
+      required_checks_path_deps:
+        description: "Companion to required_checks: comma-separated '<check name>=<glob>' entries. When a PR touches NO file matching a check's glob, that check is excluded from the named-checks leg (the check could never have triggered). Default empty = all required_checks always apply."
+        required: false
+        type: string
+        default: ""
       train_ready:
         description: "ops#190 rung A2: when true, evaluate the A-side `box` label-authority gate (evaluateTrainReady — human-labeled PRs, GraphQL-attributed authority) instead of the B-side squasher diff-classification gate. The squasher inputs above (enabled_classes / sensitive_path_patterns / safe_path_globs / required_checks) are IGNORED in this mode — the run step passes only --train-ready. Default false: every existing caller keeps exactly its current squasher behavior."
         required: false
@@ -170,6 +175,7 @@ jobs:
           GATE_SENSITIVE_PATH_PATTERNS: ${{ inputs.sensitive_path_patterns }}
           GATE_SAFE_PATH_GLOBS: ${{ inputs.safe_path_globs }}
           GATE_REQUIRED_CHECKS: ${{ inputs.required_checks }}
+          GATE_REQUIRED_CHECKS_PATH_DEPS: ${{ inputs.required_checks_path_deps }}
           GATE_TRAIN_READY: ${{ inputs.train_ready }}
           # ops#260 leg 3 — refusal → Kevin's decision block via webhook-router's
           # enroll door. `vars.` resolves in the CALLER's repo (ops-pipeline).
@@ -221,6 +227,13 @@ jobs:
               for c in "${checks[@]}"; do
                 trimmed="$(echo -n "$c" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
                 [ -n "$trimmed" ] && args+=(--required-check "$trimmed")
+              done
+            fi
+            if [ -n "$GATE_REQUIRED_CHECKS_PATH_DEPS" ]; then
+              IFS=',' read -ra deps <<< "$GATE_REQUIRED_CHECKS_PATH_DEPS"
+              for d in "${deps[@]}"; do
+                trimmed="$(echo -n "$d" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                [ -n "$trimmed" ] && args+=(--required-check-path-dep "$trimmed")
               done
             fi
           fi
