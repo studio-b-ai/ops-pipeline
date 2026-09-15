@@ -496,7 +496,7 @@ async function evaluate(
     return;
   }
 
-  // ── Legs "held" / "queued" (ops-pipeline#260 leg 4): Kevin's word on a decision line. ──
+  // ── Legs "held" / "box" (ops-pipeline#260 leg 4): Kevin's word on a decision line. ──
   // The machinery legs above (OPEN, not draft, mergeStateStatus CLEAN, CI rollup clean,
   // complete file list) are the floor his word never lowers. Below them, `hold` parks
   // the PR — nothing else runs, and its open decision line(s) resolve as held so the
@@ -505,8 +505,8 @@ async function evaluate(
   // after the label), overrides the DECISION-class legs (class-match / line-cap /
   // named-checks / review) and merges sha-pinned. A stale `box` (a push after his
   // word) is stripped with a receipt and the PR falls through to the normal legs,
-  // which re-refuse and re-ask on the NEW head. (2026-09-15 rename: the `queued`
-  // spelling reads as an alias for the transition week — TRAIN_READY_ALIASES.)
+  // which re-refuse and re-ask on the NEW head. (2026-09-15: `queued` and `train:ready` are
+  // retired outright — TRAIN_READY_ALIASES is empty; `box` is the only spelling the door reads.)
   if (labels.includes(HOLD_LABEL)) {
     const detail = `${HOLD_LABEL} is present — parked by Kevin's word; nothing merges while it stays`;
     console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}.`);
@@ -1016,7 +1016,7 @@ export interface TrainReadyOptions {
  *   - "merged"        all legs passed, merged at the evaluated sha, refusal lines resolved.
  *   - "abort-cycle"   `queued` authorized but the cycle could not complete (revalidate
  *                     drift, authority lost mid-cycle, or the merge call failed) — a
- *                     `[gate-receipt] … leg=queued` line, NOT retried this run
+ *                     `[gate-receipt] … leg=box` line, NOT retried this run
  *                     (Rules #109/#161); the next sweep re-evaluates from scratch.
  *   - "fall-through"  `queued` present but not authorizing (stale → stripped with a
  *                     receipt; bot / off-roster / truncated / no event → logged) —
@@ -1102,7 +1102,7 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
     if (hasAuthoritySnapshotDrifted(before, after)) {
       const detail = `queued: PR state changed between evaluation and merge (before: ${JSON.stringify(before)}, after: ${JSON.stringify(after)}) — aborting this cycle, not retrying`;
       console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}`);
-      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "queued", reasons: [detail] }));
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "box", reasons: [detail] }));
       return "abort-cycle";
     }
     const revalidateTimeline = fetchAuthorityTimeline(repo, pr);
@@ -1116,7 +1116,7 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
     if (!revalidateVerdict.authorized) {
       const detail = `queued: fresh authority re-evaluation no longer authorizes (${revalidateVerdict.reason}: ${revalidateVerdict.detail}) — aborting this cycle, not retrying`;
       console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}`);
-      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "queued", reasons: [detail] }));
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "box", reasons: [detail] }));
       return "abort-cycle";
     }
 
@@ -1127,7 +1127,7 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
       const message = err instanceof Error ? err.message : String(err);
       const detail = `queued: every leg passed but the merge call failed (TOCTOU race the SHA pin rejected, or a branch-protection block) — NOT retried this run: ${message}`;
       console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}`);
-      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "queued", reasons: [detail] }));
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "box", reasons: [detail] }));
       return "abort-cycle";
     }
 

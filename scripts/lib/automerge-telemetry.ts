@@ -28,7 +28,7 @@ import type { PrDiffClass } from "./automerge-classify.js";
 /**
  * "candidate" (ops#190 B1): a code-fix in a TRAIN-class repo passed EVERY gate leg
  * but the squasher never merges there — it applied `train:candidate` and handed the
- * merge decision to the human `train:ready` authority. Neither a qualified merge
+ * merge decision to the human `box` authority. Neither a qualified merge
  * nor a miss; monitors treat it as a healthy terminal outcome.
  */
 export type GateReceiptVerdict = "qualified" | "missed" | "candidate";
@@ -66,7 +66,7 @@ export type GateReceiptLeg =
   | "named-checks"
   | "review"
   | "held"
-  | "queued"
+  | "box"
   // 2026-09-06 (codex P1 on the code-fix door): the PR's head moved between the
   // gate's review read and its label writes — nothing written, next run re-evaluates.
   | "head-moved"

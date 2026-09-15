@@ -1,5 +1,5 @@
 /**
- * label-authority.ts — ops#190 rung A1: the `train:ready` label-authority predicate,
+ * label-authority.ts — ops#190 rung A1: the `box` label-authority predicate,
  * GraphQL timeline fetch, and the stale-label removal leg for the "automerge b+A v2"
  * program (docs/plans/2026-08-28-automerge-b-plus-a-v2.md §3.1-3.3).
  *
@@ -53,11 +53,11 @@ import { execFileSync } from "node:child_process";
  * third word: Kevin's sha-pinned, GraphQL-attributed `box` opens every DECISION leg of the door
  * (class-match · line-cap · named-checks · review); `hold` = park it; `needs-human` is the door's
  * ask, never a human's word. The floor never lowers: a red CI rollup refuses whatever the label
- * says (#459). Superseded vocabulary: `queued` (the 2026-09-02 one-vocabulary rename of
- * train:ready) is read as an ALIAS for the transition week; `reviewed` (the review-leg human
- * receipt, 2026-09-06 "that works") stays honored as a RECEIPT for the same week — then both
- * leave the vocabulary (~2026-09-22). The constant NAMES stay so every call site reads as before;
- * only the values moved.
+ * says (#459). Retired vocabulary (Kevin 2026-09-15 05:5xZ: "there should be no more train ready,
+ * no queued ... box ... should be in all repos"): `queued` and `box` are NOT aliases — they
+ * do not authorize, and the labels are deleted from every org repo. `reviewed` stays only as the
+ * review-leg receipt (stock-built), never a key. The constant NAMES stay so every call site reads
+ * as before; only the values moved.
  */
 export const TRAIN_READY_LABEL = "box";
 export const TRAIN_HOLD_LABEL = "hold";
@@ -72,14 +72,14 @@ export const QUEUED_LABEL = "box";
 export const HOLD_LABEL = "hold";
 
 /**
- * The transition-week alias (2026-09-15 ruling, law 4): the old `queued` spelling still
- * authorizes as the ready label while the fleet is renamed — a LABELED/UNLABELED event for an
- * alias counts exactly as one for the ready label, and the receipt names the spelling that
- * actually keyed it. ONE WEEK ONLY: after ~2026-09-22 this list empties and `box` is the only
- * spelling the door reads. `reviewed` is deliberately NOT here — it was never a train key, only
- * the review-leg receipt (pr-automerge-gate.ts `humanReviewReceipt`).
+ * NO aliases. The 01:1xZ ruling allowed `queued` as a transition-week alias; Kevin cut the week
+ * the same night (05:5xZ: "no more train ready, no queued") — `box` is the only spelling the door
+ * reads, in every repo. The plumbing (`readyAliases`) stays so a future rename can ride it; this
+ * list is EMPTY and label-authority.test.ts asserts both the emptiness and that a `queued` or
+ * `box` label reads as no-ready-label. `reviewed` was never a key — only the review-leg
+ * receipt (pr-automerge-gate.ts `humanReviewReceipt`).
  */
-export const TRAIN_READY_ALIASES: readonly string[] = ["queued"];
+export const TRAIN_READY_ALIASES: readonly string[] = [];
 
 /** The (ready, hold) label pair the predicate evaluates. Defaults = the train pair. */
 export interface AuthorityLabelPair {
@@ -300,7 +300,7 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
     };
   }
   if (timeline.length === 0) {
-    // train:ready is present per currentLabels (checked above), yet there is no
+    // the ready label is present per currentLabels (checked above), yet there is no
     // server-attributed event at all to point to as its authorizing LabeledEvent —
     // never trust the label's mere presence without an event trail behind it.
     return {
@@ -670,7 +670,7 @@ export function fetchAuthorityTimeline(
     // `label.name` would silently map to `label: undefined` below, which
     // `evaluateLabelAuthority`'s walk cannot distinguish from "an event for some
     // other, irrelevant label" — it would simply skip a node that might actually
-    // have been an unauthorized relabel of `train:ready` this function failed to
+    // have been an unauthorized relabel of `box` this function failed to
     // parse, leaving an EARLIER (possibly stale) authorized event looking like the
     // surviving authorization. A LABELED node additionally needs a trustworthy
     // `actor.login` — an actor-less LabeledEvent can never correctly pass the
@@ -728,7 +728,7 @@ export function fetchAuthorityTimeline(
 }
 
 /**
- * Removes a stale `train:ready` label (doc §3.1 step 3 / the stale-label removal
+ * Removes a stale `box` label (doc §3.1 step 3 / the stale-label removal
  * leg). Called by `evaluateTrainReady` when `evaluateLabelAuthority` returns
  * `reason: "stale-label"` — never merges, never touches any other label.
  */

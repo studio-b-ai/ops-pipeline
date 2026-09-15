@@ -88,7 +88,7 @@ on:
         type: string
         default: ""
       train_ready:
-        description: "ops#190 rung A2: when true, evaluate the A-side `train:ready` label-authority gate (evaluateTrainReady — human-labeled PRs, GraphQL-attributed authority) instead of the B-side squasher diff-classification gate. The squasher inputs above (enabled_classes / sensitive_path_patterns / safe_path_globs / required_checks) are IGNORED in this mode — the run step passes only --train-ready. Default false: every existing caller keeps exactly its current squasher behavior."
+        description: "ops#190 rung A2: when true, evaluate the A-side `box` label-authority gate (evaluateTrainReady — human-labeled PRs, GraphQL-attributed authority) instead of the B-side squasher diff-classification gate. The squasher inputs above (enabled_classes / sensitive_path_patterns / safe_path_globs / required_checks) are IGNORED in this mode — the run step passes only --train-ready. Default false: every existing caller keeps exactly its current squasher behavior."
         required: false
         type: boolean
         default: false

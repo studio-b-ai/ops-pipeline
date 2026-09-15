@@ -26,7 +26,7 @@
  * on the next `checkHold`-passing tick as the recovery receipt (#358). A real machinery bug (no
  * `transient` label) still holds as today (#161/#165 unchanged).
  *
- *   (1) Leg A kills v1's D1 defect in ticket assembly: `train:ready` authority now comes from
+ *   (1) Leg A kills v1's D1 defect in ticket assembly: `box` authority now comes from
  *       GitHub-attributed GraphQL timeline events (label-authority.ts), never a parseable comment
  *       body, and a STALE label (a push landing after the authorizing label) is stripped +
  *       receipted — with the receipt posted on the TICKET'S OWN PR, not `--target` — rather than
@@ -39,7 +39,7 @@
  *
  * Rung 3's writes on top of rungs 0-1: the squash-merge itself (one-shot, never retried, never
  * `--delete-branch` — #328, always `--match-head-commit`), `train:in-flight` add/remove +
- * `train:ready` removal on the merged PR, START/END/END·FAILED ledger lines on `--target` + the
+ * `box` removal on the merged PR, START/END/END·FAILED ledger lines on `--target` + the
  * PR, machinery issues on studio-b-ai/ops-pipeline (label `restart-train`, #165 auto-reconciled:
  * ANY open issue = the train is locked via checkHold; stuck-observe issues auto-close when
  * observation completes, FAILED/anomaly issues are human-close-only, #161), and — for a
@@ -64,7 +64,7 @@
  *      build's sandbox; the query shape is grounded in Railway's documented pattern and degrades
  *      to "no candidate this run" on any failure, never a crash or a bad PLAN line.
  *   3. client-asthetik#280 comments → parseEndComments (the human "calendar"'s END lines).
- *   4. `train:ready` PRs on studiob + client-asthetik → each evaluated via
+ *   4. `box` PRs on studiob + client-asthetik → each evaluated via
  *      `fetchAuthorityTimeline` + `evaluateLabelAuthority` (label-authority.ts, GraphQL
  *      `timelineItems` — server-attributed, never a comment body). AUTHORIZED builds a `Ticket`
  *      (`labeledAt` = the authorizing LabeledEvent's server `createdAt`; `pinnedHeadSha` = the
@@ -86,7 +86,7 @@
  *   --target <org/repo#n>   Where PLAN/HELD lines post. Default studio-b-ai/ops-pipeline#172.
  *                 NEVER client-asthetik#280 — that is a READ source (the human calendar); this
  *                 worker must not write to it.
- *   --post        Default false. Gates ALL issue-commenting AND the rung 1 stale-`train:ready`
+ *   --post        Default false. Gates ALL issue-commenting AND the rung 1 stale-`box`
  *                 label removal — with `--post` unset, a STALE ticket is logged and excluded but
  *                 its label is left alone (this worker's original read-only posture, preserved
  *                 for tests and local/manual runs). The CTO's first live dispatch (with the fleet
@@ -169,7 +169,6 @@ import {
   postAuthorityReceipt,
   formatStaleLabelRemovalReceipt,
   hasAuthoritySnapshotDrifted,
-  TRAIN_READY_ALIASES,
   type AuthoritySnapshot,
   type AuthorityTimelineItem,
   type StaleLabelAuthorityVerdict,
@@ -438,7 +437,7 @@ async function fetchCalendarComments(): Promise<RestartTrainComment[]> {
 }
 
 /**
- * Builds `Ticket`s from every open `train:ready` PR on the two ticket repos, per-PR authority
+ * Builds `Ticket`s from every open `box` PR on the two ticket repos, per-PR authority
  * decided by `evaluateLabelAuthority` (label-authority.ts) over a GraphQL timeline fetch — never
  * a comment body (v1's D1 defect; see this file's header). `post` gates the STALE leg's mutation
  * (label removal + receipt) exactly like every other write in this worker; the read/log/exclude
@@ -457,13 +456,12 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
   const tickets: Ticket[] = [];
   const authorityLogins = resolveAuthorityLogins();
   for (const repo of TICKET_REPOS) {
-    // 2026-09-15 rename ("Box is the one key", law 4): enumerate the canonical `box`
-    // AND the transition-week `queued` alias — one list per spelling, merged unique by
-    // PR number (gh --label ANDs multiple flags, so one call cannot OR them). Tonight's
-    // already-applied `queued` labels stay visible to the train for the alias week.
+    // 2026-09-15 ("Box is the one key"; 05:5xZ: no alias — `queued`/`box` retired):
+    // enumerate the one spelling, `box`. The per-spelling list shape stays so a future
+    // rename can ride it without touching the merge below.
     let prsJson: string;
     try {
-      const lists = [TRAIN_READY_LABEL, ...TRAIN_READY_ALIASES].map((spelling) =>
+      const lists = [TRAIN_READY_LABEL].map((spelling) =>
         gh([
           "pr",
           "list",
@@ -523,10 +521,9 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
           // required even though the runtime shape is already exactly right.
           const staleVerdict = verdict as StaleLabelAuthorityVerdict;
           if (post) {
-            // Remove EVERY present ready-spelling (2026-09-15 rename): a stale `queued`
-            // alias is as removed as a stale `box` — removing only the new spelling
-            // would leave the old one stale-locked forever.
-            const presentReady = [TRAIN_READY_LABEL, ...TRAIN_READY_ALIASES].filter((l) => currentLabels.includes(l));
+            // Remove every present ready-spelling (one today: `box`; the list shape is kept
+            // so a future rename removes its predecessor too, never stale-locking it).
+            const presentReady = [TRAIN_READY_LABEL].filter((l) => currentLabels.includes(l));
             for (const l of presentReady) removeStaleReadyLabel(repo, pr.number, l);
             postAuthorityReceipt(repo, pr.number, formatStaleLabelRemovalReceipt(staleVerdict, pr.headRefOid, TRAIN_READY_LABEL, presentReady.join("`, `")));
             console.log(
@@ -567,7 +564,7 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
       // Replay clamp BEFORE dependency-token parsing (codex P2b, PR #174 pass 1, still
       // applicable to afterTokens/consolidate): a train:after/consolidate comment posted after
       // `now` did not exist at the replay instant. (Label STATE has no history — a replay sees
-      // today's train:ready set; a documented replay-fidelity limitation, not fixable here.)
+      // today's box set; a documented replay-fidelity limitation, not fixable here.)
       comments = clampCommentsToNow(comments, nowIso);
 
       tickets.push({
@@ -915,7 +912,7 @@ async function maybePage(
  *   - `train:in-flight` label add FAILING is LOUD + a machinery issue — the observe machine
  *     keys off that label, so without it this restart is untracked (degraded-not-wedged: the
  *     anchor still self-advances off the restart-completion facts, but a human must verify).
- *   - `train:ready` removal failing is cosmetic (log only) — the merged PR leaves the open-PR
+ *   - `box` removal failing is cosmetic (log only) — the merged PR leaves the open-PR
  *     list, so fetchTickets never sees it again.
  *   - START receipts are log-on-failure — same reason: a merged PR can't re-fire, so a missed
  *     START line costs one ledger entry, never a duplicate merge.

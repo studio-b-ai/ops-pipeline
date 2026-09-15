@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { formatFleetSweepReceiptLine } from "../squasher-fleet-not-the-door.js";
 
 // ops#294: the fleet sweep's "evaluate NOW" dispatch (repo + pr_number) must not
-// print the same blind `box(train)=0` for a ready-labeled PR in a train:false repo
+// print the same blind `box=0` for a ready-labeled PR in a train:false repo
 // that it prints for a PR carrying no label at all — that repo's door is the
 // restart train, not this sweep. Three cases per Rule #471 (plant the verdict the
 // old behavior did NOT default to, then control both directions the fix must not
@@ -11,7 +11,7 @@ import { formatFleetSweepReceiptLine } from "../squasher-fleet-not-the-door.js";
 // transition-week alias); the receipt line names the new key.
 
 describe("formatFleetSweepReceiptLine (ops#294)", () => {
-  it("planted: pr_number dispatch on a box PR in a train:false repo prints the not-the-door line, not the blind box(train)=0", () => {
+  it("planted: pr_number dispatch on a box PR in a train:false repo prints the not-the-door line, not the blind box=0", () => {
     const line = formatFleetSweepReceiptLine({
       repo: "studio-b-ai/studiob",
       bugsquasherCount: 0,
@@ -22,12 +22,12 @@ describe("formatFleetSweepReceiptLine (ops#294)", () => {
     });
 
     expect(line).toBe(
-      "box PR studio-b-ai/studiob#655 is not this sweep's to merge (fleet registry train:false) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)",
+      "box PR studio-b-ai/studiob#655 is not this sweep's to merge (the restart train owns studiob) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)",
     );
     expect(line).toContain("studio-b-ai/studiob#655");
     expect(line).toContain("heritage-restart-train.yml");
-    expect(line).not.toBe("studio-b-ai/studiob: bugsquasher=0 box(train)=0");
-    expect(line).not.toContain("box(train)=0");
+    expect(line).not.toBe("studio-b-ai/studiob: bugsquasher=0 box=0");
+    expect(line).not.toContain("box=0");
   });
 
   it("control: the same pr_number dispatch shape in a train:true repo is unchanged", () => {
@@ -41,7 +41,7 @@ describe("formatFleetSweepReceiptLine (ops#294)", () => {
       onlyPrCarriesReadyLabel: false,
     });
 
-    expect(line).toBe("studio-b-ai/bolt-wms: bugsquasher=0 box(train)=1");
+    expect(line).toBe("studio-b-ai/bolt-wms: bugsquasher=0 box=1");
   });
 
   it("control: a pr_number dispatch on a PR without the ready label in a train:false repo is unchanged", () => {
@@ -54,7 +54,7 @@ describe("formatFleetSweepReceiptLine (ops#294)", () => {
       onlyPrCarriesReadyLabel: false,
     });
 
-    expect(line).toBe("studio-b-ai/studiob: bugsquasher=2 box(train)=0");
+    expect(line).toBe("studio-b-ai/studiob: bugsquasher=2 box=0");
   });
 
   it("control: the scheduled whole-fleet sweep (no pr_number) is unchanged for a train:false repo, even with a ready-labeled PR present", () => {
@@ -68,6 +68,6 @@ describe("formatFleetSweepReceiptLine (ops#294)", () => {
       onlyPrCarriesReadyLabel: false,
     });
 
-    expect(line).toBe("studio-b-ai/studiob: bugsquasher=0 box(train)=0");
+    expect(line).toBe("studio-b-ai/studiob: bugsquasher=0 box=0");
   });
 });

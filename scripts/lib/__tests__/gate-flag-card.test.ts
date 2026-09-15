@@ -121,7 +121,7 @@ describe("isCardLeg admits exactly the decision legs", () => {
 
   // Machinery refusals are not a human's to clear — carding them would be noise a
   // label cannot answer (the mirror of the #313 defect).
-  it.each(["truncation", "held", "eligibility", "head-moved", "queued", "ci-rollup", "other"])(
+  it.each(["truncation", "held", "eligibility", "head-moved", "box", "ci-rollup", "other"])(
     "%s does NOT earn a card",
     (leg) => {
       expect(isCardLeg(leg)).toBe(false);

@@ -390,23 +390,21 @@ describe("evaluateLabelAuthority — the queued/hold pair (ops-pipeline#260 leg 
     expect(TRAIN_HOLD_LABEL).toBe("hold");
     expect(QUEUED_LABEL).toBe("box");
     expect({ ready: TRAIN_READY_LABEL, hold: TRAIN_HOLD_LABEL, readyAliases: TRAIN_READY_ALIASES }).toEqual(QUEUED_LABEL_PAIR);
-    // The transition week: the old `queued` spelling still authorizes (the alias), and the
-    // receipt names the spelling that actually keyed it.
-    expect(TRAIN_READY_ALIASES).toEqual(["queued"]);
-    const alias = evaluateLabelAuthority(
-      baseAuthorityInput({ currentLabels: ["queued"], timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "queued")] }),
+    // 2026-09-15 05:5xZ (Kevin: "no more train ready, no queued"): NO aliases. A retired spelling,
+    // even Kevin's own sha-pinned label, reads as no ready label at all — the negative control
+    // for "box is the sole key" (#322/#471).
+    expect(TRAIN_READY_ALIASES).toEqual([]);
+    for (const retired of ["queued", "train:ready"]) {
+      const r = evaluateLabelAuthority(
+        baseAuthorityInput({ currentLabels: [retired], timeline: [commitAt(0), labeledBy("kbibelhausen", 1, retired)] }),
+      );
+      expect(r).toMatchObject({ authorized: false, reason: "no-ready-label" });
+    }
+    // The positive control beside it: the same event spelled `box` authorizes.
+    const boxed = evaluateLabelAuthority(
+      baseAuthorityInput({ currentLabels: ["box"], timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "box")] }),
     );
-    expect(alias).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1, label: "queued" } });
-    // `hold` still wins over the alias spelling.
-    const aliasHeld = evaluateLabelAuthority(
-      baseAuthorityInput({ currentLabels: ["queued", TRAIN_HOLD_LABEL], timeline: [commitAt(0), labeledBy("kbibelhausen", 1, "queued")] }),
-    );
-    expect(aliasHeld).toMatchObject({ authorized: false, reason: "hold-present" });
-    // A stale `queued` alias (a commit after it) is stale exactly as a stale `box` is.
-    const aliasStale = evaluateLabelAuthority(
-      baseAuthorityInput({ currentLabels: ["queued"], timeline: [labeledBy("kbibelhausen", 0, "queued"), commitAt(1)] }),
-    );
-    expect(aliasStale).toMatchObject({ authorized: false, reason: "stale-label" });
+    expect(boxed).toEqual({ authorized: true, authorizingEvent: { actorLogin: "kbibelhausen", position: 1, label: "box" } });
     // An explicit pair WITHOUT readyAliases (the `reviewed` receipt) reads exactly one
     // spelling — the alias never leaks onto it: a `queued` on a reviewed-pair read is
     // no-ready-label, and a `reviewed` is invisible to the train pair.
@@ -439,8 +437,8 @@ describe("evaluateLabelAuthority — the queued/hold pair (ops-pipeline#260 leg 
     expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL)).toContain("**`box` removed — stale label**");
     expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL)).toContain("Re-apply `box`");
     expect(formatStaleLabelRemovalReceipt(verdict, "abc")).toContain("**`box` removed — stale label**");
-    // Transition week: the re-apply guidance is always the canonical `box`, but the first
-    // line names the spelling(s) actually removed — a stale `queued` alias reads as itself.
+    // The re-apply guidance is always the canonical `box`; the first line names the
+    // spelling(s) actually removed (the formatter is generic over the removed label).
     expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL, "queued")).toContain("**`queued` removed — stale label**");
     expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL, "queued")).toContain("Re-apply `box`");
     expect(formatStaleLabelRemovalReceipt(verdict, "abc", QUEUED_LABEL, "box`, `queued")).toContain("**`box`, `queued` removed — stale label**");

@@ -11,13 +11,13 @@ name: Heritage Restart Train
 # (Kevin LOCKED option A) + this tracker (ops-pipeline#172).
 #
 # RUNG 0 (dry-run scheduling) computes a clearance anchor + window-law state + an ordered
-# train:ready ticket queue purely from live reads across studio-b-ai/studiob,
+# box ticket queue purely from live reads across studio-b-ai/studiob,
 # studio-b-ai/client-asthetik, and studiob-api's Railway deployments, and posts a `PLAN
 # (dry-run)` line on --target (default studio-b-ai/ops-pipeline#172) every cycle.
 #
 # RUNG 1 (ops-pipeline#172, this build) adds two things on top of rung 0's scheduling, both
 # strictly narrower than a merge and both gated behind --post like everything else this
-# worker writes: (1) Leg A -- train:ready authority now comes from GitHub-attributed GraphQL
+# worker writes: (1) Leg A -- box authority now comes from GitHub-attributed GraphQL
 # timeline events (scripts/lib/label-authority.ts), never a parseable comment body, and a
 # STALE label (a push landing after the authorizing label) is stripped + receipted with a
 # comment on the TICKET'S OWN PR; (2) Leg B, run via the --page flag below (unconditional on
@@ -32,7 +32,7 @@ name: Heritage Restart Train
 # green queue head that clears the SAME gate ladder maybePage() always ran (window CLEAR,
 # nothing in flight, rollup green, label authority intact) is sha-pinned squash-MERGED (one
 # attempt, --match-head-commit, fail-closed on any drift/error -- the worker never retries a
-# merge) instead of paged CLICK DUE, train:ready is consumed, train:in-flight is applied, and
+# merge) instead of paged CLICK DUE, box is consumed, train:in-flight is applied, and
 # the observe state machine watches the restart to `END` / `END · FAILED` (studiob: Railway
 # deployment terminal + /health 200 on the NEW deployment, Rule #208; client-asthetik: the
 # merge-push run's deploy job conclusion). Failures open a `restart-train`-labeled machinery
@@ -107,7 +107,7 @@ jobs:
         run: npm ci || npm install
 
       # Minted unconditionally: every read this worker does (client-asthetik Actions runs +
-      # jobs, #280 comments, train:ready PR lists + their comments, the hold-label check on
+      # jobs, #280 comments, box PR lists + their comments, the hold-label check on
       # --target) needs real org-wide access the ambient GITHUB_TOKEN structurally cannot
       # provide, and posting PLAN/HELD lines needs issues:write on --target's repo.
       - name: "Mint fleet installation token"
