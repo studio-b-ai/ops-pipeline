@@ -91,7 +91,7 @@ const LANE_MANAGERS: Readonly<Record<string, string>> = {
   "studio-b-ai/ops-pipeline": "Mechanic",
   "studio-b-ai/radio": "Mechanic",
   "studio-b-ai/lightsout": "Mechanic",
-  "studio-b-ai/brain": "Dispatcher",
+  "studio-b-ai/power-unit": "Dispatcher",
   "studio-b-ai/toto": "Mechanic",
   "studio-b-ai/client-asthetik": "Mechanic",
 };
