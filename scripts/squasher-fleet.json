@@ -5,7 +5,7 @@
       "repo": "studio-b-ai/bolt-wms",
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
-      "safe_path_globs": "src/**,scripts/**,docs/**",
+      "safe_path_globs": "src/**,hubspot/src/**,client/src/**,scripts/**,docs/**",
       "required_checks": "Client — TypeScript + Build,Server — TypeScript + Tests",
       "train": true
     },
@@ -35,9 +35,9 @@
     },
     {
       "repo": "studio-b-ai/asthetik-portal",
-      "enabled_classes": "docs-comment,ci-infra,test-only",
+      "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "",
-      "safe_path_globs": "src/**",
+      "safe_path_globs": "src/**,scripts/**",
       "required_checks": "build-and-test",
       "train": true
     },
@@ -117,7 +117,9 @@
       "repo": "studio-b-ai/radio",
       "enabled_classes": "docs-comment,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
-      "train": true
+      "train": true,
+      "safe_path_globs": "src/**",
+      "required_checks": "Build & Check"
     },
     {
       "repo": "studio-b-ai/lightsout",
@@ -135,7 +137,7 @@
       "repo": "studio-b-ai/toto",
       "enabled_classes": "docs-comment,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
-      "safe_path_globs": "src/**",
+      "safe_path_globs": "src/**,src-tauri/**,qa/**",
       "required_checks": "qa",
       "train": true
     }
