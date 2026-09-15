@@ -42,7 +42,7 @@
       "train": true
     },
     {
-      "repo": "studio-b-ai/webhook-router",
+      "repo": "studio-b-ai/radio",
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/,(^|/)(auth|credential|secret|token)",
       "safe_path_globs": "src/**,tests/**,scripts/**,docs/**",
@@ -112,12 +112,6 @@
       "safe_path_globs": "*.py",
       "required_checks": "syntax",
       "train": false
-    },
-    {
-      "repo": "studio-b-ai/radio",
-      "enabled_classes": "docs-comment,code-fix",
-      "sensitive_path_patterns": "^\\.github/actions/",
-      "train": true
     },
     {
       "repo": "studio-b-ai/lightsout",
