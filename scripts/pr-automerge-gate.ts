@@ -1193,11 +1193,12 @@ function logTrainGateLine(repo: string, pr: number, outcome: TrainReadyOutcome, 
  *     posted (`removeStaleReadyLabel` + `postAuthorityReceipt`). Never merges.
  *   - "refused": any other fail-closed leg (not merge-ready — draft/closed/behind/CI
  *     rollup not clean — no label, hold present, bot/unauthorized actor,
- *     truncated/empty timeline, an unexpected fetch/API error,
- *     review FLAG, or revalidate drift). No PR comment — matches `evaluate()`'s own
- *     convention of a receipt ONLY on an actionable state transition (merge, or here,
- *     stale-label removal), not on every ordinary "this PR isn't ready yet" cycle.
- *     Telemetry line only.
+ *     truncated/empty timeline, an unexpected fetch/API error, or revalidate drift).
+ *     No PR comment — matches `evaluate()`'s own convention of a receipt ONLY on an
+ *     actionable state transition (merge, or here, stale-label removal), not on every
+ *     ordinary "this PR isn't ready yet" cycle. Telemetry line only.
+ *     Exception: review FLAG posts a blue card + `needs-human` (L2D-02,
+ *     postFlagCard), matching the squasher gate's own review-leg contract at line 651.
  *   - "merge-attempt-failed": every leg passed but the SHA-pinned `mergePr` call itself
  *     threw (head moved between revalidate and merge, or a branch-protection rule
  *     blocked it) — NOT retried in this run (Rules #109/#161), matching `evaluate()`'s
@@ -1406,6 +1407,11 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   if (review.verdict !== "CLEAN") {
     const detail = `independent review verdict ${review.verdict}: ${review.detail}`;
     logTrainGateLine(repo, pr, "refused", detail);
+    // L2D-02: on the train path a refused review FLAG posts a blue card + needs-human,
+    // exactly as the squasher path does at its review leg (line 651). Without this,
+    // the PR sits in rides (invisible on the glass) indefinitely — client-asthetik#391
+    // was refused 0/3 CLEAN in every sweep for 28h, invisible.
+    postFlagCard(repo, pr, "review", prJson.headRefOid, [review.detail]);
     return { outcome: "refused", detail };
   }
 
