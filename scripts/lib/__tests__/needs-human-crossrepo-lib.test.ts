@@ -20,7 +20,7 @@ const ALLOWLIST = new Set([
   "studio-b-ai/bolt-wms",
   "studio-b-ai/studiob",
   "studio-b-ai/studiob-price-sync",
-  "studio-b-ai/webhook-router",
+  "studio-b-ai/radio",
   "studio-b-ai/asthetik-trade-theme",
 ]);
 

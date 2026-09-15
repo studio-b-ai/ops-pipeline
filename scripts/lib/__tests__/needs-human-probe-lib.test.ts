@@ -154,8 +154,8 @@ describe("parseProbeRouting (ops-pipeline#66 machine trailer)", () => {
   });
 
   it("parses NEEDS-KEVIN: yes on a cross-repo trailer", () => {
-    const body = ["ROUTING: cross-repo studio-b-ai/webhook-router", "NEEDS-KEVIN: yes"].join("\n");
-    expect(parseProbeRouting(body)).toEqual({ routing: "cross-repo", target: "studio-b-ai/webhook-router", needsKevin: true });
+    const body = ["ROUTING: cross-repo studio-b-ai/radio", "NEEDS-KEVIN: yes"].join("\n");
+    expect(parseProbeRouting(body)).toEqual({ routing: "cross-repo", target: "studio-b-ai/radio", needsKevin: true });
   });
 
   it("tolerates markdown bold wrapping either or both lines", () => {
