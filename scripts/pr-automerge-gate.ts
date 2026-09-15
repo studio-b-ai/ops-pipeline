@@ -1388,6 +1388,11 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   if (review.verdict !== "CLEAN") {
     const detail = `independent review verdict ${review.verdict}: ${review.detail}`;
     logTrainGateLine(repo, pr, "refused", detail);
+    // 2026-09-15 crew-358 (L2D-02): the squasher path has carded a review FLAG since ops#407/#413, but this train path
+    // returned `refused` with a telemetry line only — no PR comment, no `needs-human` — so a refused `queued` train PR
+    // showed on the glass as a ride with no reason, for as long as it stayed refused (client-asthetik#391: 0/3 CLEAN in
+    // every sweep for 28h, invisible). Same helper, same sha-pinned idempotency; board.py surfaces the label as a blue ask.
+    postFlagCard(repo, pr, "review", prJson.headRefOid, [review.detail]);
     return { outcome: "refused", detail };
   }
 
