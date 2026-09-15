@@ -5,7 +5,7 @@
       "repo": "studio-b-ai/bolt-wms",
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
-      "safe_path_globs": "src/**,hubspot/src/**,client/src/**,scripts/**,docs/**",
+      "safe_path_globs": "src/**,hubspot/src/**,client/src/**,scripts/**,docs/**,vitest.config.ts",
       "required_checks": "Client — TypeScript + Build,Server — TypeScript + Tests",
       "train": true
     },
