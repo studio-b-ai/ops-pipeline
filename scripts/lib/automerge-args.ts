@@ -98,14 +98,16 @@ export function parseArgs(argv: string[]): Args {
   if (!pr || !Number.isFinite(pr) || pr <= 0) throw new Error("--pr <n> is required");
 
   // Mutual exclusion (see the `trainReady` field doc): an invocation naming BOTH
-  // gates is ambiguous — fail loud (#161) instead of picking one and silently
-  // ignoring the other's flags. Presence is what matters, not validity: even
-  // `--enabled-classes docs-comment` (the default value, explicitly passed)
-  // combined with --train-ready signals a confused caller.
-  if (trainReady && (enabledClassesRaw !== undefined || sensitivePathFlagSeen || safePathGlobFlagSeen || requiredCheckFlagSeen)) {
+  // gates with squasher-only configuration is ambiguous — fail loud (#161)
+  // instead of picking one and silently ignoring the other's flags.
+  // --sensitive-path is EXEMPT: the sensitive-path check is on the FLOOR for
+  // BOTH gates (NEW-1, 2026-09-15) — the squasher and train paths each enforce it
+  // independently before their own decision legs.
+  if (trainReady && (enabledClassesRaw !== undefined || safePathGlobFlagSeen || requiredCheckFlagSeen)) {
     throw new Error(
-      "--train-ready is mutually exclusive with --enabled-classes/--sensitive-path/--safe-path-glob/--required-check " +
-        "(A-side label-authority gate vs B-side squasher gate — one invocation evaluates exactly one)",
+      "--train-ready is mutually exclusive with --enabled-classes/--safe-path-glob/--required-check " +
+        "(A-side label-authority gate vs B-side squasher gate — one invocation evaluates exactly one). " +
+        "--sensitive-path is allowed in train mode (NEW-1: sensitive-path check is on the floor for both gates).",
     );
   }
 
