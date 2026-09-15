@@ -1181,7 +1181,38 @@ export async function evaluateTrainReady(repo: string, pr: number, opts: TrainRe
 }
 
 async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainReadyOptions): Promise<TrainReadyResult> {
-  const prJson = fetchPr(repo, pr);
+  let prJson = fetchPr(repo, pr);
+
+  // 2026-09-15 crew-352: the squasher leg has this re-read but the train leg doesn't —
+  // the 01:34Z 2026-09-15 fleet sweep bounced brain#308, brain#309, radio#1036,
+  // radio#1046, and bolt-wms#2270 on mergeStateStatus=UNKNOWN right after sibling merges
+  // recomputed mergeability, all read MERGEABLE/CLEAN minutes later. Same logic: UNKNOWN
+  // is transient; re-read up to 3×20s when CI is clean (GitHub's recompute is seconds).
+  if (prJson.mergeStateStatus === "UNKNOWN") {
+    const unkCiClean = isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo));
+    if (unkCiClean) {
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        execFileSync("sleep", ["20"]);
+        prJson = fetchPr(repo, pr);
+        console.log(
+          `[info] pr-automerge-gate ${repo}#${pr}: mergeStateStatus was UNKNOWN — ` +
+            `re-read ${attempt}/3 after 20s → ${prJson.mergeStateStatus}`,
+        );
+        if (prJson.mergeStateStatus !== "UNKNOWN") break;
+      }
+      if (prJson.mergeStateStatus === "UNKNOWN") {
+        console.log(
+          `[wait] pr-automerge-gate ${repo}#${pr}: mergeStateStatus still UNKNOWN after 3 re-reads (60s total) — ` +
+            `train gate will refuse at the merge-readiness leg below`,
+        );
+      }
+    } else {
+      console.log(
+        `[info] pr-automerge-gate ${repo}#${pr}: mergeStateStatus is UNKNOWN but CI not clean — ` +
+          `skipping re-read (UNKNOWN + !ciClean = unmergeable either way)`,
+      );
+    }
+  }
 
   // ── Cheap structural fast-path (ops#190 A2; scope narrowed in codex pass 2) ──
   // A closed/merged or draft PR refuses immediately — before the timeline fetch and
