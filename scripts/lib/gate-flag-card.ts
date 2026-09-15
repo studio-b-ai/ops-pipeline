@@ -45,9 +45,9 @@
 
 /** The refusal legs that can carry a card. Mirrors gate-enroll's DECISION_LEGS: a
  *  machinery leg (truncation, held, eligibility, head-moved) is not a human's to clear. */
-export type CardLeg = "review" | "class-match" | "line-cap" | "named-checks";
+export type CardLeg = "review" | "class-match" | "line-cap" | "named-checks" | "sensitive-path";
 
-const CARD_LEGS: ReadonlySet<string> = new Set<CardLeg>(["review", "class-match", "line-cap", "named-checks"]);
+const CARD_LEGS: ReadonlySet<string> = new Set<CardLeg>(["review", "class-match", "line-cap", "named-checks", "sensitive-path"]);
 
 /** True when `leg` is a refusal a human label can clear — i.e. one that earns a card. */
 export function isCardLeg(leg: string): leg is CardLeg {
@@ -65,6 +65,13 @@ export function doorSentenceFor(leg: CardLeg): string {
       "_**Accept = box.** A human `box` label on this head lets the next sweep merge " +
       "(sha-pinned, it overrides every decision leg, this one included); `hold` parks it. " +
       "This is a blue card on the glass._"
+    );
+  }
+  if (leg === "sensitive-path") {
+    return (
+      "_This PR touches a **sensitive path** the automerge floor must never cross. " +
+      "Kevin's key (`box`) never lowers the floor — this one needs a human merge by hand. " +
+      "`hold` parks it. This is a blue card on the glass._"
     );
   }
   const what =

@@ -46,12 +46,6 @@ export function parseArgs(argv: string[]): Args {
   let pr: number | undefined;
   let enabledClassesRaw: string | undefined;
   let trainReady = false;
-  // Tracked separately from sensitivePathPatterns.length (codex P2, A2 review pass
-  // 1): a whitespace-only --sensitive-path value is deliberately DROPPED from the
-  // patterns array below, so array length alone would miss that the flag was
-  // PRESENT — and the mutual-exclusion contract with --train-ready is about flag
-  // presence (a confused invocation), not about whether the value survived trimming.
-  let sensitivePathFlagSeen = false;
   const sensitivePathPatterns: string[] = [];
   // Same flag-presence tracking + trim-and-drop rules as --sensitive-path (see that
   // flag's comment below) — both of these are squasher-side configuration, so both
@@ -75,7 +69,6 @@ export function parseArgs(argv: string[]): Args {
       const trimmed = argv[++i]?.trim();
       if (trimmed) requiredChecks.push(trimmed);
     } else if (argv[i] === "--sensitive-path") {
-      sensitivePathFlagSeen = true;
       // Trim before storing (codex P2 finding, 2026-08-02 pass 2): the reusable
       // workflow's caller-facing input is a single comma-separated string
       // (`sensitive_path_patterns: "a,b,c"`) that the workflow's bash step splits
@@ -102,9 +95,12 @@ export function parseArgs(argv: string[]): Args {
   // ignoring the other's flags. Presence is what matters, not validity: even
   // `--enabled-classes docs-comment` (the default value, explicitly passed)
   // combined with --train-ready signals a confused caller.
-  if (trainReady && (enabledClassesRaw !== undefined || sensitivePathFlagSeen || safePathGlobFlagSeen || requiredCheckFlagSeen)) {
+  // 2026-09-15 NEW-1: --sensitive-path is NOW allowed with --train-ready — the
+  // sensitive-path floor check runs in BOTH modes. The exclusion is narrowed to
+  // the squasher-only flags (enabled-classes, safe-path-glob, required-check).
+  if (trainReady && (enabledClassesRaw !== undefined || safePathGlobFlagSeen || requiredCheckFlagSeen)) {
     throw new Error(
-      "--train-ready is mutually exclusive with --enabled-classes/--sensitive-path/--safe-path-glob/--required-check " +
+      "--train-ready is mutually exclusive with --enabled-classes/--safe-path-glob/--required-check " +
         "(A-side label-authority gate vs B-side squasher gate — one invocation evaluates exactly one)",
     );
   }

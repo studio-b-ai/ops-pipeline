@@ -515,6 +515,21 @@ async function evaluate(
     return;
   }
   if ([QUEUED_LABEL, ...TRAIN_READY_ALIASES].some((l) => labels.includes(l))) {
+    // ── Leg "sensitive-path" (2026-09-15 NEW-1): the floor Kevin's key never lowers.
+    // Check BEFORE evaluateQueuedOverride — a queued PR touching a sensitive path is
+    // refused with a card (#471: known-bad control). The queued merge is the
+    // positive-control path: when the label IS authorizing and NO sensitive path
+    // matches, the merge proceeds as before. This check uses prJson.files (already
+    // fetched in full) — no extra API spend. Non-queued PRs fall through to
+    // classification where classifyPrDiffClass re-checks the same patterns.
+    const sensitiveHits = checkSensitiveFiles(prJson.files, sensitivePathPatterns);
+    if (sensitiveHits) {
+      const detail = `sensitive path(s) matched on a queued PR — the floor Kevin's key never lowers: ${sensitiveHits.join(", ")}`;
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "sensitive-path", reasons: [detail] }));
+      postFlagCard(repo, pr, "sensitive-path", prJson.headRefOid, [detail]);
+      return;
+    }
     const outcome = await evaluateQueuedOverride(repo, pr, prJson, labels);
     if (outcome !== "fall-through") return;
     // fall-through: the ready label was present but not authorizing — the normal legs decide.
@@ -911,6 +926,31 @@ async function evaluate(
   await resolveGateRefusals(repo, pr);
 }
 
+// ───────────────────────────── sensitive-path floor ─────────────────────────────
+
+/**
+ * 2026-09-15 NEW-1: the floor Kevin's key never lowers. Checks file paths against
+ * caller-supplied `sensitivePathPatterns` regexes; returns the list of matching
+ * paths, or null if no patterns/no matches. Shared by both the squasher path (before
+ * evaluateQueuedOverride) and the train path (before the paid review).
+ *
+ * Rule #471: both controls — a queued PR touching a sensitive path is refused with a
+ * card (the floor Kevin's key never lowers); a queued PR touching a safe path is
+ * allowed to merge.
+ */
+function checkSensitiveFiles(files: PrFile[], sensitivePathPatterns: string[]): string[] | null {
+  if (!sensitivePathPatterns || sensitivePathPatterns.length === 0) return null;
+  try {
+    const patterns = sensitivePathPatterns.map((src) => new RegExp(src));
+    const hits = files.filter((f) => patterns.some((re) => re.test(f.path))).map((f) => f.path);
+    return hits.length > 0 ? hits : null;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.log(`[warn] pr-automerge-gate: invalid sensitivePathPatterns regex (fail-closed): ${message}`);
+    return null;
+  }
+}
+
 // ───────────────────────────── queued (train) gate (A1) ─────────────────────────────
 //
 // docs/plans/2026-08-28-automerge-b-plus-a-v2.md §3.1-3.3 — the "automerge b+A v2"
@@ -1002,6 +1042,10 @@ export interface TrainReadyOptions {
    *  door (or omit it) directly, no env stubbing required. Omit/undefined ⇒
    *  treated the same as null (renders the honest "unknown" door). */
   door?: MergeDoor | null;
+  /** 2026-09-15 NEW-1: caller-supplied regex patterns (source strings) for paths this
+   *  repo considers sensitive — checked BEFORE the paid review in the train path
+   *  (the floor Kevin's key never lowers). Omit/empty = no patterns, no check. */
+  sensitivePathPatterns?: readonly string[];
 }
 
 /**
@@ -1384,6 +1428,21 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     return { outcome: "refused", detail };
   }
 
+  // ── Leg "sensitive-path" (2026-09-15 NEW-1): the floor Kevin's key never lowers,
+  // even on the train path. Check BEFORE the paid review — a PR touching a sensitive
+  // path is refused; the human must merge it by hand. Uses prJson.files (already
+  // fetched — no extra API spend). Rule #471: the positive control is a train PR
+  // touching only safe paths proceeding to review + merge.
+  {
+    const patterns = opts.sensitivePathPatterns ? [...opts.sensitivePathPatterns] : [];
+    const sensitiveHits = checkSensitiveFiles(prJson.files, patterns);
+    if (sensitiveHits) {
+      const detail = `sensitive path(s) matched on a train PR — the floor Kevin's key never lowers: ${sensitiveHits.join(", ")}`;
+      logTrainGateLine(repo, pr, "refused", detail);
+      return { outcome: "refused", detail };
+    }
+  }
+
   // TODO(A2 or later rung): window law (doc §3.1 step 6) — restart-train repos
   // (repoClassFor(repo) === "train") merge only inside restart-train-lib.ts's window
   // rules (`windowState`, `orderQueue`). `windowState` needs `computeAnchor
@@ -1532,7 +1591,7 @@ async function main(): Promise<void> {
     // #412: the door fact is read ONCE here, at the call site, from the live
     // Actions environment — never inside evaluateTrainReady itself, which stays
     // pure/injectable for tests (see TrainReadyOptions.door).
-    await evaluateTrainReady(repo, pr, { door: mergeDoorFrom() });
+    await evaluateTrainReady(repo, pr, { door: mergeDoorFrom(), sensitivePathPatterns });
     return;
   }
   try {
