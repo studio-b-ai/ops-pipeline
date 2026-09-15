@@ -19,7 +19,7 @@ A GHA cron (`.github/workflows/heritage-restart-train.yml`, every 5 minutes, plu
   06:00–18:00 America/New_York Mon–Fri (mirrors the acuops-deploy.yml business-hours gate) ·
   nothing 05:45–08:15Z (batch blackout) · one ticket in flight at a time · no hold (`hold`
   label on `ops-pipeline#172`, or env `HERITAGE_TRAIN_HOLD=1`).
-- **FIFO queue** — `queued`-labeled PRs across `studiob` + `client-asthetik`, head-pinned at
+- **FIFO queue** — `box`-labeled PRs across `studiob` + `client-asthetik`, head-pinned at
   label time (a push after labeling invalidates the pin); `train:after` reorders;
   `train:consolidate` rides with the ticket ahead of it.
 - Posts `PLAN (dry-run)` lines to `--target` (default `studio-b-ai/ops-pipeline#172` — **never**
@@ -27,14 +27,14 @@ A GHA cron (`.github/workflows/heritage-restart-train.yml`, every 5 minutes, plu
 
 ### Rung 1 Leg A — label authority (kills D1)
 
-`queued` authority no longer comes from parsing a comment's text/timestamp — it comes from
+`box` authority no longer comes from parsing a comment's text/timestamp — it comes from
 GitHub-attributed GraphQL timeline events (`scripts/lib/label-authority.ts`, the `timelineItems`
 query), which the labeler cannot spoof by editing a comment body after the fact:
 
 - AUTHORIZED builds a `Ticket` whose `labeledAt` is the authorizing `LabeledEvent`'s server
   `createdAt`, and whose `pinnedHeadSha` is the head observed at this same fetch (AUTHORIZED
   already certifies no push landed after labeling).
-- STALE (a push landed after the label) strips the `queued` label and posts a write-only
+- STALE (a push landed after the label) strips the `box` label and posts a write-only
   receipt comment **on the ticket's own PR** — never silently excluded like v1's D1 behavior.
 - Any other refusal (bot actor, unauthorized actor, `hold` present, no ready label,
   truncated/empty timeline, a timeline fetch error) excludes the PR for that tick with one log
@@ -69,7 +69,7 @@ them — that capability doesn't exist until rung 3.
   rollup-not-green case — plus the `CLICK DUE` mirror) and, for Leg A's stale-label receipts and
   Leg B's `CLICK DUE`, additionally on the ticket's own PR — never `#280`. HELD lines are
   `--target`-only; they never land on a ticket's own PR.
-- ⚠️ Unlike rung 0 alone, this build DOES touch a PR's labels (strips a stale `queued`, Leg
+- ⚠️ Unlike rung 0 alone, this build DOES touch a PR's labels (strips a stale `box`, Leg
   A) and DOES comment on PRs beyond `--target` (Leg A's stale-label receipts, Leg B's `CLICK
   DUE`) — both strictly narrower than a merge and both gated behind `--post`, same as every other
   write this worker makes.
@@ -124,7 +124,7 @@ them — that capability doesn't exist until rung 3.
 `contents:write`, `checks:read`, `actions:write`, `workflows:write` (plus `issues:write`,
 `metadata:read`) on 2026-08-19 ~21:52Z (Rule #78 — Kevin's UI-only grant). Rung 0 alone only ever
 needed read scopes; this build is the first to actually spend the write scopes — Leg A's stale
-`queued` removal (`pull_requests:write`) and its receipt comment, plus Leg B's `CLICK
+`box` removal (`pull_requests:write`) and its receipt comment, plus Leg B's `CLICK
 DUE`/HELD posts (`issues:write`) — both already covered by the 2026-08-19 grant, so this PR
 requests no new permission. `checks:read` backs Leg B's queue-head rollup check
 (`fetchQueueHeadRollup`). The worker still classifies any `READ_DENIED:<scope>` response

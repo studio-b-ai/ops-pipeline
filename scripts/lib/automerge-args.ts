@@ -31,7 +31,7 @@ export interface Args {
    *  §4.1 move 4 — each named check must be strictly SUCCESS on the head commit).
    *  Empty = the named-checks leg fails closed, so code-fix can never merge. */
   requiredChecks: string[];
-  /** ops#190 rung A2: when true the runner evaluates the A-side `train:ready`
+  /** ops#190 rung A2: when true the runner evaluates the A-side `box`
    *  label-authority gate (`evaluateTrainReady`) instead of the B-side squasher
    *  diff-classification gate. The two gates are structurally separate (doc §3.1 vs
    *  §4) and take disjoint configuration, so `--train-ready` is mutually exclusive

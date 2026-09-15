@@ -37,7 +37,7 @@ describe("evaluateTrainLiveness — ok", () => {
     const result = evalWith({ lastCompletedRunIso: minutesAgo(5), queuedTickets: 3 });
     expect(result.verdict).toBe("ok");
     expect(result.silentMinutes).toBe(5);
-    expect(result.reason).toContain("3 train:ready ticket(s) queued");
+    expect(result.reason).toContain("3 box ticket(s) queued");
     expect(result.reason).toContain("5 min ago");
   });
 
@@ -96,7 +96,7 @@ describe("evaluateTrainLiveness — idle", () => {
     const result = evalWith({ lastCompletedRunIso: minutesAgo(5 * 60), queuedTickets: 0 });
     expect(result.verdict).toBe("idle");
     expect(result.silentMinutes).toBe(5 * 60);
-    expect(result.reason).toContain("0 train:ready ticket(s) queued");
+    expect(result.reason).toContain("0 box ticket(s) queued");
   });
 
   it("flags idle when zero tickets are queued and the train has never completed a run", () => {

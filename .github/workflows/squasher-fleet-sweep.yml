@@ -17,8 +17,10 @@ name: Squasher fleet auto-merge sweep
 #
 # Fleet registry: scripts/squasher-fleet.json — per-repo gate inputs migrated
 # verbatim from the retired callers. Enumeration covers `bugsquasher` PRs for every
-# fleet repo and `box` PRs (plus the transition-week `queued` alias, 2026-09-15
-# "Box is the one key") for repos whose retired caller had a train leg.
+# fleet repo and `box` PRs — Kevin's one human key, no alias (2026-09-15 "Box is the
+# one key"; 05:5xZ: no more train:ready, no queued) — in EVERY repo: every registry
+# repo but studiob (the restart train's), plus an org-wide `label:box` search leg for
+# repos outside the registry.
 # Gate semantics are UNCHANGED (the gate script is zero-diff — every read/write
 # already flows through its gh() helper and takes --repo explicitly); only the cron
 # residence and the merging token change. Authority is unchanged too: train merges
@@ -46,7 +48,7 @@ on:
         required: false
         type: string
       pr_number:
-        description: "Optional (requires repo): evaluate ONLY this PR number. The PR must carry `bugsquasher` or `box` (or the transition-week `queued` alias) — the label filter is the enumeration."
+        description: "Optional (requires repo): evaluate ONLY this PR number. The PR must carry `bugsquasher`, `fleet-internal` or `box` — the label filter is the enumeration. The repo need not be registered: an unregistered org repo is evaluated on `box` only."
         required: false
         type: string
 
@@ -138,8 +140,9 @@ jobs:
           fi
           if [ -n "${ONLY_REPO:-}" ]; then
             if ! jq -e --arg r "$ONLY_REPO" '.repos[] | select(.repo == $r)' "$CONFIG" >/dev/null; then
-              echo "::error::repo '$ONLY_REPO' is not registered in $CONFIG."
-              exit 1
+              # Kevin 2026-09-15 05:5xZ: `box` is picked up by the cron in ANY repo — an unregistered
+              # org repo is evaluated on its box PRs only (the org-wide leg below), never refused here.
+              echo "repo '$ONLY_REPO' is not registered in $CONFIG — box-only evaluation (org-wide leg)."
             fi
           fi
 
@@ -148,26 +151,41 @@ jobs:
             repo=$(jq -r '.repo' <<<"$repo_json")
             if [ -n "${ONLY_REPO:-}" ] && [ "$repo" != "$ONLY_REPO" ]; then continue; fi
 
-            train_flag=$(jq -r '.train' <<<"$repo_json")
             # 2026-09-13 (Kevin "both fixes approved", ops#409): `fleet-internal` PRs are ENUMERATED with bugsquasher — the runner
             # classified them; the gate (GATE_AUTHORITY_CLASSES) decides. Without this line the class existed but was never evaluated
             # (first firing 06:38Z: 6 labeled PRs, 0 evaluated — #464/#465, the predicate is part of the receipt).
             sq=$(gh pr list --repo "$repo" --label bugsquasher --state open --json number --limit 100 --jq '[.[].number]')
             fi_=$(gh pr list --repo "$repo" --label fleet-internal --state open --json number --limit 100 --jq '[.[].number]')
             sq=$(jq -c -n --argjson a "$sq" --argjson b "$fi_" '$a + $b | unique')
+            # `box` is Kevin's one human key (label-authority.ts; RULED 2026-09-15 01:1xZ, no alias since
+            # 05:5xZ: "no more train ready, no queued ... should be picked up by the cron in any repo").
+            # It is THIS sweep's to merge in every repo — the registry's legacy `train` field no longer
+            # gates it. One exception, because another cron owns the merge and observes the deploy:
+            # studio-b-ai/studiob (the restart train, inside the after-hours window — restart-train.ts).
+            owns_box=true
+            if [ "$repo" = "studio-b-ai/studiob" ]; then owns_box=false; fi
             tr='[]'
-            if [ "$train_flag" = "true" ]; then
-              # `box` = Kevin's 2026-09-15 one-key rename of `queued` (scripts/lib/label-authority.ts);
-              # the `queued` spelling reads as an ALIAS for the transition week — one list
-              # per spelling, merged unique (gh --label ANDs, so the OR needs two reads).
-              boxl=$(gh pr list --repo "$repo" --label 'box' --state open --json number --limit 100 --jq '[.[].number]')
-              aliasl=$(gh pr list --repo "$repo" --label 'queued' --state open --json number --limit 100 --jq '[.[].number]')
-              tr=$(jq -c -n --argjson a "$boxl" --argjson b "$aliasl" '$a + $b | unique')
+            if [ "$owns_box" = "true" ]; then
+              tr=$(gh pr list --repo "$repo" --label 'box' --state open --json number --limit 100 --jq '[.[].number]')
+              # client-asthetik: a merge on a PUBLISH path (acuops-build.yml's push trigger set) publishes
+              # to the Heritage production tenant — the restart train owns those inside the ruled Wed-noon
+              # band (#486, restart-train-fire.ts PUBLISH paths). Everything else in the repo is this sweep's.
+              if [ "$repo" = "studio-b-ai/client-asthetik" ] && [ "$tr" != "[]" ]; then
+                kept='[]'
+                for n in $(jq -r '.[]' <<<"$tr"); do
+                  if gh pr view "$n" --repo "$repo" --json files --jq '.files[].path' 2>/dev/null | grep -qE '^(acumatica/Customization/|src/|acumatica/acuops\.yaml$|acumatica/instance-manifest\.json$)'; then
+                    echo "$repo#$n: box on a PUBLISH path — the restart train's to merge (heritage-restart-train.yml, Wed-noon band #486), not this sweep's"
+                  else
+                    kept=$(jq -c --argjson p "$n" '. + [$p]' <<<"$kept")
+                  fi
+                done
+                tr="$kept"
+              fi
             fi
 
-            # ops#294: a pr_number-scoped "evaluate NOW" dispatch against a ready-labeled
-            # PR in a train:false repo is NOT this sweep's to merge — that repo's
-            # ready-label door is the restart train (heritage-restart-train.yml), and
+            # ops#294: a pr_number-scoped "evaluate NOW" dispatch against a box PR in
+            # studiob is NOT this sweep's to merge — that repo's box door is the
+            # restart train (heritage-restart-train.yml), and
             # printing the same blind `box(train)=0` this sweep prints for an
             # unlabeled PR cost three wrong claims on studiob#655 (#464/#465 class).
             # Detected ONLY on this exact dispatch shape — never the scheduled cron,
@@ -175,9 +193,9 @@ jobs:
             # gh call scoped to the single dispatched PR. Wording contract + tests:
             # scripts/lib/squasher-fleet-not-the-door.ts.
             only_pr_carries_ready=false
-            if [ -n "${ONLY_PR:-}" ] && [ "$train_flag" != "true" ]; then
+            if [ -n "${ONLY_PR:-}" ] && [ "$owns_box" != "true" ]; then
               only_pr_carries_ready=$(gh pr view "$ONLY_PR" --repo "$repo" --json labels \
-                --jq 'any(.labels[]; .name == "box" or .name == "queued")' 2>/dev/null || echo false)
+                --jq 'any(.labels[]; .name == "box")' 2>/dev/null || echo false)
             fi
 
             if [ -n "${ONLY_PR:-}" ]; then
@@ -189,10 +207,10 @@ jobs:
             # distinguishable from a blind instrument — these lines ARE the
             # enumeration receipt. (Message-clarity only — the exit code below is
             # unaffected either branch; this never fails the sweep.)
-            if [ -n "${ONLY_PR:-}" ] && [ "$train_flag" != "true" ] && [ "$only_pr_carries_ready" = "true" ]; then
-              echo "box PR $repo#$ONLY_PR is not this sweep's to merge (fleet registry train:false) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
+            if [ -n "${ONLY_PR:-}" ] && [ "$owns_box" != "true" ] && [ "$only_pr_carries_ready" = "true" ]; then
+              echo "box PR $repo#$ONLY_PR is not this sweep's to merge (the restart train owns studiob) — its door is the restart train: dispatch heritage-restart-train.yml (workflow_dispatch, dry_run=false)"
             else
-              echo "$repo: bugsquasher+fleet-internal=$(jq length <<<"$sq") box(train)=$(jq length <<<"$tr")"
+              echo "$repo: bugsquasher+fleet-internal=$(jq length <<<"$sq") box=$(jq length <<<"$tr")"
             fi
 
             # Train entries pass ONLY train_ready — the squasher inputs are blanked
@@ -208,6 +226,24 @@ jobs:
                               enabled_classes: "", sensitive_path_patterns: "",
                               safe_path_globs: "", required_checks: ""}))' <<<"$entries")
           done < <(jq -c '.repos[]' "$CONFIG")
+
+          # Kevin 2026-09-15 05:5xZ: "box ... should be picked up by the cron in any repo." Repos outside the
+          # registry get a box-only leg: ONE org search (not 58 per-repo lists; the fleet App is installed on
+          # every org repo, repository_selection=all), entries shaped like the box entries above (blank
+          # squasher inputs — box overrides the decision legs; the CI-rollup floor still applies). A search
+          # failure never fails the sweep: it is logged and the registry leg above stands (#465: the count
+          # line is the receipt either way).
+          registered=$(jq -c '[.repos[].repo]' "$CONFIG")
+          orgq='org:studio-b-ai is:pr is:open label:box'
+          if [ -n "${ONLY_REPO:-}" ]; then orgq="repo:$ONLY_REPO is:pr is:open label:box"; fi
+          if orgbox=$(gh api -X GET search/issues -f q="$orgq" -f per_page=100 --jq '[.items[] | {repo: (.repository_url | sub("^https://api.github.com/repos/"; "")), n: .number}]' 2>/dev/null); then
+            extra=$(jq -c --argjson reg "$registered" '[.[] | select((.repo as $r | $reg | index($r)) == null) | select(.repo != "studio-b-ai/studiob")]' <<<"$orgbox")
+            if [ -n "${ONLY_PR:-}" ]; then extra=$(jq -c --argjson p "$ONLY_PR" '[.[] | select(.n == $p)]' <<<"$extra"); fi
+            echo "org-wide box (repos outside the registry): $(jq length <<<"$extra") — $(jq -r '[.[] | "\(.repo)#\(.n)"] | join(" ")' <<<"$extra")"
+            entries=$(jq -c --argjson x "$extra" '. + ($x | map({repo: .repo, pr_number: (.n | tostring), train_ready: true, enabled_classes: "", sensitive_path_patterns: "", safe_path_globs: "", required_checks: ""}))' <<<"$entries")
+          else
+            echo "::warning::org-wide box search failed this cycle — the registry leg above stands; repos outside the registry are re-read next sweep."
+          fi
 
           count=$(jq length <<<"$entries")
           if [ "$count" -eq 0 ]; then

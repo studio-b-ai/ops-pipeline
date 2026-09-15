@@ -33,7 +33,7 @@
 
 export type RepoClass = "client-asthetik" | "studiob" | "other";
 
-/** The only two repos the train currently reads `train:ready` from (brief §2). Anything else
+/** The only two repos the train currently reads `box` from (brief §2). Anything else
  * classifies as "other" — `windowState` never applies the client-asthetik ET gate to it, and the
  * worker should never have produced such a ticket in the first place; kept total rather than
  * throwing so a stray future repo fails closed at the window-law layer, not with a crash. */
@@ -47,7 +47,7 @@ export interface Ticket {
   repo: string; // "org/repo"
   number: number;
   repoClass: RepoClass;
-  /** ISO instant the authorizing `train:ready` LabeledEvent's server `createdAt` — the FIFO
+  /** ISO instant the authorizing `box` LabeledEvent's server `createdAt` — the FIFO
    * sort key. Sourced from GraphQL `timelineItems` (label-authority.ts's
    * `fetchAuthorityTimeline` + `evaluateLabelAuthority`, ops-pipeline#172 rung 1), never
    * parsed from a comment body — see that file's header for why (v1's D1 defect). */
@@ -952,7 +952,7 @@ export function isClickDueStillInFlight(lastClickDueIso: string | null, anchorIs
 
 // ───────────────────────────── train:after / train:consolidate token parsing ─────────────────────────────
 //
-// train:ready ticket ASSEMBLY itself (label authority, staleness, `labeledAt`) moved to
+// box ticket ASSEMBLY itself (label authority, staleness, `labeledAt`) moved to
 // label-authority.ts + restart-train.ts's `fetchTickets` in rung 1 (ops-pipeline#172) — the
 // old comment-grammar pin parser and its info type/regex this section used to hold were v1's D1
 // defect (authority from a parseable comment body, never GitHub-attributed, and the label-apply/

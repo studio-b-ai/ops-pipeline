@@ -567,10 +567,10 @@ function isMigrationPath(path: string): boolean {
 
 // Repo-class partition (doc §2 move 2 + §4.1): in a TRAIN-class repo the squasher
 // NEVER merges a code-fix — even one that passes every leg — because these repos'
-// merges ride the human-authorized `train:ready` label authority (studiob deploys
+// merges ride the human-authorized `box` label authority (studiob deploys
 // restart-adjacent shared machinery; client-asthetik publishes restart the Heritage
 // app pool, Rule #11). A fully-qualifying code-fix there gets `train:candidate`
-// applied + a candidate comment, and a HUMAN decides `train:ready`. Everything not
+// applied + a candidate comment, and a HUMAN decides `box`. Everything not
 // listed here is "standard" (the squasher may merge when the class is enabled).
 export type RepoMergeClass = "train" | "standard";
 

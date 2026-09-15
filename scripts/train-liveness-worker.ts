@@ -5,7 +5,7 @@
  * classification/render decision lives here.
  *
  * Why this exists: the incident this leg answers — heritage-restart-train.yml's every-5-minute
- * cron did not run 23:55Z–00:30Z (2026-08-30/31 overnight) while a `train:ready` ticket sat
+ * cron did not run 23:55Z–00:30Z (2026-08-30/31 overnight) while a `box` ticket sat
  * queued, and nobody was told until a human noticed and dispatched it by hand. The train's OWN
  * machinery alerts (`restart-train` label, Rule #165) watch FAILED/anomalous restart OUTCOMES —
  * they have no leg watching whether the scheduler itself is still ticking at all. This worker
@@ -20,7 +20,7 @@
  *      variable is `disabled` (expected, mirrors heritage-restart-train.yml's own job-level
  *      `if:` gate); any OTHER read failure (auth/scope/5xx) THROWS — a blind read must never be
  *      allowed to look like a confirmed "disabled" and CLOSE a live outage issue.
- *   2. Open `train:ready` PRs across the train's two ticket repos (`gh pr list --label
+ *   2. Open `box` PRs across the train's two ticket repos (`gh pr list --label
  *      <TRAIN_READY_LABEL> --state open --limit <cap> --json number`) — the label constant is
  *      imported from lib/restart-train-fire.ts (never hardcoded here, Rule #184); a full-cap
  *      page logs a loud warning (Rule #331 — a silent truncation would undercount the queue).
@@ -62,7 +62,7 @@
  *   path can be exercised live once without waiting for (or faking) a real cron outage. This
  *   overrides ONLY the last-run age, never the queued-ticket count or `HERITAGE_TRAIN_ENABLED`
  *   read — both of those stay real reads, so the control only actually opens an issue if a real
- *   `train:ready` ticket happens to be queued and the train is enabled at the time it runs (by
+ *   `box` ticket happens to be queued and the train is enabled at the time it runs (by
  *   design: Rule #471's planted control proves the MECHANISM, it does not fabricate the whole
  *   scenario). Every issue opened this way carries the `formatLivenessIssueTitle`/
  *   `formatLivenessIssueBody` PLANTED CONTROL marker so nobody mistakes it for a real outage.
@@ -78,7 +78,6 @@
 
 import { gh, ensureLabel, listIssuesByLabel, openIssue, closeIssue } from "./lib/github-issues.js";
 import { TRAIN_READY_LABEL } from "./lib/restart-train-fire.js";
-import { TRAIN_READY_ALIASES } from "./lib/label-authority.js";
 import {
   evaluateTrainLiveness,
   formatLivenessIssueTitle,
@@ -100,7 +99,7 @@ const HERITAGE_TRAIN_ENABLED_VAR = "HERITAGE_TRAIN_ENABLED";
 const TICKET_REPOS = ["studio-b-ai/studiob", "studio-b-ai/client-asthetik"] as const;
 
 // P2 codex fix: `gh pr list` defaults to 30 rows with no --limit — an unbounded queue would be
-// silently undercounted. 100 is generous headroom over any realistic train:ready queue depth;
+// silently undercounted. 100 is generous headroom over any realistic box queue depth;
 // a full-cap page logs a loud warning rather than silently trusting a possibly-truncated count
 // (Rule #331 — a cap hit is a warning, not a paging mechanism).
 const QUEUE_LIST_LIMIT = 100;
@@ -161,7 +160,7 @@ function fetchQueuedTickets(): LivenessQueuedTicket[] {
   const out: LivenessQueuedTicket[] = [];
   for (const repo of TICKET_REPOS) {
     const seen = new Set<number>();
-    for (const spelling of [TRAIN_READY_LABEL, ...TRAIN_READY_ALIASES]) {
+    for (const spelling of [TRAIN_READY_LABEL]) {
       const raw = gh([
         "pr", "list",
         "--repo", repo,

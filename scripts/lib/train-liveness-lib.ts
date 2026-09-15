@@ -7,7 +7,7 @@
  * Why this exists: the incident (2026-08-30/31 overnight) — `heritage-restart-train.yml`'s
  * every-5-minute cron (schedule "star slash 5 star star star star" — written out here, not
  * literally, so this block comment doesn't self-terminate) did not run 23:55Z–00:30Z while a
- * `train:ready` ticket sat queued, and
+ * `box` ticket sat queued, and
  * nobody was told until a human noticed and dispatched it by hand. The train's OWN machinery
  * (Rule #165 issues on ops-pipeline, `restart-train` label) alerts on FAILED/anomalous
  * observe outcomes — it has no leg watching whether the cron ITSELF is still ticking. This
@@ -19,7 +19,7 @@
  *   - `disabled` — `HERITAGE_TRAIN_ENABLED` is not `'true'`. The train is DELIBERATELY off
  *     (heritage-restart-train.yml's own job-level `if:` gate) — silence is expected and
  *     correct; never alert on it. Checked FIRST, ahead of everything else.
- *   - `idle`     — zero `train:ready` tickets queued. A quiet cron with nothing to do is not
+ *   - `idle`     — zero `box` tickets queued. A quiet cron with nothing to do is not
  *     a failure (Rule #448's SLA has nothing to be measured against) — checked second, ahead
  *     of the staleness check, so a queue-empty repo never falsely alerts no matter how long
  *     the cron has been silent.
@@ -150,7 +150,7 @@ export function evaluateTrainLiveness(input: EvaluateTrainLivenessInput): TrainL
     return {
       verdict: "idle",
       silentMinutes,
-      reason: `0 train:ready ticket(s) queued — silence with nothing queued is not a failure${
+      reason: `0 box ticket(s) queued — silence with nothing queued is not a failure${
         silentMinutes === null ? " (no completed run recorded, informational only)" : ` (informational: ${silentMinutes} min since the last completed run)`
       }.`,
     };
@@ -162,7 +162,7 @@ export function evaluateTrainLiveness(input: EvaluateTrainLivenessInput): TrainL
     return {
       verdict: "stale",
       silentMinutes: null,
-      reason: `${queuedTickets} train:ready ticket(s) queued but heritage-restart-train.yml has never completed a run — liveness cannot be confirmed.`,
+      reason: `${queuedTickets} box ticket(s) queued but heritage-restart-train.yml has never completed a run — liveness cannot be confirmed.`,
     };
   }
 
@@ -170,7 +170,7 @@ export function evaluateTrainLiveness(input: EvaluateTrainLivenessInput): TrainL
     return {
       verdict: "stale",
       silentMinutes,
-      reason: `${queuedTickets} train:ready ticket(s) queued and the train's last completed run was ${silentMinutes} min ago (> ${windowMinutes} min threshold).`,
+      reason: `${queuedTickets} box ticket(s) queued and the train's last completed run was ${silentMinutes} min ago (> ${windowMinutes} min threshold).`,
     };
   }
 
@@ -178,7 +178,7 @@ export function evaluateTrainLiveness(input: EvaluateTrainLivenessInput): TrainL
   return {
     verdict: "ok",
     silentMinutes,
-    reason: `${queuedTickets} train:ready ticket(s) queued; last completed run ${silentMinutes} min ago (within the ${windowMinutes} min threshold).`,
+    reason: `${queuedTickets} box ticket(s) queued; last completed run ${silentMinutes} min ago (within the ${windowMinutes} min threshold).`,
   };
 }
 
@@ -311,7 +311,7 @@ export function formatLivenessIssueBody(input: FormatLivenessIssueBodyInput): st
   }
 
   lines.push(
-    "The Heritage restart train's `*/5 * * * *` cron (`.github/workflows/heritage-restart-train.yml`) has gone silent while ticket(s) sat queued in `train:ready`.",
+    "The Heritage restart train's `*/5 * * * *` cron (`.github/workflows/heritage-restart-train.yml`) has gone silent while ticket(s) sat queued in `box`.",
   );
   lines.push("");
   lines.push(`- Last completed SCHEDULE-triggered run: ${lastRunUrl ?? "none recorded"}`);

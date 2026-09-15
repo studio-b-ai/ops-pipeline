@@ -8,14 +8,14 @@ name: Heritage Train Liveness
 # pattern, copied verbatim) and runs the worker with it.
 #
 # Incident this leg answers: heritage-restart-train.yml's every-5-minute cron did not run
-# 23:55Z-00:30Z (2026-08-30/31 overnight) while a train:ready ticket sat queued, and nobody was
+# 23:55Z-00:30Z (2026-08-30/31 overnight) while a box ticket sat queued, and nobody was
 # told until a human noticed and dispatched it by hand. This worker opens ONE auto-reconciled
 # GitHub issue (label train-liveness, Rule #165) when the train's cron has gone silent while
 # tickets are queued, and closes it (with a comment) the next time the train ticks again --
 # transition-only (Rule #292), never a per-run comment while the issue stays open.
 #
 # Fleet App token required for the same reason as backlog-staleness.yml / heritage-restart-train.yml:
-# this worker reads train:ready PRs across studio-b-ai/studiob AND studio-b-ai/client-asthetik
+# this worker reads box PRs across studio-b-ai/studiob AND studio-b-ai/client-asthetik
 # (a repo-scoped ambient GITHUB_TOKEN structurally cannot see another repo), plus Actions run
 # data and the HERITAGE_TRAIN_ENABLED variable on THIS repo, and posts/closes its own issue on
 # studio-b-ai/ops-pipeline. studiob-fleet-bot's existing issues:write + metadata:read (+ the
@@ -62,7 +62,7 @@ jobs:
         run: npm ci || npm install
 
       # Minted unconditionally -- including on a dry run: Rule #376, a dry run that reads
-      # nothing proves nothing, and every read this worker does (train:ready PR lists across
+      # nothing proves nothing, and every read this worker does (box PR lists across
       # two repos, the last completed run of heritage-restart-train.yml, the
       # HERITAGE_TRAIN_ENABLED variable, the open-issue check on this repo) needs real
       # cross-repo access the ambient GITHUB_TOKEN structurally cannot provide.

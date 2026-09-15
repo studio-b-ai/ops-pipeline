@@ -94,14 +94,11 @@ jobs:
           # them here would just hide refusal receipts). Re-list at evaluation time
           # (Rule #182); --limit 100 because gh pr list defaults to 30 and
           # truncates silently (Rule #331).
-          # Label = `box` (Kevin's 2026-09-15 one-key rename of `queued`; scripts/lib/label-authority.ts).
-          # The `queued` spelling reads as an ALIAS for the transition week — one list
-          # per spelling, merged unique (gh --label ANDs, so the OR needs two reads).
-          BOXL=$(gh pr list --repo "$REPO" --state open --label "box" --limit 100 --json number --jq '[.[].number]')
-          ALIASL=$(gh pr list --repo "$REPO" --state open --label "queued" --limit 100 --json number --jq '[.[].number]')
-          ALL=$(jq -c -n --argjson a "$BOXL" --argjson b "$ALIASL" '$a + $b | unique')
+          # Label = `box`, the one human key (scripts/lib/label-authority.ts; Kevin 2026-09-15 05:5xZ:
+          # no alias — `queued` and `train:ready` are retired and deleted from every org repo).
+          ALL=$(gh pr list --repo "$REPO" --state open --label "box" --limit 100 --json number --jq '[.[].number]')
           N=$(printf '%s' "$ALL" | jq 'length')
-          echo "Sweep found ${N} open box PR(s) (box=$(printf '%s' "$BOXL" | jq 'length') queued-alias=$(printf '%s' "$ALIASL" | jq 'length'))."
+          echo "Sweep found ${N} open box PR(s)."
           if [ "$N" -gt "$MAX_FANOUT" ]; then
             echo "::warning::box sweep capped at ${MAX_FANOUT} of ${N} open labeled PRs; $((N - MAX_FANOUT)) NOT evaluated this cycle (re-listed next sweep)."
             ALL=$(printf '%s' "$ALL" | jq -c ".[:${MAX_FANOUT}]")

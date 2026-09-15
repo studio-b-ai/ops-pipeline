@@ -21,8 +21,11 @@
  * scheduled whole-fleet cron, any train:true repo, a pr_number without
  * the ready label) prints the exact pre-existing line, unchanged.
  *
- * 2026-09-15 ("Box is the one key"): the ready label is `box` (`queued` reads as
- * the transition-week alias), and the receipt line names the new key.
+ * 2026-09-15 ("Box is the one key"; 05:5xZ no alias): the ready label is `box`, full stop,
+ * and it is this sweep's to merge in EVERY repo except the one the restart train owns
+ * (studio-b-ai/studiob). The caller's `train` input now means exactly "this sweep owns
+ * box here" — true for every repo but studiob, whatever squasher-fleet.json's legacy
+ * `train` field says. `queued`/`train:ready` are retired labels, not aliases.
  */
 
 export interface FleetSweepReceiptInput {
@@ -30,15 +33,14 @@ export interface FleetSweepReceiptInput {
   repo: string;
   /** bugsquasher-labeled open PR count for this repo this cycle */
   bugsquasherCount: number;
-  /** ready-labeled (`box` + transition alias) open PR count for this repo this cycle (always 0 when !train) */
+  /** `box`-labeled open PR count for this repo this cycle (always 0 when !train — studiob) */
   trainCount: number;
-  /** this repo's squasher-fleet.json `train` field */
+  /** whether this sweep owns `box` in this repo (false only for studio-b-ai/studiob — the restart train's) */
   train: boolean;
   /** the `pr_number` dispatch input, or null on a scheduled/whole-fleet sweep */
   onlyPr: string | null;
   /**
-   * Whether `onlyPr` itself carries the ready label (`box` or the transition-week
-   * `queued` alias). Only meaningful — and
+   * Whether `onlyPr` itself carries the ready label (`box`). Only meaningful — and
    * only ever probed by the caller — when `onlyPr` is set and `train` is
    * false. The scheduled cron and every train:true repo never compute this
    * (train:true repos already answer via `trainCount`), so callers pass
@@ -63,10 +65,10 @@ export function formatFleetSweepReceiptLine(input: FleetSweepReceiptInput): stri
   if (isEvaluateNowOnATrainFalseReadyPr) {
     return (
       `box PR ${input.repo}#${input.onlyPr} is not this sweep's to merge ` +
-      `(fleet registry train:false) — its door is the restart train: dispatch ` +
+      `(the restart train owns studiob) — its door is the restart train: dispatch ` +
       `${RESTART_TRAIN_WORKFLOW} (workflow_dispatch, dry_run=false)`
     );
   }
 
-  return `${input.repo}: bugsquasher=${input.bugsquasherCount} box(train)=${input.trainCount}`;
+  return `${input.repo}: bugsquasher=${input.bugsquasherCount} box=${input.trainCount}`;
 }
