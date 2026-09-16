@@ -1,0 +1,22 @@
+# orca.yaml — canonical Orca repo-hook file for the fleet (Kevin 9/15, "Orca leg").
+#
+# This is the CANONICAL SOURCE the fleet ships from. The durable, actually-run copy
+# is bin/orca-worktree-setup.sh in this repo (claude-config-plane); on a deploy-pinned
+# run (bin/deploy-pinned.sh) it lands in ~/.runner/bin/orca-worktree-setup.sh, which is
+# where a repo's orca.yaml (this file, or a per-repo copy of it) actually invokes it
+# from — NOT from ~/dev/seats/team-principal/desk/, which is only the live-install
+# staging copy for today's desk (see bin/orca-register-desk.sh step 5 in the PR body).
+#
+# Orca runs `scripts.setup` via /bin/bash inside the freshly created worktree, with
+# ORCA_WORKTREE_ID and ORCA_TERMINAL_HANDLE set in its env, the first time a repo's
+# setup hook is trusted (Orca's one-time "Run ... from orca.yaml?" dialog) and on every
+# subsequent worktree when the repo's hookSettings.setupRunPolicy stays run-by-default.
+#
+# Drop this file at the root of any fleet repo so Orca worktrees self-provision the
+# desk-lap door on creation. Tracked — an untracked orca.yaml never reaches a new
+# worktree; the hook only fires from a TRACKED orca.yaml on the base ref.
+scripts:
+  setup: |
+    bash "$HOME/dev/seats/team-principal/desk/orca-worktree-setup.sh"
+  archive: |
+    true
