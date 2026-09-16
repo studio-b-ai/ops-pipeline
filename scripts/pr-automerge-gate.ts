@@ -1285,9 +1285,10 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   }
 
   // ── Cheap structural fast-path (ops#190 A2; scope narrowed in codex pass 2) ──
-  // A closed/merged or draft PR refuses immediately — before the timeline fetch and
-  // (critically) before the review leg's model spend: the "drafts caught cheaply
-  // before diff-fetch/review spend" wiring the A1 breadcrumb on ops#190 called for.
+  // A closed/merged or draft PR refuses immediately — before the timeline fetch:
+  // the "drafts caught cheaply" wiring the A1 breadcrumb on ops#190 called for
+  // (the review leg / model spend it once preceded is excised — 2026-09-15 box
+  // ruling, stint #372).
   // ONLY these two facts short-circuit here. CI/mergeStateStatus deliberately do
   // NOT (codex P2, A2 pass 2): a label-then-push staleness typically leaves CI
   // pending/red on the NEW sha, and refusing on CI before the authority leg would
@@ -1396,8 +1397,8 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   // check. Placed AFTER the authority leg deliberately (codex P2, A2 pass 2): the
   // stale-label branch above must run regardless of CI state — a label-then-push
   // typically leaves CI pending/red on the new sha, and refusing on CI first would
-  // leave the stale `queued` in place indefinitely. Placed BEFORE the review
-  // leg so red/pending CI still refuses before the model spend. state/isDraft are
+  // leave the stale `queued` in place indefinitely. (The review leg this once
+  // preceded is excised — 2026-09-15 box ruling, stint #372.) state/isDraft are
   // re-checked here (already true via the fast-path above) — harmless, and keeps
   // this call the single authoritative readiness predicate rather than a
   // hand-rolled half.
