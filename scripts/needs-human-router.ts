@@ -101,7 +101,7 @@ function addKevinDecisionLabel(repo: string, num: number): void {
 // same set" as the repos where needs-human issues exist today). Static per v1 — no fleet
 // discovery, matching the design's explicit static-list scope.
 const ALLOWLIST = new Set(
-  ["bolt-wms", "studiob", "studiob-price-sync", "webhook-router", "asthetik-trade-theme"].map((r) => `${ORG}/${r}`),
+  ["bolt-wms", "studiob", "studiob-price-sync", "webhook-router", "asthetik-website"].map((r) => `${ORG}/${r}`),
 );
 
 function parseArgs(argv: string[]): { repo: string; dryRun: boolean } {

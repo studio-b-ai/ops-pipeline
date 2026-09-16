@@ -43,7 +43,7 @@ watermark:
   seed_cutoff: "2026-08-18T05:45:00Z"     # the GC seed's cutoff — first run per-repo starts here
 
 repos:                                     # human-visible surfaces (CoS list + studiob, per ops#162)
-  - studio-b-ai/asthetik-trade-theme
+  - studio-b-ai/asthetik-website
   - studio-b-ai/bolt-wms
   - studio-b-ai/asthetik-portal
   - studio-b-ai/studiob-price-sync
