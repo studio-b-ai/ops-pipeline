@@ -1,0 +1,47 @@
+name: Surface Canary
+
+# SURFACE CANARY SWEEP — watches the five public doors plus the fleet heartbeat
+# (stint #465 "Watch the watcher", surface canary program). This sweep IS the
+# surface canary: it runs every 5 minutes and probes the public surfaces for
+# degradation. The canary-liveness leg watches THIS sweep's runs for cron silence.
+#
+# This sweep is a SKELETON — the surface probes are the director/Kevin's domain
+# (#97: LIVE surfaces b.studio, bibelhausen.com, lmmi.b.studio, amplify.b.studio
+# are director/Kevin only, never a crew). The skeleton runs a no-op tick that the
+# canary-liveness leg can already monitor; surface probes are added here through
+# a subsequent director/owner-sitting stint.
+#
+# Design: this workflow runs on ops-pipeline (the canary-liveness leg lives here
+# and monitors its own repo's run history). Every 5 minutes: probe each surface,
+# log results, signal degradation to the canary-liveness leg by the run's own
+# exit code and the scheduled-run history.
+
+on:
+  schedule:
+    # Every 5 minutes — off the :00/:30 peaks (Rule #298), interleaved with the
+    # restart train's own :05/:10/:15... pattern so these don't stack at the same
+    # seconds. A clean :00 tick provides the canary-liveness's most recent run.
+    - cron: "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
+  workflow_dispatch:
+
+# SURFACE_CANARY_ENABLED checkpoint: absent/missing defaults false — the canary is
+# deliberately off, and the canary-liveness leg reads this same variable to stay
+# silent (disabled verdict). A skeleton with no surface probes is on-purpose inert
+# until enabled by the director.
+
+jobs:
+  probe:
+    name: "Surface canary probe"
+    if: ${{ vars.SURFACE_CANARY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: "Surface canary tick (skeleton — no probes yet)"
+        run: |
+          echo "surface-canary tick at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "SURFACE_CANARY_ENABLED=true — skeleton running"
+          echo "Live-surface probes are director/Kevin's domain (#97); this skeleton provides the cron heartbeat for canary-liveness monitoring."
+          echo "Probes to add: b.studio, bibelhausen.com, lmmi.b.studio, amplify.b.studio, switchboard.b.studio"
+
+permissions:
+  contents: read
