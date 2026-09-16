@@ -50,7 +50,7 @@ repos:
   - repo: "studio-b-ai/studiob-price-sync"
     manager: "Engineer"
     note: "Shopify lane"
-  - repo: "studio-b-ai/asthetik-trade-theme"
+  - repo: "studio-b-ai/asthetik-website"
     manager: "Engineer"
     note: "Shopify lane"
   - repo: "studio-b-ai/asthetik-portal"
