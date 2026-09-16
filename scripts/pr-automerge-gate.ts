@@ -1406,6 +1406,11 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   if (review.verdict !== "CLEAN") {
     const detail = `independent review verdict ${review.verdict}: ${review.detail}`;
     logTrainGateLine(repo, pr, "refused", detail);
+    // 2026-09-16 (L2D-02): the train path previously refused silently — no card, no
+    // `needs-human`, invisible to the glass. Mirror the squasher path's review leg
+    // (postFlagCard at L651): the refusal lands as a blue card and `needs-human` so
+    // Kevin sees it. Same sha-pinned idempotent contract as every card leg.
+    postFlagCard(repo, pr, "review", prJson.headRefOid, [review.detail]);
     return { outcome: "refused", detail };
   }
 
