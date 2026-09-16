@@ -1486,6 +1486,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   if (review.verdict !== "CLEAN") {
     const detail = `independent review verdict ${review.verdict}: ${review.detail}`;
     logTrainGateLine(repo, pr, "refused", detail);
+    postFlagCard(repo, pr, "review", prJson.headRefOid, [review.detail]);
     return { outcome: "refused", detail };
   }
 
