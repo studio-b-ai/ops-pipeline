@@ -44,9 +44,9 @@ repos:
     manager: "Engineer"
     shared: true
     note: "studiob-api/gateway = fleet (CTO); zoom-intake questions belong to the Zoom Workspace lane (CTO-managed) — CoS remap 2026-08-16"
-  - repo: "studio-b-ai/brain"
+  - repo: "studio-b-ai/power-unit"
     manager: "Dispatcher"
-    note: "the vault — CoS remap 2026-08-16"
+    note: "the vault — CoS remap 2026-08-16 (repo renamed brain → power-unit 2026-09-15)"
   - repo: "studio-b-ai/studiob-price-sync"
     manager: "Engineer"
     note: "Shopify lane"
@@ -110,12 +110,12 @@ machinery_labels:
 # gittracked backlogs which are first ranked and prioritized by the lane, then the manager,
 # then the cos then kevin"). Distinct instrument from `repos:`/`thresholds:`/
 # `machinery_labels:` above (which drive backlog-staleness-worker.ts over GitHub issues) —
-# this leg reads `studio-b-ai/brain` LANES.md rows + their briefs and checks PRESENCE /
+# this leg reads `studio-b-ai/power-unit` LANES.md rows + their briefs and checks PRESENCE /
 # FRESHNESS / SHAPE of the git-tracked ranked-backlog section itself. Consumed by
 # scripts/backlog-compliance-worker.ts (read-only — never written by the worker). Full
 # grammar + checks table: brain `library/product/2026-08-17-backlog-compliance-leg-design.md`.
 compliance:
-  brain_repo: "studio-b-ai/brain"
+  brain_repo: "studio-b-ai/power-unit"
   lanes_file: "LANES.md"
   # Rollout dates (config diff, not a code change — design doc §2): before
   # per_lane_issues_from, findings land on ONE fleet rollup issue; after it, one issue per
