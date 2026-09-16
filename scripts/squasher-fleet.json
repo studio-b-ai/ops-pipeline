@@ -15,6 +15,7 @@
       "sensitive_path_patterns": "",
       "safe_path_globs": "packages/*/src/**,scripts/**,docs/**",
       "required_checks": "Build + boot + probe,tsc --noEmit (SDK drift guard) (api),turbo run test (all workspace suites)",
+      "required_checks_path_deps": "tsc --noEmit (SDK drift guard) (api)=packages/**",
       "train": false
     },
     {
@@ -82,7 +83,7 @@
       "train": false
     },
     {
-      "repo": "studio-b-ai/brain",
+      "repo": "studio-b-ai/power-unit",
       "enabled_classes": "docs-comment,vault-doc,code-fix",
       "sensitive_path_patterns": "(^|/)(LANES|QUEUE|SHIPPED)\\.md,(^|/)scripts/lanes-row-edit\\.py,(^|/)scripts/git-hooks/,(^|/)scripts/brain-push/,(^|/)scripts/stint\\.py,(^|/)scripts/propagate\\.py,(^|/)scripts/reconcile-shared-main\\.sh,(^|/)\\.gitleaksignore$,(^|/)scripts/run-tests\\.sh,(^|/)scripts/board\\.py,(^|/)scripts/board-stale-tree-guard\\.py,(^|/)scripts/bless-pointer-guard\\.py,(^|/)scripts/ask-age-guard\\.py,(^|/)scripts/vault-objdb-commit\\.sh,(^|/)scripts/rules-build\\.py,(^|/)scripts/vault-auto-sync\\.sh,(^|/)scripts/sync-mirror\\.sh,(^|/)scripts/refresh-claude-config-mirror\\.sh,(^|/)scripts/decisions-apply\\.py,(^|/)scripts/runner_roster\\.py,(^|/)scripts/roster-assert\\.py,(^|/)scripts/coldstart-rotate\\.py",
       "safe_path_globs": "scripts/card-lint.py,scripts/claude-md-apply-diet.py,scripts/kit.py,scripts/lanes-holds.py,scripts/promote-learned.py,scripts/receipt-for.py",
@@ -121,8 +122,8 @@
       "repo": "studio-b-ai/toto",
       "enabled_classes": "docs-comment,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
-      "safe_path_globs": "src/**",
-      "required_checks": "qa",
+      "safe_path_globs": "qa/**,src/**",
+      "required_checks": "qa / node-guards",
       "train": true
     }
   ]

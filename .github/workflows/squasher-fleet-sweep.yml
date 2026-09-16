@@ -221,10 +221,12 @@ jobs:
                               enabled_classes: $cfg.enabled_classes,
                               sensitive_path_patterns: $cfg.sensitive_path_patterns,
                               safe_path_globs: $cfg.safe_path_globs,
-                              required_checks: $cfg.required_checks}))
+                              required_checks: $cfg.required_checks,
+                              required_checks_path_deps: ($cfg.required_checks_path_deps // "")}))
                 + ($tr | map({repo: $cfg.repo, pr_number: (. | tostring), train_ready: true,
                               enabled_classes: "", sensitive_path_patterns: "",
-                              safe_path_globs: "", required_checks: ""}))' <<<"$entries")
+                              safe_path_globs: "", required_checks: "",
+                              required_checks_path_deps: ""}))' <<<"$entries")
           done < <(jq -c '.repos[]' "$CONFIG")
 
           # Kevin 2026-09-15 05:5xZ: "box ... should be picked up by the cron in any repo." Repos outside the
@@ -240,7 +242,7 @@ jobs:
             extra=$(jq -c --argjson reg "$registered" '[.[] | select((.repo as $r | $reg | index($r)) == null) | select(.repo != "studio-b-ai/studiob")]' <<<"$orgbox")
             if [ -n "${ONLY_PR:-}" ]; then extra=$(jq -c --argjson p "$ONLY_PR" '[.[] | select(.n == $p)]' <<<"$extra"); fi
             echo "org-wide box (repos outside the registry): $(jq length <<<"$extra") — $(jq -r '[.[] | "\(.repo)#\(.n)"] | join(" ")' <<<"$extra")"
-            entries=$(jq -c --argjson x "$extra" '. + ($x | map({repo: .repo, pr_number: (.n | tostring), train_ready: true, enabled_classes: "", sensitive_path_patterns: "", safe_path_globs: "", required_checks: ""}))' <<<"$entries")
+            entries=$(jq -c --argjson x "$extra" '. + ($x | map({repo: .repo, pr_number: (.n | tostring), train_ready: true, enabled_classes: "", sensitive_path_patterns: "", safe_path_globs: "", required_checks: "", required_checks_path_deps: ""}))' <<<"$entries")
           else
             echo "::warning::org-wide box search failed this cycle — the registry leg above stands; repos outside the registry are re-read next sweep."
           fi
@@ -282,6 +284,7 @@ jobs:
       sensitive_path_patterns: ${{ matrix.sensitive_path_patterns }}
       safe_path_globs: ${{ matrix.safe_path_globs }}
       required_checks: ${{ matrix.required_checks }}
+      required_checks_path_deps: ${{ matrix.required_checks_path_deps }}
       train_ready: ${{ matrix.train_ready }}
     secrets:
       # ANTHROPIC_API_KEY no longer passed (WIF, 9/06) — the gate federates from this run's OIDC identity.
