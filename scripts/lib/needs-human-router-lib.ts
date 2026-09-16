@@ -269,7 +269,7 @@ export const REPO_LANE_MANAGER: Readonly<Record<string, string>> = {
   "studio-b-ai/bolt-wms": "engineer",
   "studio-b-ai/studiob": "engineer",
   "studio-b-ai/studiob-price-sync": "engineer",
-  "studio-b-ai/asthetik-trade-theme": "engineer",
+  "studio-b-ai/asthetik-website": "engineer",
   "studio-b-ai/asthetik-portal": "engineer",
 };
 

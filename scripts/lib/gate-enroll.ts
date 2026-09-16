@@ -58,7 +58,7 @@ const SHORT_REPO: Readonly<Record<string, string>> = {
   "studio-b-ai/client-asthetik": "ca",
   "studio-b-ai/ops-pipeline": "ops",
   "studio-b-ai/studiob": "studiob",
-  "studio-b-ai/asthetik-trade-theme": "theme",
+  "studio-b-ai/asthetik-website": "theme",
   "studio-b-ai/studiob-price-sync": "price-sync",
   "studio-b-ai/aesthetik-portal": "portal",
 };

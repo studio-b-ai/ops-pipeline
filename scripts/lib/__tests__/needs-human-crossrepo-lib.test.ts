@@ -21,7 +21,7 @@ const ALLOWLIST = new Set([
   "studio-b-ai/studiob",
   "studio-b-ai/studiob-price-sync",
   "studio-b-ai/webhook-router",
-  "studio-b-ai/asthetik-trade-theme",
+  "studio-b-ai/asthetik-website",
 ]);
 
 const OWN_REPO = "studio-b-ai/studiob-price-sync";

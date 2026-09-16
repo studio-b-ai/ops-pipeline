@@ -26,7 +26,7 @@
     {"name":"asthetik-marketing","archived":false,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-21T05:56:48Z","class293":"TBD","verdict":"TBD","verdictAt":"2026-08-30T01:22:11Z","note":"new 8/21 (ops#180)"},
     {"name":"asthetik-portal","archived":false,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-28T07:13:31Z","class293":"Internal Tooling","verdict":"mechanic-covered","verdictAt":"2026-08-30T01:22:11Z","note":"sweep caller"},
     {"name":"asthetik-redirect","archived":false,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-16T05:32:27Z","class293":"Internal Tooling","verdict":"freeze","verdictAt":"2026-08-30T01:22:11Z"},
-    {"name":"asthetik-trade-theme","archived":false,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-28T06:48:53Z","class293":"Product","verdict":"mechanic-covered","verdictAt":"2026-08-30T01:22:11Z","note":"#430 drift gate + palette guard"},
+    {"name":"asthetik-website","archived":false,"visibility":"PRIVATE","pushedAtAtSeed":"2026-08-28T06:48:53Z","class293":"Product","verdict":"mechanic-covered","verdictAt":"2026-08-30T01:22:11Z","note":"#430 drift gate + palette guard; renamed from asthetik-trade-theme 2026-09-16 (SB-1306)"},
     {"name":"b-studio-website","archived":false,"visibility":"PUBLIC","pushedAtAtSeed":"2026-08-19T07:37:17Z","class293":"Product","verdict":"manual-tax","verdictAt":"2026-08-30T01:22:11Z","note":"#341 firewall pending (Corporate lane)"},
     {"name":"benchmarks-b-studio","archived":true,"visibility":"PUBLIC","pushedAtAtSeed":"2026-05-04T17:30:30Z"},
     {"name":"bolt-order-entry","archived":true,"visibility":"PRIVATE","pushedAtAtSeed":"2026-04-16T19:45:53Z"},
