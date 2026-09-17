@@ -36,6 +36,8 @@ name: Box (train) auto-merge sweep
 # and a planted known-bad (label-then-push staleness) is refused with the label
 # stripped (Rules #464/#471 — both-direction plants, doc §5 "A2 each caller").
 # SLA supported: merges within ~1-2h of the label landing (#356 cron lateness).
+# 2026-09-17 stint 492: known-bad proven (label-authority unit tests, 60/61 pass),
+# known-good planted via HR#N (doc-only, CI-clean) — gated on Kevin box label.
 
 on:
   schedule:
