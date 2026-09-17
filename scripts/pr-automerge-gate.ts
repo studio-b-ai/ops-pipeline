@@ -1274,10 +1274,10 @@ function logTrainGateLine(repo: string, pr: number, outcome: TrainReadyOutcome, 
  *   - "refused": any other fail-closed leg (not merge-ready — draft/closed/behind/CI
  *     rollup not clean — no label, hold present, bot/unauthorized actor,
  *     truncated/empty timeline, an unexpected fetch/API error,
- *     review FLAG, or revalidate drift). No PR comment — matches `evaluate()`'s own
- *     convention of a receipt ONLY on an actionable state transition (merge, or here,
- *     stale-label removal), not on every ordinary "this PR isn't ready yet" cycle.
- *     Telemetry line only.
+ *     review FLAG, or revalidate drift). A review FLAG posts a card + `needs-human`
+ *     (stint 358, L2D-02 — the train path used to refuse silently); all other refused
+ *     legs are telemetry only. If not merge-ready, no PR comment — a
+ *     "this PR isn't ready yet" cycle is not an actionable state transition.
  *   - "merge-attempt-failed": every leg passed but the SHA-pinned `mergePr` call itself
  *     threw (head moved between revalidate and merge, or a branch-protection rule
  *     blocked it) — NOT retried in this run (Rules #109/#161), matching `evaluate()`'s
@@ -1486,6 +1486,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   if (review.verdict !== "CLEAN") {
     const detail = `independent review verdict ${review.verdict}: ${review.detail}`;
     logTrainGateLine(repo, pr, "refused", detail);
+    postFlagCard(repo, pr, "review", prJson.headRefOid, [review.detail]);
     return { outcome: "refused", detail };
   }
 
