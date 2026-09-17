@@ -3,8 +3,8 @@ name: Daily Brief Watch
 # Stint #436 — the Daily Brief did not post on 9/16 and nothing noticed.
 # This watchdog runs at 12:30Z Mon-Fri, checks if today's brief was posted
 # to Kevin's Slack DM by the cos-brief-worker (8am ET = 12:00Z). On success
-# it records a receipt (the run log IS the "brief sent" receipt); if the
-# brief is missing it DMs Kevin "Daily Brief missing" via the Slack bot.
+# it records a durable receipt artifact; if the brief is missing it DMs
+# Kevin "Daily Brief missing" via the Slack bot.
 
 on:
   schedule:
@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: "Check Kevin's DM for today's Daily Brief"
+        id: check
         env:
           SLACK_TOKEN: ${{ secrets.STUDIOB_SLACK_BOT_TOKEN }}
         run: |
@@ -76,6 +77,7 @@ jobs:
           if [ "$FOUND" -gt 0 ]; then
             echo "[brief-watch] receipt: brief sent $TODAY (found $FOUND matching message(s))"
             echo "brief_sent=true" >> "$GITHUB_OUTPUT"
+            echo "receipt_date=$TODAY" >> "$GITHUB_OUTPUT"
           else
             echo "[brief-watch] ALERT: daily brief MISSING for $TODAY"
 
@@ -92,6 +94,20 @@ jobs:
               exit 1
             fi
           fi
+
+      - name: "Record durable brief-sent receipt"
+        if: ${{ steps.check.outputs.brief_sent == 'true' }}
+        run: |
+          echo "${{ steps.check.outputs.receipt_date }}" > brief-sent-receipt.txt
+          echo "Daily Brief was sent on ${{ steps.check.outputs.receipt_date }} — verified by brief-watch watchdog at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> brief-sent-receipt.txt
+
+      - name: "Upload brief-sent receipt artifact"
+        if: ${{ steps.check.outputs.brief_sent == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: brief-sent-receipt-${{ steps.check.outputs.receipt_date }}
+          path: brief-sent-receipt.txt
+          retention-days: 90
 
       - name: "Terminal status"
         if: ${{ !cancelled() }}
