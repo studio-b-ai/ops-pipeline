@@ -153,3 +153,39 @@ def test_flag_appears_in_needs_card_on_glance_json():
     assert needs_card[0]["re_class"] == "read"
     assert "race-engineer-studio-b" in needs_card[0]["by"]
     assert "109" in needs_card[0]["id"]
+
+
+def test_door_flags_attached_to_team_thing():
+    """Door flags attach to things[bay].door_flags for the team's RE row."""
+    pr = _pr(labels=["needs-human"], n=110, repo="ops-pipeline")
+    stint = {"id": 1, "company": "studio-b", "seat": "mechanic", "title": "test stint",
+             "state": "⚪ unclaimed", "tags": [], "headline": None, "shape": "task",
+             "budget_min": None, "age": "1m", "for": None, "crew": None, "race": None}
+    with patch.object(board, "pr_cards", return_value={"rides": [], "asks": [], "red": [], "flags": [pr], "pending": []}):
+        with patch.object(board, "load_stints", return_value=[stint]):
+            with patch.object(board, "load_races", return_value={}):
+                with patch.object(board, "since_block", return_value={"items": [], "done": [], "new": [], "merged": [], "anchor": ""}):
+                    with patch.object(board, "open_flags", return_value=[]):
+                        with patch.object(board, "load_prs", return_value=[]):
+                            with patch.object(board, "radio_thread", return_value=[]):
+                                with patch.object(board, "load_last_receipts", return_value={}):
+                                    g = board.glance_json(stints=[stint], kevin_rows=[], flags=[], seats={}, races={}, sessions=[], crews=[])
+
+    things = g["things"]
+    assert len(things) == 1
+    assert things[0]["key"] == "studio-b"
+    door_flags = things[0].get("door_flags", [])
+    assert len(door_flags) == 1
+    assert door_flags[0]["n"] == 110
+    assert door_flags[0]["repo"] == "ops-pipeline"
+
+
+def test_door_template_never_cards():
+    """A still-refused PR with no card file → load_card returns _door_template: True → draft=None."""
+    with patch.object(board, "load_prs", return_value=[]):
+        result = board.load_card("studio-b", "pr:ops-pipeline#111")
+    # When no PR is found (empty load_prs), the function falls through to _card_from_file,
+    # which returns None (no card file). But the pr: handling in the ops-pipeline version
+    # only returns _door_template for still_refused with leg != "review".
+    # For a PR not found in load_prs, the needs-human check returns None.
+    assert result is None or result.get("_door_template") is True

@@ -744,14 +744,27 @@ def glance_json(stints, kevin_rows, flags, seats, races, sessions=(), crews=()):
                            "_pr": p, "state": "🔵 BLOCKED on Kevin", "status": "open", "created": p["created"], "updated": p["created"], "priority": "medium"})
     # stint #410: door flags ride the RE's row (class read), not Kevin's queue. Only a card file moves them to Kevin.
     needs_card = []
+    door_flags_by_bay = {}
     for p in PRS["flags"]:
         bay = "studio-b" if p["repo"] in ("claude-config-plane","ops-pipeline","brain","power-unit","toto","lightsout","radio") else "asthetik"
         re_seat = (TEAMS.get(bay) or {}).get("race_engineer") or f"race-engineer-{bay}"
         door_info = p.get("door") or {}
         bullets = " · ".join((door_info.get("bullets") or [p["title"][:70]])[:2])
         reason = f"Door {door_info.get('votes', 'FLAG')}: {bullets}"
-        needs_card.append({"id": f"pr:{p['repo']}#{p['n']}", "title": f"{p['repo']}#{p['n']} — door flag · RE read",
+        sid = f"pr:{p['repo']}#{p['n']}"
+        needs_card.append({"id": sid, "title": f"{p['repo']}#{p['n']} — door flag · RE read",
                            "by": re_seat, "reason": reason, "bay": bay, "re_class": "read"})
+        door_flags_by_bay.setdefault(bay, []).append({
+            "id": sid, "repo": p["repo"], "n": p["n"], "title": p["title"][:64],
+            "age": age(p["created"]),
+            "door": p.get("door"),
+            "flag": p.get("flag"),
+            "mergeable": p.get("mergeable")
+        })
+    for bay, rows in door_flags_by_bay.items():
+        th = things.get(bay)
+        if th:
+            th.setdefault("door_flags", []).extend(rows)
     def qrank(s):
         # actionable cards first · then gated (waiting on a clock) · then undrafted (the RE's stall) · then race · priority
         bay = s.get("bay") or s.get("company"); c = load_card(bay, s["id"])
