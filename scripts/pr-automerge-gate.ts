@@ -1441,6 +1441,10 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   // above (CI rollup clean + mergeStateStatus CLEAN) and the revalidate below —
   // a box-only PR with a red rollup or DIRTY/UNSTABLE state still refuses there
   // (negative controls: brain#160 DIRTY, client-asthetik#372 UNSTABLE).
+  // (L2D-02's #508 — enrollGateRefusal + postFlagCard on the train FLAG branch —
+  // landed on main after this excision and is subsumed by it: with no review leg
+  // there is no train-path FLAG to card; a box-only refusal can now come only from
+  // the readiness floor, which already logs + refuses loudly.)
 
   // ── Revalidate-then-merge (doc §3.1 step 7, move 5) — re-fetch ONCE more,
   // immediately before merging; any delta aborts THIS cycle (never retried same run,
