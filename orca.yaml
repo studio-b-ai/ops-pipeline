@@ -20,4 +20,3 @@ scripts:
     bash "$HOME/dev/seats/team-principal/desk/orca-worktree-setup.sh"
   archive: |
     true
-
