@@ -312,3 +312,5 @@ Local dry-run: `cd scripts && npx tsx restart-train.ts --dry-run --now <ISO>`.
 Operations repos are canonical, but the surfaces ops people use day-to-day (Slack canvases, HubSpot UI) drift the moment the repo changes without manual mirror updates. This pipeline makes drift impossible (sync-on-push) and auditable (weekly drift-check) — without sacrificing the GitOps workflow that makes the repo trustworthy in the first place.
 
 Pattern is the same one used by [`studio-b-ai/acuops-pipeline`](https://github.com/studio-b-ai/acuops-pipeline) for Acumatica deploys: one canonical engine, many consumer repos, all pinned `@v1` and moving together.
+
+<!-- stint 486 deploy-verify probe — non-functional, CI pipeline test only -->
