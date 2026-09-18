@@ -5,6 +5,7 @@ import {
   buildFlagCard,
   cardMarkerFor,
   doorSentenceFor,
+  flagCardMarkersFor,
   isCardLeg,
   legacyCardMarkerFor,
 } from "../gate-flag-card.js";
@@ -114,6 +115,34 @@ describe("idempotency markers are per (leg, head)", () => {
   });
 });
 
+describe("flagCardMarkersFor — one marker vocabulary for poster AND probe (stint #724)", () => {
+  const head = "6c54b4419eb93ce7980261200b40703ddc34d224"; // cp#471's flagged-and-merged head
+
+  it("review leg: the probe sees BOTH the per-leg marker and the pre-#313 legacy form", () => {
+    expect(flagCardMarkersFor("review", head)).toEqual([cardMarkerFor("review", head), legacyCardMarkerFor(head)]);
+  });
+
+  it.each(["class-match", "line-cap", "named-checks"] as const)("%s leg: exactly one marker (no legacy form exists)", (leg) => {
+    expect(flagCardMarkersFor(leg, head)).toEqual([cardMarkerFor(leg, head)]);
+  });
+
+  it("a card posted by buildFlagCard is found by its own markers (poster/probe agree)", () => {
+    for (const leg of ["review", "class-match", "line-cap", "named-checks"] as const) {
+      const card = buildFlagCard({ leg, headSha: head, reasons: ["x"] });
+      const markers = flagCardMarkersFor(leg, head);
+      // The probe's jq is `body | select(contains(marker))` — the posted body must match.
+      expect(markers.some((m) => card.body.includes(m))).toBe(true);
+    }
+  });
+
+  it("a flag on an OLDER head does not match a probe on the CURRENT head (new head = fresh review)", () => {
+    const oldHead = "a".repeat(40);
+    const newHead = "b".repeat(40);
+    const cardOnOldHead = buildFlagCard({ leg: "review", headSha: oldHead, reasons: ["x"] });
+    expect(flagCardMarkersFor("review", newHead).some((m) => cardOnOldHead.body.includes(m))).toBe(false);
+  });
+});
+
 describe("isCardLeg admits exactly the decision legs", () => {
   it.each(["review", "class-match", "line-cap", "named-checks"])("%s earns a card", (leg) => {
     expect(isCardLeg(leg)).toBe(true);
@@ -175,6 +204,72 @@ describe("pr-automerge-gate.ts actually wires the card at every decision leg", (
     const helper = src.slice(start, start + 2000);
     expect(helper).toContain("try {");
     expect(helper).toMatch(/catch \(e\)/);
+  });
+});
+
+/**
+ * The sticky-flag wiring guard (stint #724, the 2026-09-18 FIRE — 4 in 48h). A
+ * review-FLAGGED head re-rolled the 2-of-3 model vote each sweep until it landed
+ * CLEAN and merged with the blue card on and NO human key (claude-config-plane#471:
+ * flagged 13:29Z on 6c54b44, merged 06:42Z with zero human label events). The pure
+ * marker helpers above are worthless if the gate never CALLS the probe (#464) — this
+ * block asserts against the gate source on disk that a flagged head PARKS before any
+ * review spend.
+ */
+describe("pr-automerge-gate.ts parks a review-FLAGGED head instead of re-rolling the vote", () => {
+  const src = readFileSync(join(SCRIPTS_DIR, "pr-automerge-gate.ts"), "utf8");
+
+  it("imports the shared marker vocabulary (poster and probe cannot drift apart)", () => {
+    expect(src).toMatch(/import \{[^}]*flagCardMarkersFor[^}]*\} from "\.\/lib\/gate-flag-card\.js"/);
+  });
+
+  it("the probe searches the same markers the poster writes", () => {
+    const start = src.indexOf("function reviewFlagCardOnHead");
+    expect(start).toBeGreaterThan(-1);
+    const helper = src.slice(start, start + 1500);
+    expect(helper).toContain('flagCardMarkersFor("review", headSha)');
+  });
+
+  it("the probe is fail-closed — a blind oracle crashes the run, never waves a re-roll through (#322)", () => {
+    const start = src.indexOf("function reviewFlagCardOnHead");
+    // The helper ends at the review-leg section banner — bound the window there.
+    const end = src.indexOf("independent review leg ─", start);
+    expect(end).toBeGreaterThan(start);
+    const helper = src.slice(start, end);
+    expect(helper).not.toContain("try {");
+    expect(helper).not.toMatch(/catch/);
+  });
+
+  it("the park check runs BEFORE the paid vote, and only when no human receipt holds", () => {
+    const parkIdx = src.indexOf("reviewFlagCardOnHead(repo, pr, prJson.headRefOid)");
+    const voteIdx = src.indexOf("await independentReviewVote(diff, reviewSystemPromptFor(prClass))");
+    const receiptIdx = src.indexOf("const humanReceipt = humanReviewReceipt(repo, pr, labels);");
+    expect(receiptIdx).toBeGreaterThan(-1);
+    expect(parkIdx).toBeGreaterThan(receiptIdx); // a `reviewed` receipt still opens the door
+    expect(voteIdx).toBeGreaterThan(parkIdx); // a parked head costs zero Anthropic spend
+    expect(src).toContain("if (!humanReceipt && reviewFlagCardOnHead(repo, pr, prJson.headRefOid))");
+  });
+
+  it("the park path refuses with leg=review and never merges, never re-cards, never spends", () => {
+    const start = src.indexOf("if (!humanReceipt && reviewFlagCardOnHead(repo, pr, prJson.headRefOid))");
+    // The park block ends where the paid-vote line begins — bound the window there.
+    const end = src.indexOf("const review = humanReceipt", start);
+    expect(end).toBeGreaterThan(start);
+    const block = src.slice(start, end);
+    expect(block).toContain('leg: "review"');
+    expect(block).toContain("return;");
+    expect(block).not.toContain("mergePr(");
+    expect(block).not.toContain("postFlagCard(");
+    expect(block).not.toContain("independentReviewVote(");
+  });
+
+  it("the human doors stay open around the park: box override earlier, reviewed receipt before the probe", () => {
+    const boxIdx = src.indexOf("evaluateQueuedOverride(repo, pr, prJson, labels)");
+    const receiptIdx = src.indexOf("const humanReceipt = humanReviewReceipt(repo, pr, labels);");
+    const parkIdx = src.indexOf("reviewFlagCardOnHead(repo, pr, prJson.headRefOid)");
+    expect(boxIdx).toBeGreaterThan(-1);
+    expect(boxIdx).toBeLessThan(parkIdx); // `box` merges a flagged head sha-pinned
+    expect(receiptIdx).toBeLessThan(parkIdx); // transition-week `reviewed` receipt satisfies the leg first
   });
 });
 
