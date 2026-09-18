@@ -76,12 +76,12 @@ describe("globToRegExp", () => {
 const GOOD_ARC_YAML = `
 arcs:
   - slug: wr-notice-lane
-    repo: studio-b-ai/webhook-router
+    repo: studio-b-ai/radio
     surface: railway:test-svc
     allowed_paths:
       - "src/**"
     decision_doc: library/decisions/2026-08-30-example.md
-    registered_by: '"register wr-notice-lane: webhook-router src until 9/10" — 2026-08-30T18:00Z'
+    registered_by: '"register wr-notice-lane: radio src until 9/10" — 2026-08-30T18:00Z'
     expires: "2026-09-10"
     lane_manager: mechanic
     single_n_proven: "receipt: wr#783 chain"
@@ -272,7 +272,7 @@ function goodRegistries(): Registries {
 
 function goodFacts(): DepartureFacts {
   return {
-    repo: "studio-b-ai/webhook-router",
+    repo: "studio-b-ai/radio",
     changedPaths: ["src/routes/notice.ts", "src/lib/notice-format.ts"],
     changedLineCount: 42,
     headSha: "abc1234def5678900000000000000000000000000",

@@ -5,7 +5,7 @@ import { formatMergeDoorLine, formatTrainMergeReceipt, mergeDoorFrom, type Merge
 // restart train" regardless of which workflow actually executed the merge —
 // the RUNG (who's authorized) and the DOOR (which run did it) are different
 // facts, and only the rung was ever named. Three seats inferred the door from
-// that wrong name on webhook-router#891/#900 (15:24Z) and bolt-wms#2148
+// that wrong name on radio#891/#900 (15:24Z) and bolt-wms#2148
 // (19:17Z); the real door was squasher-fleet-sweep.yml. Every case here is a
 // planted, both-directions control (#322/#471): a known-good door renders the
 // real facts, a known-absent door renders honestly as unknown, and the
