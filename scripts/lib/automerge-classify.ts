@@ -43,6 +43,11 @@ const BUGSQUASHER_LABEL = "bugsquasher";
 // ops#409 taught only the QUEUEING step (gateQueues) this label; both eligibility legs below still demanded `bugsquasher`,
 // so no seat-authored code-fix PR had ever merged autonomously (15:19Z 9/13 sweep: 5 refusals "missing 'bugsquasher'").
 const FLEET_INTERNAL_LABEL = "fleet-internal";
+// Stint #689 fleet-internal class legs (label vocabulary mirrors label-authority.ts's
+// HOLD_LABEL and the blue-card flow's `needs-human` — declared locally so this module
+// stays dependency-free; the values are the fleet's one vocabulary, Kevin 2026-09-02).
+const NEEDS_HUMAN_LABEL = "needs-human";
+const HOLD_LABEL_VALUE = "hold";
 const ELIGIBLE_LABELS = [BUGSQUASHER_LABEL, FLEET_INTERNAL_LABEL];
 const hasEligibleLabel = (labels: readonly string[]) => ELIGIBLE_LABELS.some((l) => labels.includes(l));
 const MAX_CHANGED_LINES = 10;
@@ -420,12 +425,12 @@ const CLEAN_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL"]);
 // evaluated after it, so every existing docs-comment decision is byte-identical to
 // before.
 
-export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only" | "vault-doc" | "code-fix";
+export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only" | "vault-doc" | "code-fix" | "fleet-internal";
 
 // The single canonical enumeration of valid classes — both the runner's CLI parsing
 // (--enabled-classes validation) and gateDecisionForClass's own runtime guard import
 // this SAME array, so the two can never drift out of sync with each other.
-export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only", "vault-doc", "code-fix"];
+export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only", "vault-doc", "code-fix", "fleet-internal"];
 
 const DOCS_COMMENT_LINE_CAP = MAX_CHANGED_LINES; // 10, unchanged
 const CI_INFRA_LINE_CAP = 120;  // 9/13: a workflow file with its comments is rarely under 40
@@ -784,6 +789,44 @@ function evalCodeFix(files: GateFile[], totalChangedLines: number, safePathGlobs
   return { prClass: "code-fix", shapeOk, lineCapOk: effectiveLines <= CODE_FIX_LINE_CAP, cap: CODE_FIX_LINE_CAP, shapeReasons };
 }
 
+/**
+ * Stint #689 (Kevin 9/18, "the rest I approve your rec"): the fleet-internal candidate —
+ * the SECOND machine class at the release check. Unlike every class above it is NOT a
+ * diff-shape class: ANY file set qualifies, guarded solely by the built-in NON-overridable
+ * denylist backstop (the same CODE_FIX_BUILTIN_DENYLIST — .github/**, auth/middleware,
+ * migrations, SQL, pricing, Customization/**, package manifests all still route to a
+ * human). There is deliberately NO line cap: the class's trust basis is not the diff's
+ * size but its PROVENANCE — the runner's own `fleet-internal` label (fleet repo,
+ * in-registry, no live-surface path — lib/fleet-internal-label.sh) plus the state legs
+ * that classification cannot see (no needs-human/hold, named required_checks strictly
+ * SUCCESS, mergeStateStatus CLEAN, independent review CLEAN), which live in
+ * gateDecisionForClass and the runner.
+ *
+ * The candidate joins the candidate set ONLY when the caller passes `labels` containing
+ * `fleet-internal` (see classifyPrDiffClass) — a PR without the label gets byte-identical
+ * receipts to before this class existed. Evaluated LAST of all candidates, so every
+ * narrower, longer-proven class keeps first refusal and existing resolutions stay
+ * byte-identical. Per-repo opt-in is the caller's --enabled-classes (squasher-fleet.json);
+ * ops-pipeline itself is EXCLUDED from the class by the stint contract (the door never
+ * merges itself).
+ */
+function evalFleetInternal(files: GateFile[]): CandidateEval {
+  const denyHits = files
+    .map((f) => ({ path: f.path, hits: codeFixDenylistHits(f.path) }))
+    .filter((f) => f.hits.length > 0);
+  const shapeReasons: string[] = [];
+  if (denyHits.length > 0) {
+    shapeReasons.push(
+      `fleet-internal: built-in denylist hit(s): ${denyHits.map((f) => `${f.path} (${f.hits.join(", ")})`).join(", ")}`,
+    );
+  }
+  const shapeOk = shapeReasons.length === 0;
+  // No line cap by design (see the docblock) — lineCapOk is unconditionally true, so
+  // the `cap` value never surfaces in a line-cap reason; POSITIVE_INFINITY makes that
+  // "no cap" semantics explicit rather than a magic number.
+  return { prClass: "fleet-internal", shapeOk, lineCapOk: true, cap: Number.POSITIVE_INFINITY, shapeReasons };
+}
+
 export interface ClassifyPrDiffClassInput {
   /** Every changed file's path AND its existing doc|comment-only|code file class
    *  (from classifyDiffFile/reconcileFileClasses) — reused as-is for the unchanged
@@ -815,6 +858,13 @@ export interface ClassifyPrDiffClassInput {
    *  also keeps every pre-B1 caller's classification byte-identical. Only the
    *  code-fix candidate reads this — the other three classes ignore it. */
   safePathGlobs?: string[];
+  /** Stint #689: the PR's current label names. Read ONLY by the fleet-internal
+   *  candidate, which joins the candidate set solely when `fleet-internal` is
+   *  present — the class is the fleet's own lane, so a PR not carrying the
+   *  runner's label must get byte-identical receipts to before the class existed
+   *  (same opt-in shape as code-fix's safePathGlobs). Omitted/without the label ⇒
+   *  the fleet-internal candidate never joins. */
+  labels?: string[];
 }
 
 export interface ClassifyPrDiffClassResult {
@@ -849,7 +899,7 @@ export interface ClassifyPrDiffClassResult {
  * longest-proven class gets first refusal.
  */
 export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPrDiffClassResult {
-  const { files, totalChangedLines, sensitivePathPatterns, additions, safePathGlobs } = input;
+  const { files, totalChangedLines, sensitivePathPatterns, additions, safePathGlobs, labels } = input;
 
   if (files.length === 0) {
     return { prClass: null, failureLeg: "class-match", reasons: ["no changed files"] };
@@ -897,6 +947,15 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
   // and the runner's [config] note covers the enabled-with-zero-globs case.
   if (safePathGlobs && safePathGlobs.length > 0) {
     candidates.push(evalCodeFix(files, totalChangedLines, safePathGlobs, additions));
+  }
+  // Fleet-internal LAST of all (stint #689): the widest class only ever picks up what
+  // every narrower, longer-proven class refused, and it joins the candidate set ONLY
+  // when the PR carries the runner's `fleet-internal` label — same opt-in-by-caller-
+  // input shape as code-fix's globs, so a caller that never passes labels (or a PR
+  // without the label) gets byte-identical receipts, with no "fleet-internal:" reason
+  // lines appearing on their missed-PR telemetry.
+  if (labels && labels.includes(FLEET_INTERNAL_LABEL)) {
+    candidates.push(evalFleetInternal(files));
   }
 
   const fullMatch = candidates.find((c) => c.shapeOk && c.lineCapOk);
@@ -964,6 +1023,31 @@ export function gateDecisionForClass(input: GateInputV2): GateResult {
   }
   if (input.reviewVerdict !== "CLEAN") {
     reasons.push(`independent review verdict '${input.reviewVerdict}' !== 'CLEAN'`);
+  }
+
+  // Stint #689: the fleet-internal class's OWN label legs, scoped to that class ONLY —
+  // every other class's label handling stays byte-identical (the blue-card flow relies
+  // on `needs-human` NOT blocking the narrower classes: the label is applied AFTER a
+  // refusal, and the next sweep re-evaluates and re-refuses at the same leg).
+  // - the `fleet-internal` label ITSELF must be present (the generic eligibility leg
+  //   above also accepts `bugsquasher` — this class is the fleet's own lane);
+  // - `needs-human` parks it: the label means a review FLAG's blue card or a human's
+  //   ask is already open on the PR — it is Kevin's decision now, and `box` (his one
+  //   human key, 2026-09-15) is the only thing that opens it. This machine class never
+  //   merges a PR a human has already been asked to decide;
+  // - `hold` parks it (defense-in-depth: the runner's "held" leg already short-circuits
+  //   BEFORE classification, but this function is exported and callable independently —
+  //   a caller that skips the runner's ordering must still fail closed on Kevin's word).
+  if (input.prClass === "fleet-internal") {
+    if (!input.labels.includes(FLEET_INTERNAL_LABEL)) {
+      reasons.push(`class 'fleet-internal' requires the '${FLEET_INTERNAL_LABEL}' label itself (has: ${input.labels.length ? input.labels.join(", ") : "none"})`);
+    }
+    if (input.labels.includes(NEEDS_HUMAN_LABEL)) {
+      reasons.push(`'${NEEDS_HUMAN_LABEL}' is present — the PR is already a human's decision; only 'box' opens it, never this machine class`);
+    }
+    if (input.labels.includes(HOLD_LABEL_VALUE)) {
+      reasons.push(`'${HOLD_LABEL_VALUE}' is present — parked by Kevin's word`);
+    }
   }
 
   return { decision: reasons.length === 0 ? "merge" : "wait", reasons };
