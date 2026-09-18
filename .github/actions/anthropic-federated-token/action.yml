@@ -27,18 +27,35 @@ runs:
   using: "composite"
   steps:
     - name: Fetch GitHub OIDC token
-      uses: actions/github-script@v8
+      shell: bash
       env:
         WIF_AUDIENCE: ${{ inputs.audience }}
-      with:
-        script: |
-          const fs = require('fs');
-          const path = require('path');
-          const file = path.join(process.env.RUNNER_TEMP, 'anthropic-jwt');
-          const token = await core.getIDToken(process.env.WIF_AUDIENCE);
-          core.setSecret(token);
-          fs.writeFileSync(file, token, { mode: 0o600 });
-          core.exportVariable('ANTHROPIC_IDENTITY_TOKEN_FILE', file);
+      run: |
+        set -euo pipefail
+        # Azure IMDS occasionally times out on the initial ID-token fetch (sweep run 35051865352
+        # was one gate lost that way). Retry with backoff on the same curl call the refresher
+        # below already uses to keep the token fresh — cheaper and more resilient than the
+        # github-script wrapper around @actions/core.getIDToken (no built-in retry there).
+        FILE="$RUNNER_TEMP/anthropic-jwt"
+        umask 077
+        TOKEN=""
+        for attempt in 1 2 3 4 5; do
+          if TOKEN="$(curl -fsS --max-time 15 \
+              -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$WIF_AUDIENCE" \
+              | jq -er .value)"; then
+            break
+          fi
+          if [ "$attempt" -eq 5 ]; then
+            echo "::error::anthropic-federated-token: OIDC token fetch failed after 5 attempts"
+            exit 1
+          fi
+          sleep "$((attempt * 2))"
+        done
+        echo "::add-mask::$TOKEN"
+        printf '%s' "$TOKEN" > "$FILE"
+        chmod 600 "$FILE"
+        echo "ANTHROPIC_IDENTITY_TOKEN_FILE=$FILE" >> "$GITHUB_ENV"
 
     - name: Export federation variables and keep the identity token fresh
       shell: bash
