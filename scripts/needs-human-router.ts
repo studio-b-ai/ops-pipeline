@@ -47,6 +47,8 @@ import { PROBE_MARKER } from "./lib/needs-human-probe-lib.js";
 import {
   HOLD_RECEIPT_MARKER,
   ROUTE_RECEIPT_MARKER,
+  firstPassDisposition,
+  firstPassMarkerBody,
   hasAnyRouterReceipt,
   hasAuthorizedDisapproval,
   hasHoldReceipt,
@@ -54,7 +56,9 @@ import {
   isTrustedMarkerAuthor,
   recallDisposition,
   routeDisposition,
+  scanFirstPassMarker,
   summarizeDispositions,
+  type FirstPassMarkerScan,
   type Reactor,
   type RouterDisposition,
   laneLabelFor,
@@ -181,6 +185,19 @@ function holdCrossRepoReceipt(target: string, targetAllowed: boolean): string {
   ].join("\n");
 }
 
+// stint #690 (2026-09-18): the close receipt for the seven-day unrouted clock — names the row
+// per the stint's end_state ("closed with a comment naming the row"). Reopening + re-labeling
+// restarts the clock (a fresh first-pass stamp supersedes via scanFirstPassMarker's latest-wins).
+function closeUnroutedReceipt(firstPassAt: Date): string {
+  return [
+    `⏱️ **Closed — unrouted seven days after the router's first pass** (first pass ${firstPassAt.toISOString()}).`,
+    "",
+    "needs-human means a named seat and a clock, never a parking lot (stint #690). This issue carried `needs-human` for a full seven-day window with no probe trailer to route on and no human action.",
+    "",
+    "Reopen if it still needs a human — re-adding the `needs-human` label restarts the router's clock with a fresh first-pass stamp. _(ops-pipeline needs-human router, stint #690)_",
+  ].join("\n");
+}
+
 // ───────────────────────────── shared helpers ─────────────────────────────
 
 /**
@@ -282,7 +299,10 @@ async function runMainPass(repo: string, dryRun: boolean, actionedThisRun: Set<n
 
     const row: IssueRow = { number: issue.number, title: truncate(issue.title, 70) };
     const labelNames = (issue.labels ?? []).map((l) => l.name);
-    await logMainOutcome(row, disposition, holdReceiptPresent, dryRun, actionedThisRun, repo, labelNames);
+    // stint #690: scan for the first-pass clock marker HERE (where the trusted-comment list
+    // exists) and hand the pure result down — logMainOutcome stays I/O-free for the scan.
+    const firstPassScan = scanFirstPassMarker(trusted.map((c) => c.body));
+    await logMainOutcome(row, disposition, holdReceiptPresent, dryRun, actionedThisRun, repo, labelNames, firstPassScan);
   }
 
   return dispositions;
@@ -296,6 +316,7 @@ async function logMainOutcome(
   actionedThisRun: Set<number>,
   repo: string,
   labels: readonly string[],
+  firstPassScan: FirstPassMarkerScan,
 ): Promise<void> {
   const head = `  #${issue.number} "${issue.title}"`;
 
@@ -317,9 +338,31 @@ async function logMainOutcome(
       // human's explicit action.
       console.log(`${head}  skip-already-routed`);
       return;
-    case "no-probe":
-      console.log(`${head}  no-probe (no findings comment yet — nothing to route on)`);
+    case "no-probe": {
+      // stint #690 (2026-09-18): no-probe is the parking lot — open, labeled, nothing to route
+      // on, previously counted and left forever (#331). Now it carries the seven-day clock:
+      // the FIRST unrouted pass posts one first-pass stamp (clock starts at first pass, never
+      // at filing date — the 118 already-old issues get one full pass before any closure); a
+      // pass finding the stamp older than the window closes the issue with a comment naming
+      // the row. A marker whose stamp won't parse is fail-safe: clock-unparseable NEVER closes
+      // (Rule #322 — the close oracle must reject a known-bad stamp). Both the stamp and the
+      // close are metered through the shared #331 ACTION_CAP.
+      const clock = firstPassDisposition({ markerSeen: firstPassScan.seen, firstPassAt: firstPassScan.at, now: new Date() });
+      if (clock.kind === "stamp-first-pass") {
+        const result = tryApply(() => commentIssue(repo, issue.number, firstPassMarkerBody(new Date())), dryRun);
+        logResult(head, "no-probe (stamp first-pass clock)", result);
+        if (result !== "capped") actionedThisRun.add(issue.number);
+      } else if (clock.kind === "close-unrouted") {
+        const result = tryApply(() => closeIssue(repo, issue.number, closeUnroutedReceipt(clock.firstPassAt)), dryRun);
+        logResult(head, "no-probe close-unrouted (seven-day clock elapsed)", result);
+        if (result !== "capped") actionedThisRun.add(issue.number);
+      } else if (clock.kind === "clock-unparseable") {
+        console.log(`${head}  no-probe (first-pass marker present but stamp unparseable — fail-safe, never closes)`);
+      } else {
+        console.log(`${head}  no-probe (clock running — closes ${clock.closesAt.toISOString()} if still unrouted)`);
+      }
       return;
+    }
     case "close-rejected": {
       const result = tryApply(() => closeIssue(repo, issue.number, closeRejectedReceipt()), dryRun);
       logResult(head, "close-rejected (authorized 👎, pre-routing)", result);

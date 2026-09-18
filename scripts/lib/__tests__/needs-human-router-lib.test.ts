@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   FLEET_APP_MARKER_AUTHOR,
+  firstPassDisposition,
+  firstPassMarkerBody,
   hasAnyRouterReceipt,
   hasAuthorizedDisapproval,
   hasHoldReceipt,
@@ -10,8 +12,10 @@ import {
   recallDisposition,
   ROUTE_RECEIPT_MARKER,
   routeDisposition,
+  scanFirstPassMarker,
   summarizeDispositions,
   TRUSTED_MARKER_AUTHOR,
+  UNROUTED_WINDOW_MS,
   type RouterDecisionInput,
   laneLabelFor,
   REPO_LANE_MANAGER,
@@ -264,5 +268,81 @@ describe("laneLabelFor (2026-09-06 — every route carries the seat's lane label
   it("control: every mapped seat is a canonical rail slug", () => {
     const seats = new Set(Object.values(REPO_LANE_MANAGER));
     for (const s of seats) expect(["mechanic", "engineer", "dispatcher", "controller", "publicity", "desk", "roundhouse", "general-counsel", "pricing"]).toContain(s);
+  });
+});
+
+// ─────────────────────── first-pass clock (stint #690, 2026-09-18) ───────────────────────
+
+describe("scanFirstPassMarker", () => {
+  const STAMP = "2026-09-18T06:45:00.000Z";
+
+  it("negative control (Rule #322): no marker in an ordinary thread", () => {
+    const scan = scanFirstPassMarker(["hi", "needs-human please", "<!-- other-marker -->"]);
+    expect(scan.seen).toBe(false);
+    expect(scan.at).toBeNull();
+  });
+
+  it("finds the marker and parses its ISO stamp", () => {
+    const scan = scanFirstPassMarker([firstPassMarkerBody(new Date(STAMP))]);
+    expect(scan.seen).toBe(true);
+    expect(scan.at?.toISOString()).toBe(STAMP);
+  });
+
+  it("latest parseable stamp wins across multiple markers (re-stamp restarts the clock)", () => {
+    const older = firstPassMarkerBody(new Date("2026-09-01T00:00:00.000Z"));
+    const newer = firstPassMarkerBody(new Date(STAMP));
+    const scan = scanFirstPassMarker([older, newer]);
+    expect(scan.at?.toISOString()).toBe(STAMP);
+    // order-independent
+    expect(scanFirstPassMarker([newer, older]).at?.toISOString()).toBe(STAMP);
+  });
+
+  it("a marker with an unparseable stamp is seen but never yields a time (fail-safe)", () => {
+    const scan = scanFirstPassMarker(["<!-- needs-human-router:first-pass:v1 not-a-date -->"]);
+    expect(scan.seen).toBe(true);
+    expect(scan.at).toBeNull();
+  });
+
+  it("a lookalike prefix without the stamp does not count as seen", () => {
+    const scan = scanFirstPassMarker(["<!-- needs-human-router:first-pass:v1 -->"]);
+    expect(scan.seen).toBe(false);
+    expect(scan.at).toBeNull();
+  });
+});
+
+describe("firstPassDisposition", () => {
+  const NOW = new Date("2026-09-18T12:00:00.000Z");
+
+  it("no marker -> stamp-first-pass (clock starts at first pass, never filing date)", () => {
+    expect(firstPassDisposition({ markerSeen: false, firstPassAt: null, now: NOW }).kind).toBe("stamp-first-pass");
+  });
+
+  it("marker inside the window -> clock-running with closesAt = stamp + 7d", () => {
+    const at = new Date("2026-09-15T12:00:00.000Z"); // 3 days in
+    const d = firstPassDisposition({ markerSeen: true, firstPassAt: at, now: NOW });
+    expect(d.kind).toBe("clock-running");
+    if (d.kind === "clock-running") expect(d.closesAt.toISOString()).toBe("2026-09-22T12:00:00.000Z");
+  });
+
+  it("marker at/past the window -> close-unrouted carrying the stamp", () => {
+    const at = new Date("2026-09-11T12:00:00.000Z"); // exactly 7 days
+    const d = firstPassDisposition({ markerSeen: true, firstPassAt: at, now: NOW });
+    expect(d.kind).toBe("close-unrouted");
+    if (d.kind === "close-unrouted") expect(d.firstPassAt.toISOString()).toBe(at.toISOString());
+  });
+
+  it("negative control (Rule #322): one millisecond inside the window does NOT close", () => {
+    const at = new Date(NOW.getTime() - UNROUTED_WINDOW_MS + 1);
+    expect(firstPassDisposition({ markerSeen: true, firstPassAt: at, now: NOW }).kind).toBe("clock-running");
+  });
+
+  it("fail-safe: an unparseable stamp (seen, no time) NEVER closes", () => {
+    expect(firstPassDisposition({ markerSeen: true, firstPassAt: null, now: NOW }).kind).toBe("clock-unparseable");
+  });
+
+  it("a custom window is honored (callers/tests can shrink the clock)", () => {
+    const at = new Date("2026-09-18T11:00:00.000Z"); // 1h in
+    const d = firstPassDisposition({ markerSeen: true, firstPassAt: at, now: NOW, windowMs: 30 * 60 * 1000 });
+    expect(d.kind).toBe("close-unrouted");
   });
 });

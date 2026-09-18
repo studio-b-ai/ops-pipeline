@@ -1,0 +1,56 @@
+name: Needs-human diagnostic probe (self-caller)
+
+# stint #690 (2026-09-18) — ops-pipeline is the SIXTH needs-human-probe caller, closing the
+# second half of this repo's coverage gap: the router self-caller (needs-human-router-caller.yml)
+# gives this repo's 24 open needs-human issues a routing engine, but routing DECIDES on the
+# probe's machine trailer (needs-human-router-lib.ts's routeDisposition reads parseProbeRouting)
+# — and the probe is event-driven (`issues: labeled`), so without THIS caller no ops-pipeline
+# issue can ever carry a trailer. Every one of the 24 evaluates `no-probe` forever: stamp, clock,
+# close. That outcome is the parking lot with a timer, not the stint's "a named seat and a
+# clock" — and it makes the stint's positive control ("one issue in ops-pipeline routes on the
+# first green run there") structurally impossible. With this caller merged, the control path is:
+# manual dispatch of this probe against one open needs-human issue (Rule #447) → trailer comment
+# → the router's next green run route-same-repos it.
+#
+# Copied VERBATIM-shape from studio-b-ai/radio's proven caller (Rule #5 — the five existing
+# callers: bolt-wms, studiob, studiob-price-sync, radio, asthetik-website). All probe logic lives
+# in THIS repo's reusable .github/workflows/needs-human-probe.yml (ops-pipeline#20); this file
+# only routes events. It exists as a SEPARATE file from the reusable half because a workflow
+# cannot both define `workflow_call` and trigger itself under one name — the same reason the
+# router's self-caller is its own file.
+#
+# Trigger: `issues: labeled` fires from USER-token label applications (the squasher CCR session
+# or a human), which Actions recursion prevention never suppresses — the ops-pipeline#23 lesson
+# applied at design time. The probe's own comment is posted with GITHUB_TOKEN and can never
+# re-trigger anything. The probe re-verifies the label and dedups via a marker comment
+# server-side, so a manual dispatch against the wrong issue no-ops loudly (Rule #182).
+#
+# permissions: issues:write is REQUIRED HERE at the caller, not only in the reusable workflow —
+# a called reusable workflow's effective token permissions are the INTERSECTION of the caller's
+# and the callee's declared grants. id-token:write likewise (WIF, ops-pipeline#338, Kevin 9/06):
+# the reusable probe federates its Claude review from the CALLER's OIDC identity — no
+# ANTHROPIC_API_KEY passthrough.
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Escalated issue number to probe immediately (Rule #447: run-now, not cron)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write   # WIF (Kevin 9/06) — reusable probe federates its Claude review
+
+jobs:
+  probe:
+    name: "Dispatch read-only diagnostic probe"
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'needs-human'
+    uses: studio-b-ai/ops-pipeline/.github/workflows/needs-human-probe.yml@main
+    with:
+      repo: ${{ github.repository }}
+      issue_number: ${{ inputs.issue_number || github.event.issue.number }}

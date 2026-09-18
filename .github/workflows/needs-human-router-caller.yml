@@ -1,0 +1,54 @@
+name: Needs-human router (self-caller)
+
+# stint #690 (2026-09-18) — ops-pipeline is the SIXTH needs-human-router caller, closing the
+# coverage gap that left this repo's own 24 open needs-human issues unrouted (live count at
+# 06:00Z 9/18: ops-pipeline 24, client-asthetik 2, asthetik-portal 1 — the three repos holding
+# needs-human issues with NO caller; the other five callers: bolt-wms :05, studiob :17,
+# studiob-price-sync :29, radio :41, asthetik-website :53).
+#
+# This file is a THIN caller — all routing logic lives in THIS repo's reusable
+# .github/workflows/needs-human-router.yml (ops-pipeline#66 chip A), exactly mirroring the
+# per-repo callers in radio/studiob/bolt-wms/studiob-price-sync/asthetik-website. It exists as
+# a SEPARATE file from the reusable half because a workflow cannot both define `workflow_call`
+# and schedule itself under one name — the reusable is needs-human-router.yml, this caller is
+# needs-human-router-caller.yml.
+#
+# permissions: issues:write is REQUIRED HERE at the caller, not only in the reusable workflow —
+# a called reusable workflow's effective token permissions are the INTERSECTION of the caller's
+# and the callee's declared grants (GitHub Actions semantics), so omitting issues:write in THIS
+# file would 403 every mutation even though the reusable workflow itself declares it.
+#
+# SEAT_INBOX_TOKEN + WEBHOOK_ROUTER_URL both live natively in THIS repo (ops-pipeline#317/#320's
+# hold-rail leg), so this caller passes the secret through explicitly — the hold-rail POST to
+# /internal/seat-inbox works here instead of printing [rail-skipped].
+
+on:
+  schedule:
+    # Hourly, UTC (Rule #94 — UTC-only). :11 slots between bolt-wms :05 and studiob :17,
+    # keeping the fleet's ~12-minute stagger (Rule #298 jitter spirit); crossrepo sweep is :47.
+    - cron: "11 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real gh reads throughout, zero mutations — preview only"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: needs-human-router-caller
+  cancel-in-progress: false
+
+jobs:
+  route:
+    name: "Route needs-human issues"
+    uses: studio-b-ai/ops-pipeline/.github/workflows/needs-human-router.yml@main
+    with:
+      repo: studio-b-ai/ops-pipeline
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+    secrets:
+      SEAT_INBOX_TOKEN: ${{ secrets.SEAT_INBOX_TOKEN }}
