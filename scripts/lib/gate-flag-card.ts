@@ -94,6 +94,17 @@ export function legacyCardMarkerFor(headSha: string): string {
   return `<!-- gate-flag ${headSha} -->`;
 }
 
+/**
+ * Every marker a flag-card search on (leg, head) must match — the card's own marker plus
+ * (review leg only) the pre-#313 legacy form. Shared by postFlagCard's idempotency search
+ * AND the gate's sticky-flag probe (stint #724, 2026-09-18): a review FLAG on a head PARKS
+ * the PR, so the probe must see exactly the cards the poster wrote — one vocabulary, two
+ * call sites, never two marker spellings drifting apart.
+ */
+export function flagCardMarkersFor(leg: CardLeg, headSha: string): string[] {
+  return leg === "review" ? [cardMarkerFor(leg, headSha), legacyCardMarkerFor(headSha)] : [cardMarkerFor(leg, headSha)];
+}
+
 export interface FlagCard {
   /** Idempotency marker to search for AND to embed as the body's first line. */
   marker: string;
