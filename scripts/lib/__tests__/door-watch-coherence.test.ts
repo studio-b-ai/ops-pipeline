@@ -29,7 +29,6 @@ const LIVE_DOOR_ROWS: DoorRegistryRow[] = [
   { repo: "studio-b-ai/note-intelligence", train: false },
   { repo: "studio-b-ai/brain", train: true },
   { repo: "studio-b-ai/claude-config-plane", train: true },
-  { repo: "studio-b-ai/roundhouse", train: false },
   { repo: "studio-b-ai/claude-hooks", train: false },
   { repo: "studio-b-ai/lightsout", train: true },
   { repo: "studio-b-ai/client-asthetik", train: true },
@@ -108,7 +107,7 @@ describe("direction discipline (Rule #425 — never fire on clean input)", () =>
   it("does NOT flag a train:false door row, watched or not", () => {
     const findings = findDoorWatchIncoherence({
       doorRows: [
-        { repo: "studio-b-ai/roundhouse", train: false },
+        { repo: "studio-b-ai/lightsout", train: false },
         { repo: "studio-b-ai/note-intelligence", train: false },
       ],
       watchedRepos: [],
