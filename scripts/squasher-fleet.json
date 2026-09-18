@@ -110,6 +110,8 @@
       "repo": "studio-b-ai/lightsout",
       "enabled_classes": "docs-comment,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
+      "safe_path_globs": "docs/**,protocol/**",
+      "required_checks": "syntax",
       "train": true
     },
     {
