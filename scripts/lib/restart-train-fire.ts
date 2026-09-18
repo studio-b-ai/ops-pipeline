@@ -397,7 +397,7 @@ export function observeStateKey(repo: string, number: number, sha: string, phase
  * receipt — #358 escalate once at ~3 fails, again only on recovery). A real machinery bug
  * (no `transient` label) still holds as today (#161/#165).
  *
- * The filer knows: the bug-squasher's abort path (see webhook-router `bugsquasher/agent-prompt.ts`)
+ * The filer knows: the bug-squasher's abort path (see radio `bugsquasher/agent-prompt.ts`)
  * or a human filer applies this label at issue-open time; this worker never adds it. Live example:
  * ops-pipeline#319 ("Heritage Restart Train: Railway anchor-fetch timeout … — transient, working
  * as designed") held the train from 04:57Z until Kevin closed it by hand at 19:1xZ, blocking two

@@ -18,7 +18,7 @@
  * ## Endpoint
  * `POST /internal/seat-inbox` at webhook-router, bearer-authed with SEAT_INBOX_TOKEN
  * (`~/.claude/bin/seat-inbox send <seat> <from> <body>` wraps this same door). Body:
- * `{ to_seat, from_seat, body }` per webhook-router/src/routes/seat-inbox.ts. Consumers:
+ * `{ to_seat, from_seat, body }` per radio/src/routes/seat-inbox.ts. Consumers:
  * the seat cold-start / prompt-drain hook + the seat-side sender CLI.
  *
  * ## Dual-store contract (Rule #99)
@@ -51,8 +51,8 @@
 const SEAT_INBOX_PATH = "/internal/seat-inbox";
 
 /**
- * The subset of webhook-router's `CANONICAL_SEATS` this rail may post to. Kept in
- * lock-step with `webhook-router/src/lib/seat-inbox-db.ts`'s own list on the fail-
+ * The subset of radio's `CANONICAL_SEATS` this rail may post to. Kept in
+ * lock-step with `radio/src/lib/seat-inbox-db.ts`'s own list on the fail-
  * closed door: a send to a non-canonical seat 400s, so an unknown `lane:<seat>` label
  * dropped here is client-side belt-and-braces, not the only guard. Update this
  * constant + the door's list together (Rule #235: a fact change gets grepped and
