@@ -8,6 +8,7 @@ import {
   evaluateMergeReadiness,
   gateDecision,
   gateDecisionForClass,
+  isMergeTreeCheckClean,
   isRollupClean,
   reconcileFileClasses,
   repoClassFor,
@@ -431,6 +432,46 @@ describe("isRollupClean", () => {
   });
 });
 
+describe("isMergeTreeCheckClean (stint #476 — deterministic merge-tree fallback)", () => {
+  const MERGE_TREE = "merge-tree (deterministic mergeability)";
+
+  it("returns false when the check is absent (fail-closed — empty rollup or not found)", () => {
+    expect(isMergeTreeCheckClean([])).toBe(false);
+    expect(isMergeTreeCheckClean([{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS" }])).toBe(false);
+  });
+
+  it("returns true when the check is present and SUCCESS", () => {
+    expect(isMergeTreeCheckClean([
+      { name: MERGE_TREE, status: "COMPLETED", conclusion: "SUCCESS" },
+    ])).toBe(true);
+  });
+
+  it("returns false when the check completed but is FAILURE (conflict)", () => {
+    expect(isMergeTreeCheckClean([
+      { name: MERGE_TREE, status: "COMPLETED", conclusion: "FAILURE" },
+    ])).toBe(false);
+  });
+
+  it("returns false when the check is still IN_PROGRESS (not yet terminal)", () => {
+    expect(isMergeTreeCheckClean([
+      { name: MERGE_TREE, status: "IN_PROGRESS", conclusion: null },
+    ])).toBe(false);
+  });
+
+  it("prefers the latest SUCCESS over stale FAILURE (supersession)", () => {
+    expect(isMergeTreeCheckClean([
+      { name: MERGE_TREE, status: "COMPLETED", conclusion: "FAILURE", completedAt: "2026-09-17T08:00:00Z" },
+      { name: MERGE_TREE, status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-09-17T08:01:00Z" },
+    ])).toBe(true);
+  });
+
+  it("uses only the merge-tree check, not a different check with 'merge' in the name", () => {
+    expect(isMergeTreeCheckClean([
+      { name: "merge (not the right name)", status: "COMPLETED", conclusion: "SUCCESS" },
+    ])).toBe(false);
+  });
+});
+
 describe("reconcileFileClasses", () => {
   // ───── Negative controls first (Rule #322) ─────
 
@@ -815,6 +856,31 @@ describe("evaluateMergeReadiness (ci-rollup leg — Rule #471 both-directions co
 
   it("declines a non-CLEAN mergeStateStatus (BLOCKED)", () => {
     expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "BLOCKED" }).ready).toBe(false);
+  });
+
+  // ── stint #476: merge-tree deterministic fallback ──
+
+  it("declines UNKNOWN without merge-tree (existing behavior — no blind pass-through)", () => {
+    // UNKNOWN alone, without a green merge-tree check, must still refuse. This proves
+    // the fallback doesn't open a gate that was previously closed (negative control).
+    expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "UNKNOWN" }).ready).toBe(false);
+  });
+
+  it("known-GOOD: UNKNOWN + mergeTreeClean=true is ready (the #471 non-default-verdict plant)", () => {
+    // This is the whole point of stint #476: when GitHub's mergeStateStatus stays
+    // UNKNOWN for hours on fast-moving repos, a deterministic merge-tree CI check
+    // provides the answer. The door must recognize it.
+    expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "UNKNOWN", mergeTreeClean: true }).ready).toBe(true);
+  });
+
+  it("declines UNKNOWN + mergeTreeClean=false (explicit: merge-tree conflicts)", () => {
+    // merge-tree clean must be explicitly true to pass; false = refusal.
+    expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "UNKNOWN", mergeTreeClean: false }).ready).toBe(false);
+  });
+
+  it("UNKNOWN + mergeTreeClean=true still declines !ciClean (ciClean gates independently)", () => {
+    // mergeTreeClean only substitutes for mergeStateStatus, not for ciClean.
+    expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "UNKNOWN", mergeTreeClean: true, ciClean: false }).ready).toBe(false);
   });
 });
 
