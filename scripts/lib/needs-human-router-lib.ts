@@ -283,3 +283,96 @@ export function laneLabelFor(repoFullName: string): string | null {
 export function laneLabelDescription(seat: string): string {
   return `owned by the ${seat} seat's lane backlog (needs-human router, 2026-09-06)`;
 }
+
+// ───────────────────────────── first-pass clock (stint #690, 2026-09-18) ─────────────────────────────
+
+/**
+ * stint #690 (Kevin 9/18: "needs-human becomes a routed seat card with a clock; anything
+ * unrouted for seven days closes"). The parking-lot population is the `no-probe` disposition:
+ * open, `needs-human`-labeled, no route receipt, no probe trailer to route on — the main pass
+ * counted them and moved on forever (#331), which is how 118 of 133 needs-human issues aged
+ * past seven days with no routing outcome at all (live count 06:00Z 9/18).
+ *
+ * The clock: the FIRST time the router evaluates a still-unrouted issue it posts ONE marker
+ * comment carrying the stamp timestamp; an issue still unrouted `UNROUTED_WINDOW_MS` after
+ * that stamp closes with a comment naming the row. The clock starts at the item's FIRST
+ * ROUTING PASS, never its filing date — the 118 already-old issues get one full pass (a
+ * stamp) before any closure, per the stint's end_state.
+ *
+ * Scope of "unrouted" (deliberate): `no-probe` ONLY. A held issue (hold-needs-kevin /
+ * hold-cross-repo) IS routed — it carries a hold receipt, the `kevin-decision` label, and a
+ * Dispatcher rail; Kevin's queue is a named seat. A `skip-already-routed` issue (route
+ * receipt present, label human-re-added) is likewise already routed; the re-label is a
+ * deliberate human act the router must not override (codex review pass 3 P2, 2026-08-14).
+ */
+
+/** Marker prefix — the full marker line is `${FIRST_PASS_MARKER_PREFIX} <ISO timestamp> -->`.
+ * Posted from the trusted bot identity only; matched via isTrustedMarkerAuthor upstream. */
+export const FIRST_PASS_MARKER_PREFIX = "<!-- needs-human-router:first-pass:v1";
+
+/** Seven days, the stint's unrouted window. */
+export const UNROUTED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+const FIRST_PASS_MARKER_RE = /<!-- needs-human-router:first-pass:v1 (\S+) -->/;
+
+export function firstPassMarkerBody(now: Date): string {
+  return [
+    `${FIRST_PASS_MARKER_PREFIX} ${now.toISOString()} -->`,
+    "⏱️ **Router clock started** — this issue carries `needs-human` but has no probe trailer to route on yet (the `no-probe` disposition). If it is still unrouted seven days after this stamp, the router closes it with a comment naming the row.",
+    "",
+    "A probe trailer supersedes the clock (the issue routes on the next pass); a human can also just remove the label or close it. _(ops-pipeline needs-human router, stint #690: needs-human means a named seat and a clock, never a parking lot.)_",
+  ].join("\n");
+}
+
+export interface FirstPassMarkerScan {
+  /** Any trusted comment carried the marker prefix at all (even with an unparseable stamp). */
+  seen: boolean;
+  /** The LATEST parseable stamp across trusted comments, or null when none parsed. */
+  at: Date | null;
+}
+
+/**
+ * Scans trusted-comment bodies for first-pass markers. Latest parseable stamp wins (a human
+ * re-adding `needs-human` after a close gets a fresh stamp on the next pass — the restarted
+ * clock must not read the stale earlier stamp). A marker whose timestamp does not parse sets
+ * `seen: true, at: null` — the fail-safe state: the clock is broken, and a broken clock must
+ * NEVER close (Rule #322 both-directions: the close oracle must reject a known-bad stamp).
+ */
+export function scanFirstPassMarker(commentBodies: string[]): FirstPassMarkerScan {
+  let seen = false;
+  let at: Date | null = null;
+  for (const body of commentBodies) {
+    const m = FIRST_PASS_MARKER_RE.exec(body);
+    if (!m) continue;
+    seen = true;
+    const t = Date.parse(m[1] ?? "");
+    if (Number.isNaN(t)) continue;
+    const d = new Date(t);
+    if (at === null || d.getTime() > at.getTime()) at = d;
+  }
+  return { seen, at };
+}
+
+export type FirstPassDisposition =
+  /** No marker yet — post the stamp (clock starts). */
+  | { kind: "stamp-first-pass" }
+  /** Marker present, window not elapsed — nothing to do; `closesAt` is when it would close. */
+  | { kind: "clock-running"; closesAt: Date }
+  /** Marker present but its stamp never parsed — fail-safe: NEVER closes on a broken clock. */
+  | { kind: "clock-unparseable" }
+  /** Window elapsed with the issue still unrouted — close it, naming the row. */
+  | { kind: "close-unrouted"; firstPassAt: Date };
+
+export function firstPassDisposition(input: {
+  markerSeen: boolean;
+  firstPassAt: Date | null;
+  now: Date;
+  windowMs?: number;
+}): FirstPassDisposition {
+  const windowMs = input.windowMs ?? UNROUTED_WINDOW_MS;
+  if (!input.markerSeen) return { kind: "stamp-first-pass" };
+  if (input.firstPassAt === null) return { kind: "clock-unparseable" };
+  const elapsed = input.now.getTime() - input.firstPassAt.getTime();
+  if (elapsed >= windowMs) return { kind: "close-unrouted", firstPassAt: input.firstPassAt };
+  return { kind: "clock-running", closesAt: new Date(input.firstPassAt.getTime() + windowMs) };
+}
