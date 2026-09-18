@@ -9,7 +9,7 @@ const SHA = "a".repeat(40);
 
 function baseArgv(overrides: Record<string, string | null> = {}): string[] {
   const defaults: Record<string, string | null> = {
-    "--repo": "studio-b-ai/webhook-router",
+    "--repo": "studio-b-ai/radio",
     "--pr": "123",
     "--merge-sha": SHA,
     "--closed-at": "2026-08-30T04:00:00Z",
@@ -42,7 +42,7 @@ describe("parseTripwireArgs", () => {
       "--required-check",
       "typecheck",
     ]);
-    expect(args.repo).toBe("studio-b-ai/webhook-router");
+    expect(args.repo).toBe("studio-b-ai/radio");
     expect(args.pr).toBe(123);
     expect(args.mergeSha).toBe(SHA);
     expect(args.closedAt).toBe("2026-08-30T04:00:00Z");
@@ -90,7 +90,7 @@ describe("parseTripwireArgs", () => {
 
   // ── value validation ──
   it("rejects a non-owner/name repo", () => {
-    expect(() => parseTripwireArgs(baseArgv({ "--repo": "webhook-router" }))).toThrow("--repo must be owner/name");
+    expect(() => parseTripwireArgs(baseArgv({ "--repo": "radio" }))).toThrow("--repo must be owner/name");
   });
 
   it("rejects a non-integer PR number", () => {

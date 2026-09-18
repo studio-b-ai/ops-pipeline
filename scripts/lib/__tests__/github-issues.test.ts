@@ -113,7 +113,7 @@ describe("isUnsearchableRepoFailure", () => {
     "The listed users and repositories cannot be searched either because the resources do not exist or you do not have permission to view them.";
 
   it.each([
-    ["the real stderr from run 34706311555 (webhook-router)", ghError(REAL_STDERR)],
+    ["the real stderr from run 34706311555 (radio, fka webhook-router)", ghError(REAL_STDERR)],
     ["the same message with the API JSON wrapping (mcp__github__search_issues shape)", new Error(REAL_STDERR)],
   ])("unsearchable: %s", (_name, err) => {
     expect(isUnsearchableRepoFailure(err)).toBe(true);

@@ -43,15 +43,15 @@ describe("orderFleetSweepEntries (ops#327)", () => {
       ...Array.from({ length: 6 }, (_, i) => mkBugsq("studio-b-ai/studiob", `${700 + i}`)),
       ...Array.from({ length: 3 }, (_, i) => mkBugsq("studio-b-ai/studiob-price-sync", `${200 + i}`)),
       ...Array.from({ length: 1 }, (_, i) => mkBugsq("studio-b-ai/ops-pipeline", `${300 + i}`)),
-      ...Array.from({ length: 13 }, (_, i) => mkBugsq("studio-b-ai/webhook-router", `${880 + i}`)),
+      ...Array.from({ length: 13 }, (_, i) => mkBugsq("studio-b-ai/radio", `${880 + i}`)),
       // The starved PR — buried at position 28 in enumeration order under the old shape.
-      mkTrain("studio-b-ai/webhook-router", "915"),
+      mkTrain("studio-b-ai/radio", "915"),
     ];
 
     const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 5, runOffset: 0 });
 
     // #915 must be present, and at position 0 (queued-first, fleet-wide).
-    expect(ordered[0]).toEqual(mkTrain("studio-b-ai/webhook-router", "915"));
+    expect(ordered[0]).toEqual(mkTrain("studio-b-ai/radio", "915"));
     expect(ordered.some((e) => e.pr_number === "915" && e.train_ready)).toBe(true);
     // No repo occupies more than the per-repo cap IN THE BUGSQUASHER GROUP.
     // Train group is exempt from per-repo cap (P2); Kevin's door word is never
@@ -70,7 +70,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
     // Rotating each repo's entries BEFORE capping fixes it — across
     // ⌈13/5⌉ = 3 offsets the union covers all 13 entries.
     const entries: FleetSweepEntry[] = Array.from({ length: 13 }, (_, i) =>
-      mkBugsq("studio-b-ai/webhook-router", `${900 + i}`),
+      mkBugsq("studio-b-ai/radio", `${900 + i}`),
     );
 
     const covered = new Set<string>();
@@ -90,14 +90,14 @@ describe("orderFleetSweepEntries (ops#327)", () => {
       mkBugsq("studio-b-ai/bolt-wms", "500"),
       mkTrain("studio-b-ai/bolt-wms", "600"),
       mkBugsq("studio-b-ai/studiob", "700"),
-      mkTrain("studio-b-ai/webhook-router", "800"),
+      mkTrain("studio-b-ai/radio", "800"),
     ];
 
     const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 5, runOffset: 0 });
 
     expect(ordered).toEqual([
       mkTrain("studio-b-ai/bolt-wms", "600"),
-      mkTrain("studio-b-ai/webhook-router", "800"),
+      mkTrain("studio-b-ai/radio", "800"),
       mkBugsq("studio-b-ai/bolt-wms", "500"),
       mkBugsq("studio-b-ai/studiob", "700"),
     ]);

@@ -173,7 +173,7 @@ const ISSUE_CREATION_CAP = 5;
 // beyond the deliverable-A import swap, and a shared constant isn't worth a THIRD module
 // for five static strings that change together with the router's own allowlist by
 // construction (both lists are reviewed in the same PR whenever a repo is added).
-const COVERED_REPOS = ["bolt-wms", "studiob", "studiob-price-sync", "webhook-router", "asthetik-trade-theme"].map(
+const COVERED_REPOS = ["bolt-wms", "studiob", "studiob-price-sync", "radio", "asthetik-trade-theme"].map(
   (r) => `${ORG}/${r}`,
 );
 const ALLOWLIST = new Set(COVERED_REPOS);
