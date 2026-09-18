@@ -40,10 +40,6 @@ repos:
   studio-b-ai/bolt-wms:
     - "e2e / flake-detection"
     - "Slack Notification"
-  studio-b-ai/webhook-router:
-    - "Slack Recovery Notice"
-    - "Slack Alert on Failure"
-    - "Post-Deploy Smoke"
   studio-b-ai/studiob:
     - "Notify on Failure"
   studio-b-ai/client-asthetik:
@@ -127,8 +123,9 @@ repos:
   # radio declares `required_checks: None`, so the stricter named-checks leg
   # still refuses its code-fix class outright.
   #
-  # PRECEDENT: these are the same three job names already sanctioned for
-  # studio-b-ai/webhook-router above, which shares radio's ci.yml shape.
+  # PRECEDENT: these are the same three job names that were sanctioned
+  # for the repo under its former name (webhook-router → radio rename;
+  # GitHub redirects the old name).
   studio-b-ai/radio:
     - "Post-Deploy Smoke"
     - "Slack Alert on Failure"

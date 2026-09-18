@@ -48,6 +48,6 @@ repos:                                     # human-visible surfaces (CoS list + 
   - studio-b-ai/asthetik-portal
   - studio-b-ai/studiob-price-sync
   - studio-b-ai/client-asthetik
-  - studio-b-ai/webhook-router
+  - studio-b-ai/radio
   - studio-b-ai/amplify
   - studio-b-ai/studiob

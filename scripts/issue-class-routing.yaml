@@ -2,7 +2,7 @@
 # "label issues however you want, but I want them picked up and worked by agents").
 #
 # CONTRACT: this file is the ONE place the front door decides which worker an
-# open issue goes to. webhook-router's dispatcher (wr#829 / eligibility.ts)
+# open issue goes to. radio's dispatcher (wr#829 / eligibility.ts)
 # reads it from the ops-pipeline main checkout; the two routine prompts mirror
 # its semantics (Squasher's "if the issue does not carry a `bug` label" step).
 # Labels stay free-form otherwise — routing keys off the ones named here and

@@ -48,7 +48,12 @@
  *      behavioral fix), which must return exactly the string `CLEAN`
  *      (strict, case-sensitive) or the whole leg is FLAG. ANY API error (network,
  *      auth, rate limit, malformed response) is ALSO FLAG — fail-closed, never
- *      silently treated as clean.
+ *      silently treated as clean. A FLAG is STICKY PER HEAD (stint #724,
+ *      2026-09-18): once the blue card stands on a head, later sweeps PARK that
+ *      head — the vote is never re-rolled under a flag (a non-deterministic
+ *      2-of-3 re-roll eventually lands CLEAN and merges with no human key;
+ *      claude-config-plane#471). Doors off a flagged head: `box`, the
+ *      transition-week `reviewed` receipt, `hold`, or a new head.
  *   7. (code-fix — ops#190 B1, doc §4.1; fleet-internal rides the denylist +
  *      named-checks legs only, stint #689) three extra legs plus a partition:
  *      every changed file matches >=1 caller-declared safe_path_glob (allowlist-
@@ -115,7 +120,7 @@ import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 import { enrollGateRefusal, resolveGateRefusals } from "./lib/gate-enroll.js";
-import { buildFlagCard, isCardLeg, type CardLeg } from "./lib/gate-flag-card.js";
+import { buildFlagCard, flagCardMarkersFor, isCardLeg, type CardLeg } from "./lib/gate-flag-card.js";
 import { mergeDoorFrom, formatTrainMergeReceipt, type MergeDoor } from "./lib/merge-door.js";
 import {
   resolveAuthorityLogins,
@@ -270,6 +275,23 @@ function postFlagCard(repo: string, pr: number, leg: GateReceiptLeg, headSha: st
   } catch (e) {
     console.log(`[warn] FLAG→card failed for ${repo}#${pr} leg=${leg}: ${(e as Error).message.split("\n")[0]}`);
   }
+}
+
+/**
+ * The sticky-flag probe (stint #724, the 2026-09-18 FIRE): true when a review-leg blue
+ * card already stands on THIS head sha. Searches the SAME markers postFlagCard writes
+ * (flagCardMarkersFor — one vocabulary, poster and probe), so a card the gate posted is
+ * a card the probe sees, including the pre-#313 legacy form.
+ *
+ * THROWS on a gh failure — deliberately unlike postFlagCard: this is a gate leg, not an
+ * advisory surface. A blind probe must crash the run (fail-closed: no merge, no review
+ * spend), never wave a re-roll through (Rule #322 — an oracle that cannot answer
+ * produces no positives).
+ */
+function reviewFlagCardOnHead(repo: string, pr: number, headSha: string): boolean {
+  const markers = flagCardMarkersFor("review", headSha);
+  const jq = `[.comments[].body | select(${markers.map((m) => `contains("${m}")`).join(" or ")})] | length`;
+  return gh(["pr", "view", String(pr), "--repo", repo, "--json", "comments", "--jq", jq]).trim() !== "0";
 }
 
 // ───────────────────────────── independent review leg ─────────────────────────────
@@ -714,6 +736,28 @@ async function evaluate(
   // FLAG carried no reason at all). Same sha-pinned, roster-human, hold-wins predicate
   // as `queued`; a bot's `reviewed`, or one older than the head, does not count.
   const humanReceipt = humanReviewReceipt(repo, pr, labels);
+
+  // ── Sticky flag (stint #724, the 2026-09-18 FIRE — 4 in 48h): a review FLAG on THIS
+  // head is a PARK, not a re-roll ticket. The 2-of-3 model vote is non-deterministic —
+  // sweeping a flagged head again eventually lands 2/3 CLEAN and merges with the blue
+  // card on and NO human key (claude-config-plane#471: FLAG card + needs-human on head
+  // 6c54b44 at 13:29Z, merged 06:42Z the next morning with zero human label events).
+  // The card's own promise — "Accept = box" — is the law: on a flagged head the only
+  // doors are a human key (`box` via evaluateQueuedOverride above; the transition-week
+  // `reviewed` receipt immediately above; `hold` parks harder) or a head move (new sha
+  // = new code = a fresh review). Probed BEFORE the paid vote: a parked head costs zero
+  // Anthropic spend.
+  if (!humanReceipt && reviewFlagCardOnHead(repo, pr, prJson.headRefOid)) {
+    const detail =
+      `a review FLAG blue card already stands on head ${prJson.headRefOid.slice(0, 7)} — parked; the model vote is NOT ` +
+      `re-rolled under a flag (stint #724: re-rolling merged flagged PRs with no human key). Doors: a human ` +
+      `\`${QUEUED_LABEL}\` label on this head (sha-pinned, overrides every decision leg), the transition-week ` +
+      `\`${REVIEWED_LABEL}\` receipt, \`${HOLD_LABEL}\` to park harder, or a new head.`;
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}`);
+    console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "review", reasons: [detail] }));
+    return;
+  }
+
   const review = humanReceipt
     ? { verdict: "CLEAN" as ReviewVerdict, detail: humanReceipt }
     : await independentReviewVote(diff, reviewSystemPromptFor(prClass));
