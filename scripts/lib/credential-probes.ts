@@ -294,6 +294,41 @@ export async function probeCloudflareToken(token: string, recordedExpiry: string
 }
 
 /**
+ * Wayfair OAuth client-secret aliveness probe (ops-pipeline stint #606, Rule #302 rung 2 —
+ * non-expiring BY DESIGN: the daily aliveness probe IS the monitoring, revoke-on-signal the
+ * response). POST /v1/oauth/token with grant_type=client_credentials, the monitored client_id
+ * + client_secret. Aliveness-shaped (never returns an expiry — Wayfair client secrets don't
+ * carry a discoverable expiry). Consumer: bolt-wms (WAYFAIR_CLIENT_ID / WAYFAIR_CLIENT_SECRET,
+ * Railway env). Proven alive 2026-09-17 via stint #600 probe.
+ *   - 200 → alive (valid token issued)
+ *   - 401 → DEAD (invalid_client — expired/revoked, or sandbox secret parked with wrong client_id)
+ *   - anything else → PROBE_FAILED, NEVER DEAD
+ */
+export async function probeWayfairOAuthClientSecret(clientId: string, clientSecret: string): Promise<ProbeResult> {
+  try {
+    const resp = await fetch("https://api.wayfair.com/v1/oauth/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    if (resp.status === 200) {
+      return { alive: true, expiry: null, source: "probe" };
+    }
+    if (resp.status === 401) {
+      return { alive: false, expiry: null, source: "probe" };
+    }
+    return { alive: true, expiry: null, source: "probe", error: `wayfair oauth probe HTTP ${resp.status}` };
+  } catch (err) {
+    return { alive: true, expiry: null, source: "probe", error: `wayfair oauth probe failed: ${errMsg(err)}` };
+  }
+}
+
+/**
  * ShipEngine API key aliveness probe (ops-pipeline#291, Rule #302 rung 2 — non-expiring BY
  * DESIGN: the daily aliveness probe IS the monitoring, revoke-on-signal the response).
  * GET /v1/carriers with header `API-Key: <value>` — aliveness-shaped (never returns an expiry,
