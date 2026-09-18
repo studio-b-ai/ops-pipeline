@@ -16,7 +16,7 @@ explicit word (#97).
 > everything. keep omo. we can shutter signatures"* — landed and were executed:
 > invest.b.studio DARK (Pages deleted, live-404 verified) · 16 repos archived
 > (Batches 1+2+5, API-verified) + Pages disabled ×8 · qa-runner inlined to
-> webhook-router (#563, live receipt = its own QA jobs on the local yml) ·
+> radio (#563, live receipt = its own QA jobs on the local yml) ·
 > 7 Railway retirements deleted + fresh-query receipted (4 services incl.
 > bolt-zoom-app; 3 projects: relay, context-engine, aesthetik-staging) ·
 > **mcp-amplify REPRIEVED** (reference check found it live in the amplify
@@ -85,10 +85,10 @@ stays — live, surviving division per 5/04.)
 
 ## Batch 3 — studiob-qa paradox (one word on the approach)
 
-Archived-but-load-bearing: webhook-router's CI calls its `qa-runner.yml` on
+Archived-but-load-bearing: radio's CI calls its `qa-runner.yml` on
 every PR (run 31463593410 verified green 8/11). **Recommended: move
-`qa-runner.yml` into webhook-router itself** — org-wide code search shows
-webhook-router is the *sole* workflow consumer, so the reusable indirection
+`qa-runner.yml` into radio itself** — org-wide code search shows
+radio is the *sole* workflow consumer, so the reusable indirection
 serves no one; the archive then stands honestly. Alternative: un-archive and
 keep as QA home. (business-dashboard's aggregator lists studiob-qa in a
 hardcoded repo array that already contains archived repos — tolerant, but
@@ -149,7 +149,7 @@ Railway map + traffic receipts decide).
 
 1. Batch 0 (minutes; Corporate lane or this seat on Kevin's word)
 2. Batches 1+2 archives (one `gh repo archive` sweep; business-dashboard list cleanup rides along)
-3. Batch 3 qa-runner migration (webhook-router PR)
+3. Batch 3 qa-runner migration (radio PR)
 4. Batch 4 service retirements, one at a time, each with #366 legs + a
    post-retirement probe receipt (#463: no credit without causal order)
 5. Batch 5 folds
@@ -196,7 +196,7 @@ Railway map + traffic receipts decide).
 | `ops-pipeline` | CTO | Studio B fleet | Fleet machinery: squasher, merge gates, health monitors, triage board, repo inventory (authoritative) | 8/12 · 9i/0p |
 | `b-studio-website` | Corporate (site arcs) | Studio B corporate | b.studio (#341-firewalled 8/11) | 8/11 · 2i/0p |
 | `studiob` | — | Studio B platform | Monorepo: studiob-api (L1 gateway; orderhub.b.studio, api.switchboard.b.studio) + acudev, business-dashboard, cos-brief-worker, auto-remediate + packages/csuite | 8/12 · 15i/16p |
-| `webhook-router` | — | Ästhetik/HF | Slack intake, sync pipeline, intranet (internal.asthetik.com); hosts the CoS envelope worker | 8/12 · 11i/17p |
+| `radio` | — | Ästhetik/HF | Slack intake, sync pipeline, intranet (internal.asthetik.com); hosts the CoS envelope worker | 8/12 · 11i/17p |
 | `client-asthetik` | — | Ästhetik/HF | HF Acumatica instance (customization + config + tests) | 8/12 · 6i/1p |
 | `studiob-price-sync` | — | Ästhetik/HF | Pricing sync + Shopify B2B catalogs + customer-account extensions | 8/10 · 10i/1p |
 | `asthetik-portal` | — | Ästhetik | Trade portal (renamed from `aesthetik-portal` 8/12, Kevin word) | 8/05 · 1i/0p |

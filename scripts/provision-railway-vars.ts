@@ -119,7 +119,7 @@ export function parseArgs(argv: string[]): ProvisionArgs | { error: string } {
 // finding; mirrored here rather than imported since that file is monitor-
 // specific and this script's domain — variable provisioning — is unrelated
 // beyond sharing this same low-level fetch mechanics, same precedent as
-// bolt-wms's github-app-token.ts / webhook-router's acuops-agent.ts each
+// bolt-wms's github-app-token.ts / radio's acuops-agent.ts each
 // independently implementing the same JWT pattern with no shared package).
 // ---------------------------------------------------------------------------
 

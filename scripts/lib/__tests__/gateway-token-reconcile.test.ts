@@ -161,7 +161,7 @@ describe("gateTitle / isGateTitle", () => {
   });
 
   it("never matches straggler or blind titles (negative control)", () => {
-    expect(isGateTitle("[token-watch] straggler: webhook-router-prod (minted 2026-06-10)")).toBe(false);
+    expect(isGateTitle("[token-watch] straggler: radio-prod (minted 2026-06-10)")).toBe(false);
     expect(isGateTitle("[token-watch] MONITOR BLIND — token table unreadable")).toBe(false);
   });
 });
@@ -210,7 +210,7 @@ describe("straggler orphan sweep (#37)", () => {
   });
 
   it("parseStragglerTitle extracts the name — and returns null for every other watch title (negative control)", () => {
-    expect(parseStragglerTitle(straggler("webhook-router-prod").title)).toBe("webhook-router-prod");
+    expect(parseStragglerTitle(straggler("radio-prod").title)).toBe("radio-prod");
     expect(parseStragglerTitle(GATE_TITLE_BASE)).toBeNull();
     expect(parseStragglerTitle(gateTitle("a1b2c3d4"))).toBeNull();
     expect(parseStragglerTitle("[token-watch] MONITOR BLIND — token table unreadable")).toBeNull();

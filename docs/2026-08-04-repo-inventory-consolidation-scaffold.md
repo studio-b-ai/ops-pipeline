@@ -25,12 +25,12 @@ unchanged before/after in every repo):
 |---|---|---|
 | bolt-wms | 303 → 25 | 844 → 174 |
 | studiob | 138 → 8 | 240 → 22 |
-| webhook-router | 75 → 2 | 177 → 170 |
+| radio | 75 → 2 | 177 → 170 |
 | ops-pipeline | 14 → 4 | 10 → 1 |
 
 **~1,450 branches removed** (all merged-PR-backed). Remaining classes need
 judgment, not automation: closed-unmerged-PR branches (abandoned work) and
-never-PR'd branches (webhook-router's `delegation/*` auto-branches are most of
+never-PR'd branches (radio's `delegation/*` auto-branches are most of
 its 170). Those ride the dedicated sitting.
 
 ## Retirement runbook (Rule #366 — every leg, same pass)
@@ -53,7 +53,7 @@ its prompt.
 
 | repo | last push | state | size |
 |---|---|---|---|
-| webhook-router | 2026-08-04 | active | 18MB |
+| radio | 2026-08-04 | active | 18MB |
 | studiob | 2026-08-04 | active | 3MB |
 | bolt-wms | 2026-08-04 | active | 62MB |
 | asthetik-trade-theme | 2026-08-04 | active | 58MB |

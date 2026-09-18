@@ -8,7 +8,7 @@
  *
  * The defect (issue body): the sweep found 30 labeled PRs and evaluated only
  * the first 20 in a stable order (per repo, bugsquasher first then train),
- * which sliced webhook-router's `queued` PR #915 off every cycle at position
+ * which sliced radio's `queued` PR #915 off every cycle at position
  * 28 of 30 while zero occurrences of "915" ever reached the log. Two shapes
  * of starvation:
  *
@@ -41,7 +41,7 @@
  *      all-or-nothing by construction of leg A).
  *
  * Both directions per Rule #322: the "planted" test asserts the queued PR
- * that was starved (webhook-router#915 at entry 28 of 30, five repos with
+ * that was starved (radio#915 at entry 28 of 30, five repos with
  * many bugsquasher PRs) now gets evaluated in the first cycle; the "control"
  * test asserts a small input (≤ fanout, ≤ per-repo cap) is returned in the
  * ordering the queued-first + rotation shape prescribes, exactly.

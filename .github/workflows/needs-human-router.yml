@@ -15,7 +15,7 @@ name: Needs-human router (reusable)
 # routing HOLDS in v1 rather than acting (Rule #184: no cross-repo writes).
 #
 # Chip B (5 repos) adds the per-repo hourly cron callers + the 2 probe callers
-# (webhook-router, asthetik-trade-theme) that this workflow depends on for coverage —
+# (radio, asthetik-trade-theme) that this workflow depends on for coverage —
 # NOT part of this PR.
 
 on:
@@ -31,8 +31,8 @@ on:
         type: boolean
         default: false
     secrets:
-      # ops-pipeline#317 / #320: the seat-inbox door's bearer (webhook-router
-      # SEAT_INBOX_TOKEN — a SECOND STORE of the same value in webhook-router's Railway
+      # ops-pipeline#317 / #320: the seat-inbox door's bearer (radio
+      # SEAT_INBOX_TOKEN — a SECOND STORE of the same value in radio's Railway
       # env, Rule #99: rotate atomically across BOTH stores or one 401s while the other
       # works). Optional so a caller without it still routes; the hold-rail leg then
       # prints [rail-skipped] on every hold rather than silently dropping the board

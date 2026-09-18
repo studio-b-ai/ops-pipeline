@@ -71,7 +71,7 @@ export function isTransientGhFailure(err: unknown): boolean {
  *
  * This is a PERSISTENT per-repo state, not a fleet-wide outage: most commonly a repo
  * whose search index has no indexable content yet (a brand-new repo, or one with no
- * indexed issues/comments at all — webhook-router's exact state as of run 34706311555
+ * indexed issues/comments at all — radio's exact state as of run 34706311555
  * that failed 651 consecutive hourly runs). Retrying does not help, unlike every 5xx
  * shape isTransientGhFailure recognizes. Callers whose scan/recall reads have no
  * candidates in an unsearchable repo BY DEFINITION can safely degrade to `[]` on this

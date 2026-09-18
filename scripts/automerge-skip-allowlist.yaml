@@ -124,7 +124,7 @@ repos:
   # still refuses its code-fix class outright.
   #
   # PRECEDENT: these are the same three job names that were sanctioned
-  # for the repo under its former name (webhook-router → radio rename;
+  # for the repo under its former name (radio → radio rename;
   # GitHub redirects the old name).
   studio-b-ai/radio:
     - "Post-Deploy Smoke"
