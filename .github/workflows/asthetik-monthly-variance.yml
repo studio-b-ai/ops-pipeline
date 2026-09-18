@@ -1,0 +1,99 @@
+name: Asthetik Monthly Variance Brief
+
+# Controller seat's Asthetik monthly variance brief (design of record:
+# brain seats/controller/monthly-variance-brief-design-v1.md).
+# Monthly on the 6th, 13:00 UTC, processing the PREVIOUS calendar month.
+#
+# Content elements (design §0):
+#   A. AP aging — DEFERRED (blocked on data source; next admin session: GL inquiry)
+#   B. Margin by channel — BI-ARInvoices ExtProfit/ExtAmount per leg
+#   C. Inventory turns — COGS from BI-ARInvoices; qty from wms_inventory (optional)
+#   D. Cash + variance headline — DEFERRED (blocked on data source)
+#
+# First organic beat: October 6, 2026 (processing September 2026).
+# Rule #464: NOT "live" until the planted firing (workflow_dispatch period=092026)
+# produces real margin and inventory numbers in the posted issue.
+#
+# Output: GitHub issue labeled `variance-brief` (the durable brief).
+
+on:
+  schedule:
+    - cron: "0 13 6 * *"
+  workflow_dispatch:
+    inputs:
+      period:
+        description: "Period MMYYYY (e.g. 092026); empty = previous calendar month"
+        type: string
+        default: ""
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: asthetik-monthly-variance
+  cancel-in-progress: false
+
+jobs:
+  brief:
+    name: "Variance brief — pull, classify, assemble, post"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: "Resolve period"
+        id: period
+        run: |
+          if [ -n "${{ inputs.period }}" ]; then
+            P="${{ inputs.period }}"
+          else
+            P=$(python3 -c "import datetime; t=datetime.datetime.now(datetime.timezone.utc).date().replace(day=1); p=t-datetime.timedelta(days=1); print(f'{p.month:02d}{p.year}')")
+          fi
+          YM="${P:2:4}${P:0:2}"
+          echo "period=$P" >> "$GITHUB_OUTPUT"
+          echo "ym=$YM" >> "$GITHUB_OUTPUT"
+          echo "Processing period $P (ym $YM)"
+
+      - name: "Pull BI-ARInvoices + StockItem + inventory (best-effort)"
+        env:
+          ACUMATICA_GATEWAY_URL: ${{ secrets.ACUMATICA_GATEWAY_URL }}
+          ACUMATICA_GATEWAY_TOKEN: ${{ secrets.ACUMATICA_GATEWAY_TOKEN }}
+          DATABASE_URL: ${{ secrets.AESTHETIK_POSTGRES_PUBLIC_URL }}
+        run: python3 scripts/cfo-brief/pull_variance_data.py --period "${{ steps.period.outputs.period }}" --workdir work
+
+      - name: "Classify + assemble brief"
+        run: python3 scripts/cfo-brief/assemble_variance_brief.py --workdir work --period "${{ steps.period.outputs.period }}" --ym "${{ steps.period.outputs.ym }}" --out work/brief.md
+
+      - name: "Post the brief issue"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          YM="${{ steps.period.outputs.ym }}"
+          TITLE="Asthetik monthly variance brief — ${YM:0:4}-${YM:4:2}"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label variance-brief --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body-file work/brief.md
+            echo "issue_url=$(gh issue view "$EXISTING" --repo "$GITHUB_REPOSITORY" --json url --jq .url)" >> "$GITHUB_ENV"
+          else
+            URL=$(gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --label variance-brief --body-file work/brief.md)
+            echo "issue_url=$URL" >> "$GITHUB_ENV"
+          fi
+
+      - name: "Machinery failure issue"
+        if: ${{ failure() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="asthetik-monthly-variance: run failed ($(date -u +%Y-%m-%d))"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label bug --search "asthetik-monthly-variance: run failed in:title" --json number --jq '.[0].number // empty')
+          BODY="Scheduled variance brief run failed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID — full log attached to the run. Period: ${{ steps.period.outputs.period }}."
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --label bug --body "$BODY"
+          fi
+
+      - name: "Terminal status"
+        if: ${{ !cancelled() }}
+        run: echo "asthetik-monthly-variance finished with job status ${{ job.status }} for period ${{ steps.period.outputs.period }}"
