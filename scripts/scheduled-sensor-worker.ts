@@ -4,8 +4,11 @@
  * end state named and its close never delivered. Two legs, one board:
  *
  *   Leg A (cron-fail) — for every non-archived, non-template org repo, every workflow file
- *     under .github/workflows/ whose YAML carries `on.schedule`: read the 3 newest COMPLETED
- *     scheduled runs (event=schedule). All 3 failing (failure / timed_out / startup_failure)
+ *     under .github/workflows/ whose YAML carries a LIVE `on.schedule` (parsed, not regexed —
+ *     a commented-out cron is not a schedule) AND whose workflow is GitHub-enabled (a
+ *     disabled_manually workflow's frozen historical failures are a human's act, not a
+ *     silent fire): read the 3 newest COMPLETED scheduled runs (event=schedule). All 3
+ *     failing (failure / timed_out / startup_failure)
  *     → finding with the streak's first-failure timestamp. Fewer than 3 completed scheduled
  *     runs → no verdict possible, skip (conservative — Rule #425: this files rows humans
  *     act on). Streak breaks on ANY non-failing conclusion (cancelled/skipped are neutral).
@@ -180,8 +183,43 @@ function listWorkflowFiles(repo: string): WorkflowFile[] {
 // ───────────────────────────── leg A: cron-fail ─────────────────────────────
 interface RunRow { id?: number; status: string; conclusion: string | null; created_at: string; html_url: string }
 
+/** The `on.schedule` block as parsed config — or undefined when the file has no REAL one.
+ * A raw-text regex for `cron:` false-positives on a COMMENTED-OUT schedule (bolt-wms
+ * sync-test-env.yml: cron commented "re-enable once scripts/entity-sync.py exists", yet the
+ * historical failures still matched) — YAML parsing drops comments, so only a live schedule
+ * survives. The bare key `on` is boolean true under YAML 1.1; the `yaml` package (1.2 core)
+ * keeps it a string — check both so the gate is parser-truth, not schema luck. */
+function scheduleCfg(doc: unknown): unknown {
+  if (!doc || typeof doc !== "object") return undefined;
+  const d = doc as Record<string, unknown>;
+  const on = d.on ?? d[String(true)];
+  if (!on || typeof on !== "object" || Array.isArray(on)) return undefined;
+  return (on as Record<string, unknown>).schedule;
+}
+
+function hasLiveSchedule(wf: WorkflowFile): boolean {
+  try {
+    const sched = scheduleCfg(parseYaml(wf.text));
+    return Array.isArray(sched) && sched.length > 0;
+  } catch {
+    return false; // unparseable YAML is required-checks-drift's finding class, not this leg's
+  }
+}
+
+/** Enabled-state gate: a workflow GitHub disabled (manually or for inactivity) had its last
+ * scheduled runs FROZEN at disable time — classifying those historical failures as a fresh
+ * 3-streak files a row on a human's deliberate act (ui-test-suite playwright-ui-tests.yml,
+ * disabled_manually since 2026-07-05, dry-run false positive 2026-09-18). Only "active"
+ * workflows can be silently burning. */
+function workflowEnabled(repo: string, file: string): boolean {
+  const raw = ghApiOrNull(`repos/${ORG}/${repo}/actions/workflows/${encodeURIComponent(file)}`);
+  if (!raw) return false; // never registered (e.g. schedule-only file with no runs) — no verdict
+  return (JSON.parse(raw) as { state?: string }).state === "active";
+}
+
 function legA(repo: string, wf: WorkflowFile): Finding | null {
-  if (!/cron\s*:/.test(wf.text)) return null; // no schedule in the file — not this leg's business
+  if (!hasLiveSchedule(wf)) return null; // no live schedule in the file — not this leg's business
+  if (!workflowEnabled(repo, wf.name)) return null; // disabled is a human's act, not a silent fire
   // Transient-read guard (dead-cron's ui-test-suite#44 lesson — a one-shot runs page came
   // back with entries missing and the classifier trusted it): read the window TWICE with
   // different query shapes and classify on the UNION by run id. A run missing from one
