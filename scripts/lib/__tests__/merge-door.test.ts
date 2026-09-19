@@ -113,14 +113,17 @@ describe("formatTrainMergeReceipt", () => {
     expect(lines[0]).not.toBe(OLD_FIRST_LINE);
     expect(lines[0]).toBe(formatMergeDoorLine(door));
 
-    // Every other line is untouched, verbatim, from the original template.
+    // Every other line is untouched, verbatim, from the original template — EXCEPT the
+    // review row: 2026-09-19 stint #372 removed the train gate's review leg under the
+    // 2026-09-15 "Box is the one key" ruling (box opens every decision leg), so the
+    // receipt now says exactly that instead of claiming a model vote that never ran.
     expect(lines.slice(1)).toEqual([
       "",
       "| Leg | Result |",
       "|---|---|",
       "| authority (label-authority v2, revalidated pre-merge) | ✅ authorized by `kbibelhausen` (timeline position 4) |",
       "| merge-ready (OPEN, not draft, mergeStateStatus CLEAN) + CI rollup clean | ✅ |",
-      "| independent review (Claude Sonnet 5) | ✅ CLEAN |",
+      "| decision legs (review) | ⏭ opened by `box` — one key opens every decision leg (ruled 2026-09-15); the floor above never lowers |",
       "| revalidate: PR snapshot (labels/sha/state/mergeStateStatus) | ✅ no drift |",
       "| revalidate: authority timeline re-check | ✅ still authorized |",
       "",
@@ -130,7 +133,7 @@ describe("formatTrainMergeReceipt", () => {
     ]);
   });
 
-  it("control: a null door still produces the full byte-identical body below the first line", () => {
+  it("control: a null door still produces the full expected body below the first line (review row = opened-by-box, post-#372)", () => {
     const receipt = formatTrainMergeReceipt({ ...baseFacts, door: null });
     const lines = receipt.split("\n");
     expect(lines[0]).toContain("(unknown — not run under Actions)");
@@ -140,7 +143,7 @@ describe("formatTrainMergeReceipt", () => {
       "|---|---|",
       "| authority (label-authority v2, revalidated pre-merge) | ✅ authorized by `kbibelhausen` (timeline position 4) |",
       "| merge-ready (OPEN, not draft, mergeStateStatus CLEAN) + CI rollup clean | ✅ |",
-      "| independent review (Claude Sonnet 5) | ✅ CLEAN |",
+      "| decision legs (review) | ⏭ opened by `box` — one key opens every decision leg (ruled 2026-09-15); the floor above never lowers |",
       "| revalidate: PR snapshot (labels/sha/state/mergeStateStatus) | ✅ no drift |",
       "| revalidate: authority timeline re-check | ✅ still authorized |",
       "",
