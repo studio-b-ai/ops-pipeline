@@ -8,11 +8,8 @@ name: Box (train) auto-merge sweep
 # evaluates it
 # through evaluateTrainReady (scripts/pr-automerge-gate.ts): GraphQL-attributed
 # LabeledEvent authority (never comment text, never timestamps) → merge-readiness +
-# CI rollup → snapshot + authority revalidate → SHA-pinned merge. (The independent
-# Claude Sonnet 5 review leg this chain once ran is OVERRIDDEN BY `box` — 2026-09-15
-# ruling, stint #372: the key opens every decision leg, review included; only the
-# CI rollup / mergeable floor stands. The B-side squasher gate's review leg is
-# unchanged.) Every doubt anywhere resolves to "wait"
+# CI rollup → independent Claude Sonnet 5 review (exactly CLEAN) → snapshot +
+# authority revalidate → SHA-pinned merge. Every doubt anywhere resolves to "wait"
 # (a refusal is ordinary operation, telemetry-line only); `hold` blocks
 # unconditionally; a commit/force-push AFTER the authorizing label event strips the
 # label (stale-label removal) with a write-only receipt.
