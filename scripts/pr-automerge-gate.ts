@@ -106,6 +106,7 @@ import {
   codeFixRevalidateDeltas,
   evaluateMergeReadiness,
   gateDecisionForClass,
+  isMergeTreeCheckClean,
   isRollupClean,
   parseUnifiedDiff,
   reconcileFileClasses,
@@ -564,6 +565,7 @@ async function evaluate(
     isDraft: prJson.isDraft,
     ciClean,
     mergeStateStatus: prJson.mergeStateStatus,
+    mergeTreeClean: isMergeTreeCheckClean(prJson.statusCheckRollup),
   });
   if (!readiness.ready) {
     const detail = readiness.detail;
@@ -1520,6 +1522,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     isDraft: prJson.isDraft,
     ciClean: isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo)),
     mergeStateStatus: prJson.mergeStateStatus,
+    mergeTreeClean: isMergeTreeCheckClean(prJson.statusCheckRollup),
   });
   if (!readiness.ready) {
     const detail = `not merge-ready (${readiness.detail})`;

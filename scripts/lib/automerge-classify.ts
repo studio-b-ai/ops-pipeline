@@ -1167,6 +1167,28 @@ export function isRollupClean(
 }
 
 /**
+ * stint #476 (2026-09-17): the deterministic merge-tree mergeability check
+ * (power-unit's `.github/workflows/mergeability.yml`). On fast-moving repos
+ * where GitHub never finishes computing `mergeStateStatus` before the next
+ * main push invalidates it, this CI check provides a synchronous yes/no:
+ * exits 0 on clean merge, non-zero on conflict — no async polling, no race
+ * with a moving base. A clean `merge-tree` when mergeStateStatus is UNKNOWN
+ * is equivalent to a CLEAN mergeability for the door's readiness leg.
+ *
+ * Check name: `merge-tree (deterministic mergeability)` — exact match,
+ * case-sensitive. Absence = UNKNOWN remains unprovable (fail-closed: this
+ * function returns false when the check isn't present, so the caller's
+ * existing UNKNOWN refusal is indistinguishable from before).
+ */
+export function isMergeTreeCheckClean(rollup: RollupItem[]): boolean {
+  const MERGE_TREE_CHECK_NAME = "merge-tree (deterministic mergeability)";
+  const entries = rollup.filter((item) => (item.name ?? item.context) === MERGE_TREE_CHECK_NAME);
+  if (entries.length === 0) return false;
+  const latest = entries.reduce((best, item) => (rollupTime(item) > rollupTime(best) ? item : best), entries[0]);
+  return latest.status === "COMPLETED" && latest.conclusion === "SUCCESS";
+}
+
+/**
  * ops#190 B1 (doc §4.1 move 4): the code-fix class's NAMED-CHECKS leg — on top of
  * the ordinary isRollupClean leg, the caller names the specific checks that must
  * each have run to conclusion SUCCESS on the head commit. This is what stops a
@@ -1270,6 +1292,11 @@ export interface MergeReadinessInput {
   ciClean: boolean;
   /** PR.mergeStateStatus — CLEAN | BEHIND | BLOCKED | DIRTY | HAS_HOOKS | UNKNOWN | UNSTABLE. */
   mergeStateStatus: string;
+  /** stint #476: true when the repo's deterministic merge-tree CI check is green.
+   *  When mergeStateStatus is UNKNOWN on a fast-moving repo (power-unit), a clean
+   *  merge-tree substitutes for the never-finishing GitHub mergeability computation.
+   *  Omit/undefined → no fallback (current behavior). */
+  mergeTreeClean?: boolean;
 }
 
 /**
@@ -1287,8 +1314,16 @@ export interface MergeReadinessInput {
  * Rules #279/#412/#464/#471.
  */
 export function evaluateMergeReadiness(input: MergeReadinessInput): { ready: boolean; detail: string } {
+  // stint #476: on fast-moving repos (power-unit) GitHub's mergeability computation never
+  // settles — mergeStateStatus stays UNKNOWN for hours. The deterministic merge-tree CI
+  // check provides a synchronous answer; a clean merge-tree is equivalent to CLEAN
+  // mergeability for this gate's purposes. The ciClean leg already verified every other
+  // CI check is green; mergeTreeClean only substitutes for the one UNKNOWN field.
+  const mergeStatusClean =
+    input.mergeStateStatus === "CLEAN" ||
+    (input.mergeStateStatus === "UNKNOWN" && input.mergeTreeClean === true);
   const ready =
-    input.state === "OPEN" && !input.isDraft && input.ciClean && input.mergeStateStatus === "CLEAN";
+    input.state === "OPEN" && !input.isDraft && input.ciClean && mergeStatusClean;
   const detail = `state=${input.state} isDraft=${input.isDraft} ciClean=${input.ciClean} mergeStateStatus=${input.mergeStateStatus}`;
   return { ready, detail };
 }
@@ -1362,6 +1397,7 @@ export function codeFixRevalidateDeltas(
     isDraft: fresh.isDraft,
     ciClean: isRollupClean(readinessRollup, opts.sanctionedSkips),
     mergeStateStatus: fresh.mergeStateStatus,
+    mergeTreeClean: isMergeTreeCheckClean(fresh.statusCheckRollup),
   });
   if (!readiness.ready) {
     deltas.push(`merge readiness regressed: ${readiness.detail}`);
