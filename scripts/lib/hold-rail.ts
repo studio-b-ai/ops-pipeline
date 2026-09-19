@@ -23,7 +23,7 @@
  *
  * ## Dual-store contract (Rule #99)
  * SEAT_INBOX_TOKEN is TWO INDEPENDENT STORES under one name:
- *   - Railway env var on the radio service (server-side validator).
+ *   - Railway env var on the webhook-router service (server-side validator).
  *   - GitHub Actions secret on this workflow's caller repos (what this script reads).
  * Rotate ATOMICALLY across BOTH or one 401s while the other works. WEBHOOK_ROUTER_URL
  * is the same pointer gate-enroll.ts already uses; the ops-pipeline caller repos set it
