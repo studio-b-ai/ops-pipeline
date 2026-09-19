@@ -251,7 +251,7 @@ export function recallDisposition(input: RecallDecisionInput): RecallDisposition
 
 /**
  * Repo → lane-manager seat, the SEED the pr-watch producer also carries
- * (webhook-router `src/bugsquasher/seat-owner.ts` REPO_LANE_MANAGER; the real registry is
+ * (radio `src/bugsquasher/seat-owner.ts` REPO_LANE_MANAGER; the real registry is
  * LANES.md). 2026-09-06 (Kevin: "go on 1 and 2" — the staff-bug read): of 35 issues this
  * router "auto-routed to this repo's lane backlog", 29 carried NO `lane:*` label, so they
  * landed in nobody's queue and 17 were never touched again. Every route now ALSO applies

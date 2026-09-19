@@ -1380,7 +1380,7 @@ export function codeFixRevalidateDeltas(
 
   // 2026-09-06 (the bolt-wms#2120 label-flap loop, ops#342's mechanism): the gate's own
   // `automerge:code-fix` label write wakes any repo workflow triggered on
-  // `pull_request: [labeled, unlabeled]` (bolt-wms / studiob / webhook-router
+  // `pull_request: [labeled, unlabeled]` (bolt-wms / studiob / radio
   // `require-review-label.yml`). That fresh run is non-terminal at revalidate time, so
   // the readiness leg regressed on EVERY code-fix pass, the abort removed the label, the
   // `unlabeled` event woke another run, and the loop burned ~1,000 Actions runs in 57 min
