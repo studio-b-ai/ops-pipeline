@@ -48,7 +48,7 @@ const QUIET_DAYS = 3;
 const EXPECTED_ACTIVE = new Set([
   // minted + delivered 2026-07-30
   "bolt-wms-prod-v1",
-  "webhook-router-prod-v3",
+  "radio-prod-v3",
   "acudev-prod-v2",
   "quarterbook-v2",
   "bolt-ci-v1",

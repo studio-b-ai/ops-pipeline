@@ -107,7 +107,7 @@ on:
         required: true
       FLEET_APP_PRIVATE_KEY:
         required: true
-      # ops#260 leg 3: the enroll door's bearer (webhook-router SEAT_INBOX_TOKEN —
+      # ops#260 leg 3: the enroll door's bearer (radio SEAT_INBOX_TOKEN —
       # a second store of the same value, #99). Optional so a caller without it
       # still gates; the gate then prints [enroll-skipped] on every refusal rather
       # than silently dropping the decision line (#464).
@@ -177,7 +177,7 @@ jobs:
           GATE_REQUIRED_CHECKS: ${{ inputs.required_checks }}
           GATE_REQUIRED_CHECKS_PATH_DEPS: ${{ inputs.required_checks_path_deps }}
           GATE_TRAIN_READY: ${{ inputs.train_ready }}
-          # ops#260 leg 3 — refusal → Kevin's decision block via webhook-router's
+          # ops#260 leg 3 — refusal → Kevin's decision block via radio's
           # enroll door. `vars.` resolves in the CALLER's repo (ops-pipeline).
           WEBHOOK_ROUTER_URL: ${{ vars.WEBHOOK_ROUTER_URL }}
           SEAT_INBOX_TOKEN: ${{ secrets.SEAT_INBOX_TOKEN }}

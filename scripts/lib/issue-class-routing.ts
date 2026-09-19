@@ -2,7 +2,7 @@
  * Issue class → worker routing — ops-pipeline#260 leg 2.
  *
  * The committed data lives in scripts/issue-class-routing.yaml — one file,
- * read by the dispatcher (webhook-router, wr#829) from the ops-pipeline
+ * read by the dispatcher (radio, wr#829) from the ops-pipeline
  * checkout it already makes, so routing edits ship without a code change in
  * either repo. The two routine prompts mirror its semantics.
  *

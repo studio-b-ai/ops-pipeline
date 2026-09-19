@@ -5,7 +5,7 @@
  * log line in a GitHub Actions run nobody reads, and the PR sat. Kevin 9/02:
  * "auto merged or escalated to me to queue it for merge and deploy … all through
  * one channel." So every DECISION-CLASS refusal enrolls ONE line through
- * webhook-router's enroll door (`POST /internal/cos/decisions`, wr#844) into the
+ * radio's enroll door (`POST /internal/cos/decisions`, wr#844) into the
  * standing `merge-escalations` group of the §4a decision block — PR · reason ·
  * diff size · "reply `queued` to merge; `hold` to park". Nothing merges on
  * silence (#279).
@@ -29,7 +29,7 @@
  * — a deployment gap, visible in every run until someone fixes it (#464).
  *
  * Dual-store note (#99): SEAT_INBOX_TOKEN is the same server-side token
- * webhook-router validates (Railway env); this repo's GitHub Actions secret is
+ * radio validates (Railway env); this repo's GitHub Actions secret is
  * a SECOND store of it — rotate both or the gate 401s while the rail keeps
  * working. The per-seat capability (ops#258 step 1) retires this copy.
  */

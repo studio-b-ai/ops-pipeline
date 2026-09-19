@@ -257,7 +257,7 @@ jobs:
           # bugsquasher group by run_number, global fanout applied last. The
           # ordering logic (pure) + tests live in scripts/lib/fleet-sweep-order.ts.
           # The old "first-20-in-enumeration-order" cap starved train-labeled PRs in a
-          # stable order (issue #327 — webhook-router#915 at entry 28 of 30 was
+          # stable order (issue #327 — radio#915 at entry 28 of 30 was
           # never evaluated); a per-repo cap alone can't fix that without the
           # train-first rule (Kevin's door word is never behind bot PRs).
           entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-order.ts "$MAX_FANOUT" "$PER_REPO_CAP" "$RUN_OFFSET")

@@ -70,7 +70,7 @@ const LANE_MANAGERS: Readonly<Record<string, string>> = {
 };
 
 describe("findDoorWatchIncoherence — the live defect (Rule #322 known-bad)", () => {
-  it("fires on the REAL pre-fix registries, naming exactly the 3 drifted repos (radio was already watched — the stale webhook-router entry was a duplicate in the door registry, not a missing watch)", () => {
+  it("fires on the REAL pre-fix registries, naming exactly the 3 drifted repos (radio was already watched — the stale radio entry was a duplicate in the door registry, not a missing watch)", () => {
     const findings = findDoorWatchIncoherence({
       doorRows: LIVE_DOOR_ROWS,
       watchedRepos: WATCHED_BEFORE,
