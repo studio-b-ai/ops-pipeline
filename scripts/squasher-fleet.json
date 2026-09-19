@@ -122,7 +122,7 @@
       "repo": "studio-b-ai/toto",
       "enabled_classes": "docs-comment,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/",
-"safe_path_globs": "src/**,qa/**,src-tauri/**",
+      "safe_path_globs": "src/**,qa/**,src-tauri/**",
       "required_checks": "qa / node-guards",
       "train": true
     }
