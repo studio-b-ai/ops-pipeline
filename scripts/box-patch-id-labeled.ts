@@ -112,8 +112,13 @@ function fetchChangedPaths(repo: string, prNumber: number): string[] {
 
 /** `summary` and `text` both carry `title` and `body` respectively — `output.summary`
  *  is a required, short field per the Checks API; `output.text` is where
- *  readBoxPatchIdCheckRuns (scripts/lib/box-patch-id.ts) looks for the JSON record. */
-function postCheckRun(repo: string, headSha: string, conclusion: "neutral" | "skipped", title: string, text: string): void {
+ *  readBoxPatchIdCheckRuns (scripts/lib/box-patch-id.ts) looks for the JSON record.
+ *  Always `neutral`, never `skipped`: a `skipped` conclusion on a NAMED check run
+ *  ("box-patch-id") is unclean in ops-pipeline's release check (same rule that
+ *  motivated the job-level→step-level fix above) unless allowlisted, and this repo's
+ *  allowlist intentionally carries no ops-pipeline row — see the fix for finding 1 on
+ *  code review of ops-pipeline#536. */
+function postCheckRun(repo: string, headSha: string, conclusion: "neutral", title: string, text: string): void {
   gh([
     "api",
     `repos/${repo}/check-runs`,
@@ -156,7 +161,7 @@ function main(): void {
 
   if (isGateAuthorizedActor(actorLogin, currentLabels)) {
     const detail = `"${actorLogin}" is gate-authorized on this PR's current labels [${currentLabels.join(", ")}] — the ruling requires never minting a patch-id for an actor isGateAuthorizedActor already covers (a patch-id may only preserve an authority a human granted). Skipping mint.`;
-    postCheckRun(repo, headSha, "skipped", "box-patch-id-skipped-gate-actor", detail);
+    postCheckRun(repo, headSha, "neutral", "box-patch-id-skipped-gate-actor", detail);
     console.log(`box-patch-id-labeled: ${detail}`);
     return;
   }
