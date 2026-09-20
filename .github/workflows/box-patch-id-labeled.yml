@@ -18,6 +18,15 @@ name: box-patch-id (labeled handler)
 # never fails this workflow — observe-only means this job cannot affect the PR's
 # mergeability either way.
 #
+# The `box`-label test lives on EVERY step's own `if:`, never on the job — a job-level
+# `if: false` makes GitHub report the whole job (this job's one check run) as
+# conclusion=SKIPPED, and ops-pipeline's release check treats a SKIPPED entry as
+# unclean unless it's named in scripts/automerge-skip-allowlist.yaml (which carries no
+# ops-pipeline row on purpose). A step-level `if:` instead leaves every step SKIPPED on
+# a non-`box` label event while the JOB itself still concludes SUCCESS, so this
+# workflow never manufactures an unclean rollup entry on a label event it has nothing
+# to do with (P1 fix, code review on ops-pipeline#536).
+#
 # Uses the studiob-fleet-bot App installation token, never github.token, for the same
 # reason squasher-automerge.yml does (see that file's header): a check run is owned by
 # the App identity that creates it, so only a workflow holding
@@ -45,7 +54,6 @@ concurrency:
 jobs:
   mint:
     name: "Mint + record the box-patch-id (observe-only)"
-    if: github.event.label.name == 'box'
     runs-on: ubuntu-latest
     steps:
       # Rule #466 — this checkout IS the one scratch clone this lap uses.
@@ -53,21 +61,25 @@ jobs:
       # `merge-base origin/<baseRef> <headSha>`, which needs both refs' full ancestry,
       # not just the labeled commit.
       - name: Checkout full history
+        if: github.event.label.name == 'box'
         uses: actions/checkout@v5
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
-      - uses: actions/setup-node@v5
+      - if: github.event.label.name == 'box'
+        uses: actions/setup-node@v5
         with:
           node-version: "22"
 
       - name: Install deps
+        if: github.event.label.name == 'box'
         working-directory: scripts
         run: npm ci || npm install
 
       - name: Mint fleet App installation token
         id: mint
+        if: github.event.label.name == 'box'
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.FLEET_APP_ID }}
@@ -75,12 +87,13 @@ jobs:
           owner: studio-b-ai
 
       - name: Fail loud if the mint returned nothing
-        if: steps.mint.outputs.token == ''
+        if: github.event.label.name == 'box' && steps.mint.outputs.token == ''
         run: |
           echo "::error::Fleet App token mint returned an empty token — refusing to mint or record a box-patch-id (a github.token fallback would let a collaborator forge/overwrite the check run this design exists to protect; see ops-pipeline#190 rollout step 3)."
           exit 1
 
       - name: Mint + record the box-patch-id
+        if: github.event.label.name == 'box'
         working-directory: scripts
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
