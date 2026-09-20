@@ -203,6 +203,43 @@ export interface AuthorityInput {
    *  pre-existing caller and test is unchanged. The squasher gate passes
    *  `QUEUED_LABEL_PAIR` (ops-pipeline#260 leg 4). */
   labels?: AuthorityLabelPair;
+  /**
+   * OBSERVE-ONLY THIS LAP (ops-pipeline#190 rollout step 3; ruling: brain
+   * library/supplementary-regulations/2026-09-19-the-box-binds-to-the-patch-id.md,
+   * "the box binds to the patch-id, not the sha"). When present, carries the recorded
+   * bp2 patch-id from the authorizing LabeledEvent (if `box-patch-id-labeled.yml` ever
+   * minted one for it) and the patch-id computed fresh against the CURRENT head. Read
+   * ONLY at the Step 3 staleness gate below to LOG what the patch-id predicate would
+   * have decided — omitting it, or leaving `boxPatchIdWins` false (its default),
+   * changes nothing about the verdict this function returns.
+   */
+  boxPatchId?: BoxPatchIdObserveContext;
+  /**
+   * OBSERVE-ONLY THIS LAP. Defaults to false. No branch in `evaluateLabelAuthority`
+   * reads this to change the returned `AuthorityVerdict` yet — it exists on this
+   * interface now so a later rung (rollout step 5) is a call-site change, not another
+   * signature change. Read only for the observe-only log line's own wording below.
+   */
+  boxPatchIdWins?: boolean;
+}
+
+/**
+ * The two ids `evaluateLabelAuthority` compares, log-only, at the Step 3 staleness
+ * gate this lap. See `AuthorityInput.boxPatchId`. Mirrors `BoxPatchIdRecord.patchId`
+ * (scripts/lib/box-patch-id.ts) without importing that module — this file's own
+ * doctrine keeps each `scripts/lib/*.ts` file's dependency surface independently
+ * readable (see this file's `gh()` below), and the two id strings need no shared
+ * runtime code, only the same `bp2:...` format.
+ */
+export interface BoxPatchIdObserveContext {
+  /** The bp2 patch-id minted for the authorizing LabeledEvent, if one was ever
+   *  recorded. Absent means "no observation available" (e.g. minted before this
+   *  rollout step shipped, or the key-tag state differs) — never treated as a
+   *  mismatch on its own. */
+  recordedPatchId?: string;
+  /** The bp2 patch-id computed fresh against the CURRENT head, against the same base
+   *  used to mint `recordedPatchId` (`mintBoxPatchId`, scripts/lib/box-patch-id.ts). */
+  currentPatchId: string;
 }
 
 // ───────────────────────────── verdict ─────────────────────────────
@@ -380,6 +417,20 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
       item.position > currentApplier!.position,
   );
   if (staleItem) {
+    // OBSERVE-ONLY (ops-pipeline#190 rollout step 3 — see AuthorityInput.boxPatchId):
+    // logs what the patch-id predicate WOULD decide here, never returns it. The
+    // `return` below this block is unconditional and unchanged regardless of what
+    // this branch logs or whether `input.boxPatchId` is even present.
+    if (input.boxPatchId) {
+      const { recordedPatchId, currentPatchId } = input.boxPatchId;
+      const patchIdAgrees = recordedPatchId !== undefined && recordedPatchId === currentPatchId;
+      console.error(
+        `[box-patch-id observe-only] stale-label at position ${staleItem.position} ` +
+          `(recorded=${recordedPatchId ?? "none"}, current=${currentPatchId}): the patch-id predicate would ` +
+          `${patchIdAgrees ? "KEEP" : "STRIP"} this label — boxPatchIdWins=${input.boxPatchIdWins ?? false}, ` +
+          `verdict unchanged this lap.`,
+      );
+    }
     return {
       authorized: false,
       reason: "stale-label",
