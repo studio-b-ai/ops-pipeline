@@ -78,4 +78,7 @@ installations:
     permissions: {administration: read, checks: write, contents: write, issues: write, members: read, metadata: read, packages: read, pull_requests: write, statuses: write, vulnerability_alerts: read, workflows: write}
   - app_slug: studiob-fleet-bot
     repository_selection: all
-    permissions: {actions: write, checks: read, contents: write, issues: write, members: read, metadata: read, organization_administration: read, pull_requests: write, workflows: write}
+    # checks: write — the box-patch-id labeled handler (ops#536) records its verdict as a
+    # check run under this App's identity; the first live firing 403'd on checks: read
+    # (2026-09-20, run 35527162406). Kevin grants it on the App, then accepts on the installation.
+    permissions: {actions: write, checks: write, contents: write, issues: write, members: read, metadata: read, organization_administration: read, pull_requests: write, workflows: write}
