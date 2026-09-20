@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   formatStaleLabelRemovalReceipt,
   hasAuthoritySnapshotDrifted,
@@ -267,6 +267,95 @@ describe("evaluateLabelAuthority", () => {
       reason: "stale-label",
       detail: expect.stringContaining("HEAD_REF_FORCE_PUSHED"),
     });
+  });
+
+  // ops-pipeline#190 rollout step 3 (observe-only lap) — see AuthorityInput.boxPatchId.
+  // These prove the addition is genuinely inert: the same stale-label verdict comes
+  // back whether the observation says the patch-id would KEEP or STRIP, and whether
+  // boxPatchIdWins is left at its default or explicitly set true (not wired to any
+  // branch this lap — see label-authority.ts's Step 3 comment).
+  it("still flags stale-label when boxPatchId observation would KEEP (patch-ids match) — verdict is unchanged this lap", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        timeline: [labeledBy("kbibelhausen", 0), commitAt(1)],
+        boxPatchId: { recordedPatchId: "bp2:abc", currentPatchId: "bp2:abc" },
+      }),
+    );
+    expect(verdict).toEqual({
+      authorized: false,
+      reason: "stale-label",
+      detail: expect.stringContaining("PULL_REQUEST_COMMIT"),
+    });
+  });
+
+  it("still flags stale-label when boxPatchId observation would STRIP (patch-ids differ) — verdict is unchanged this lap", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        timeline: [labeledBy("kbibelhausen", 0), commitAt(1)],
+        boxPatchId: { recordedPatchId: "bp2:abc", currentPatchId: "bp2:def" },
+      }),
+    );
+    expect(verdict).toEqual({
+      authorized: false,
+      reason: "stale-label",
+      detail: expect.stringContaining("PULL_REQUEST_COMMIT"),
+    });
+  });
+
+  it("still flags stale-label with no recorded patch-id yet (no observation available) — verdict is unchanged this lap", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        timeline: [labeledBy("kbibelhausen", 0), commitAt(1)],
+        boxPatchId: { currentPatchId: "bp2:def" },
+      }),
+    );
+    expect(verdict).toEqual({
+      authorized: false,
+      reason: "stale-label",
+      detail: expect.stringContaining("PULL_REQUEST_COMMIT"),
+    });
+  });
+
+  it("still flags stale-label even with boxPatchIdWins: true — not wired to any branch this lap", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        timeline: [labeledBy("kbibelhausen", 0), commitAt(1)],
+        boxPatchId: { recordedPatchId: "bp2:abc", currentPatchId: "bp2:abc" },
+        boxPatchIdWins: true,
+      }),
+    );
+    expect(verdict).toEqual({
+      authorized: false,
+      reason: "stale-label",
+      detail: expect.stringContaining("PULL_REQUEST_COMMIT"),
+    });
+  });
+
+  it("logs the observe-only comparison at the stale-label gate (proves the branch is live, not dead code — Rule #464)", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      evaluateLabelAuthority(
+        baseAuthorityInput({
+          timeline: [labeledBy("kbibelhausen", 0), commitAt(1)],
+          boxPatchId: { recordedPatchId: "bp2:abc", currentPatchId: "bp2:abc" },
+        }),
+      );
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy.mock.calls[0]?.[0]).toContain("box-patch-id observe-only");
+      expect(spy.mock.calls[0]?.[0]).toContain("KEEP");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("does not log when no boxPatchId observation context is given (unchanged pre-existing callers)", () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      evaluateLabelAuthority(baseAuthorityInput({ timeline: [labeledBy("kbibelhausen", 0), commitAt(1)] }));
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("authorizes on label -> unlabel -> relabel by an authorized actor with no later commits (last event wins)", () => {
