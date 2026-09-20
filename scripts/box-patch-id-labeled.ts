@@ -21,17 +21,18 @@
  *
  * "Never mint for an actor that already satisfies isGateAuthorizedActor" (ruling §2:
  * "a patch-id may only preserve an authority a human granted") — checked first, before
- * any git or GraphQL work, using the SAME currentLabels the labeling webhook already
+ * any git or GitHub API work, using the SAME currentLabels the labeling webhook already
  * carries (no extra fetch).
  *
- * labelEventDbId sourcing: label-authority.ts's own AUTHORITY_TIMELINE_QUERY
- * intentionally does not select LabeledEvent.databaseId (its `position` is an array
- * index, not a database id, and nothing there has ever needed one) — this script must
- * not widen that shared query for a need only it has. A second, narrower GraphQL query
- * below asks for the last 20 LABELED_EVENT timeline items and their databaseId, and
- * picks the most recent one whose label is `box` — 20 is generous headroom over a
- * realistic same-PR relabel count, and this script refuses cleanly (never guesses) if
- * none is found.
+ * labelEventDbId sourcing: GitHub's GraphQL schema exposes NO databaseId on
+ * LabeledEvent — the first live firing of this handler (run 35523361685, PR #536) died
+ * on `gh: Field 'databaseId' doesn't exist on type 'LabeledEvent'`, and
+ * label-authority.ts's own AUTHORITY_TIMELINE_QUERY never needed one (its `position` is
+ * an array index). The id therefore comes from the REST issue-events list
+ * (`GET /repos/{owner}/{repo}/issues/{number}/events`, `event == "labeled"`), whose
+ * numeric `id` is the label event's database id — the per-event integer GraphQL never
+ * exposes. The most recent `box` event wins, and this script refuses cleanly (never
+ * guesses) if none is found.
  *
  * Uses the studiob-fleet-bot App installation token exclusively (GH_TOKEN, minted by
  * the workflow via actions/create-github-app-token@v1) — never github.token — for the
@@ -54,52 +55,35 @@ function env(name: string): string {
   return v;
 }
 
-const LABEL_EVENT_QUERY = `
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      timelineItems(itemTypes: [LABELED_EVENT], last: 20) {
-        nodes {
-          __typename
-          ... on LabeledEvent { databaseId label { name } }
-        }
-      }
-    }
-  }
-}`;
-
-interface LabelEventNode {
-  __typename?: string;
-  databaseId?: number | null;
-  label?: { name?: string | null } | null;
-}
-
-interface LabelEventGraphQLResponse {
-  data?: { repository?: { pullRequest?: { timelineItems?: { nodes?: LabelEventNode[] } } } };
-}
-
-/** Nodes come back oldest-first even under `last: N` — walk from the end to find the
- *  MOST RECENT LabeledEvent for `labelName`. Throws (never guesses) if none is found,
- *  matching this repo's fail-closed doctrine (label-authority.ts's own header). */
+/** The REST issue-events list comes back oldest-first — walk from the end to find the
+ *  MOST RECENT `labeled` event for `labelName`. `--jq` keeps the output one line per
+ *  event even under `--paginate` (bare `--paginate` concatenates JSON arrays). Throws
+ *  (never guesses) if none is found, matching this repo's fail-closed doctrine
+ *  (label-authority.ts's own header). */
 function fetchLabelEventDbId(owner: string, repo: string, prNumber: number, labelName: string): number {
-  const out = gh(["api", "graphql", "-f", `query=${LABEL_EVENT_QUERY}`, "-f", `owner=${owner}`, "-f", `repo=${repo}`, "-F", `number=${prNumber}`]);
-  let parsed: LabelEventGraphQLResponse;
-  try {
-    parsed = JSON.parse(out) as LabelEventGraphQLResponse;
-  } catch {
-    throw new Error(`box-patch-id-labeled: the label-event GraphQL response was not parseable JSON: ${out.slice(0, 500)}`);
-  }
-  const nodes = parsed.data?.repository?.pullRequest?.timelineItems?.nodes;
-  if (!Array.isArray(nodes)) {
-    throw new Error(`box-patch-id-labeled: unexpected GraphQL response shape fetching the label event id: ${out.slice(0, 500)}`);
-  }
-  for (let i = nodes.length - 1; i >= 0; i--) {
-    const node = nodes[i];
-    if (node?.label?.name === labelName && typeof node.databaseId === "number") {
-      return node.databaseId;
+  const out = gh([
+    "api",
+    `repos/${owner}/${repo}/issues/${prNumber}/events?per_page=100`,
+    "--paginate",
+    "--jq",
+    '.[] | select(.event == "labeled") | "\\(.id) \\(.label.name)"',
+  ]);
+  const lines = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const sp = lines[i].indexOf(" ");
+    if (sp < 0) continue;
+    const id = Number(lines[i].slice(0, sp));
+    const name = lines[i].slice(sp + 1);
+    if (name === labelName && Number.isSafeInteger(id) && id > 0) {
+      return id;
     }
   }
-  throw new Error(`box-patch-id-labeled: no LabeledEvent with a databaseId found for label "${labelName}" in the last ${nodes.length} timeline items.`);
+  throw new Error(
+    `box-patch-id-labeled: no "labeled" issue event found for label "${labelName}" among ${lines.length} labeled events on ${owner}/${repo}#${prNumber}.`,
+  );
 }
 
 function fetchChangedPaths(repo: string, prNumber: number): string[] {
