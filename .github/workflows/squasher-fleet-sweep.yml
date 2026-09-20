@@ -119,10 +119,15 @@ jobs:
           ONLY_PR: ${{ inputs.pr_number }}
           MAX_FANOUT: "100"   # ops#836: raised from 50 — the change-driven filter prevents unchanged PRs from consuming slots, so the fanout is now a safety measure (#382). 9/13 baseline: 47 labeled PRs, 20 evaluated → 27 never seen per tick; Principal sitting.
           # ops#327: no single repo can crowd more than PER_REPO_CAP entries into
-          # either group (box/train, bugsquasher) inside the global fanout — so one
-          # repo's backlog cannot starve the rest. 5 leaves headroom for four
-          # fleet repos to each contribute at the cap and still fit under 20.
+          # the bugsquasher group inside the global fanout — so one repo's backlog
+          # cannot starve the rest. 5 leaves headroom for four fleet repos to each
+          # contribute at the cap and still fit under 20.
           PER_REPO_CAP: "5"
+          # ops#836: fleet-internal gets its OWN per-repo cap, separate from bugsquasher.
+          # Zero = no cap — runner-classified non-live-surface PRs can safely flow
+          # without sharing the bugsquasher 5-slot limit. 181 fleet-internal PRs on
+          # power-unit sharing 5 slots = 36h to cycle through; never reached pu#797/#829.
+          FLEET_INTERNAL_PER_REPO_CAP: "0"
           # ops#327: rotates the bugsquasher group's start position per run so
           # a stable enumeration order (registry × `gh pr list` default) cannot
           # pin the same PR at the tail forever. github.run_number is monotone
@@ -164,8 +169,8 @@ jobs:
             # 2026-09-13 (Kevin "both fixes approved", ops#409): `fleet-internal` PRs are ENUMERATED with bugsquasher — the runner
             # classified them; the gate (GATE_AUTHORITY_CLASSES) decides. Without this line the class existed but was never evaluated
             # (first firing 06:38Z: 6 labeled PRs, 0 evaluated — #464/#465, the predicate is part of the receipt).
-            sq=$(gh pr list --repo "$repo" --label bugsquasher --state open --json number --limit 100 --jq '[.[].number]')
-            fi_=$(gh pr list --repo "$repo" --label fleet-internal --state open --json number --limit 100 --jq '[.[].number]')
+            sq=$(gh pr list --repo "$repo" --label bugsquasher --state open --json number --limit 250 --jq '[.[].number]')
+            fi_=$(gh pr list --repo "$repo" --label fleet-internal --state open --json number --limit 250 --jq '[.[].number]')
             sq=$(jq -c -n --argjson a "$sq" --argjson b "$fi_" '$a + $b | unique')
             # `box` is Kevin's one human key (label-authority.ts; RULED 2026-09-15 01:1xZ, no alias since
             # 05:5xZ: "no more train ready, no queued ... should be picked up by the cron in any repo").
@@ -176,7 +181,7 @@ jobs:
             if [ "$repo" = "studio-b-ai/studiob" ]; then owns_box=false; fi
             tr='[]'
             if [ "$owns_box" = "true" ]; then
-              tr=$(gh pr list --repo "$repo" --label 'box' --state open --json number --limit 100 --jq '[.[].number]')
+              tr=$(gh pr list --repo "$repo" --label 'box' --state open --json number --limit 250 --jq '[.[].number]')
               # client-asthetik: a merge on a PUBLISH path (acuops-build.yml's push trigger set) publishes
               # to the Heritage production tenant — the restart train owns those inside the ruled Wed-noon
               # band (#486, restart-train-fire.ts PUBLISH paths). Everything else in the repo is this sweep's.
@@ -283,10 +288,10 @@ jobs:
           # ordering logic (pure) + tests live in scripts/lib/fleet-sweep-order.ts.
           # With the change-driven filter above (ops#836), the fanout cap is a safety
           # measure — unchanged PRs aren't re-evaluated each cycle.
-          entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-order.ts "$MAX_FANOUT" "$PER_REPO_CAP" "$RUN_OFFSET")
+          entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-order.ts "$MAX_FANOUT" "$PER_REPO_CAP" "$FLEET_INTERNAL_PER_REPO_CAP" "$RUN_OFFSET")
           ordered_count=$(jq length <<<"$entries")
           if [ "$ordered_count" -lt "$changed_count" ]; then
-            echo "::warning::Fanout applied: $changed_count changed PRs found, $ordered_count evaluated this cycle (per-repo cap=$PER_REPO_CAP, global cap=$MAX_FANOUT, run_offset=$RUN_OFFSET; #327 — train-first, round-robin rotation of the bugsquasher group)."
+            echo "::warning::Fanout applied: $changed_count changed PRs found, $ordered_count evaluated this cycle (per-repo cap=$PER_REPO_CAP, fleet-internal cap=$FLEET_INTERNAL_PER_REPO_CAP, global cap=$MAX_FANOUT, run_offset=$RUN_OFFSET; #327 — train-first, round-robin rotation)."
           fi
           echo "entries=$entries" >> "$GITHUB_OUTPUT"
 
