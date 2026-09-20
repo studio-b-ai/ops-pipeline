@@ -99,7 +99,7 @@ export function formatTrainMergeReceipt(facts: TrainMergeReceiptFacts): string {
     "|---|---|",
     `| authority (label-authority v2, revalidated pre-merge) | ✅ authorized by \`${facts.authorizingLogin}\` (timeline position ${facts.authorizingPosition}) |`,
     "| merge-ready (OPEN, not draft, mergeStateStatus CLEAN) + CI rollup clean | ✅ |",
-    "| independent review (Claude Sonnet 5) | ✅ CLEAN |",
+    "| independent review | ⏭ overridden by `box` — box opens every decision leg (2026-09-20 ruling); only the CI-rollup / mergeable floor stands |",
     "| revalidate: PR snapshot (labels/sha/state/mergeStateStatus) | ✅ no drift |",
     "| revalidate: authority timeline re-check | ✅ still authorized |",
     "",
