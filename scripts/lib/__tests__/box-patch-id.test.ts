@@ -4,6 +4,7 @@ import {
   BOX_PATCH_ID_CHECK_NAME,
   BOX_PATCH_ID_PREFIX,
   BOX_PATCH_ID_UNKEYED_STATE,
+  BOX_PATCH_ID_VERSION,
   boxPatchIdKeyState,
   mintBoxPatchId,
   readBoxPatchIdCheckRuns,
@@ -85,6 +86,16 @@ describe("mintBoxPatchId", () => {
     expect(verdict.record.refreshShas).toEqual([HEAD_SHA]);
     expect(verdict.record.tag).toBe(createHmac("sha256", "test-key").update(verdict.record.patchId).digest("hex"));
     expect(boxPatchIdKeyState(verdict.record)).toBe("tagged");
+    expect(verdict.record.version).toBe(BOX_PATCH_ID_VERSION);
+  });
+
+  it("known-GOOD: pathHashes maps each changed path to its post-image blob sha, parsed positionally from the raw -z record (not the '..'-joined form that only appears in --raw WITHOUT -z)", () => {
+    const verdict = mintBoxPatchId({ ...baseMintInput(), runner: fakeRunner(repliesFor()) });
+    expect(verdict.ok).toBe(true);
+    if (!verdict.ok) throw new Error("unreachable");
+    // SAMPLE_DIFF_RAW_Z: ":100644 100644 <old 40x'1'> <new 40x'2'> M\0foo.ts\0" — field 3
+    // (0-indexed) is the new/post-image blob sha.
+    expect(verdict.record.pathHashes).toEqual({ "foo.ts": "2".repeat(40) });
   });
 
   it("negative control: BOX_PATCH_ID_KEY absent still mints successfully and returns the record UNTAGGED — never a refusal", () => {
@@ -168,6 +179,7 @@ describe("readBoxPatchIdCheckRuns", () => {
   function goodRecord(overrides: Partial<BoxPatchIdRecord> = {}): BoxPatchIdRecord {
     return {
       patchId: `${BOX_PATCH_ID_PREFIX}${"d".repeat(64)}`,
+      version: BOX_PATCH_ID_VERSION,
       headSha: HEAD_SHA,
       baseRef: "tp/807-box-patch-id-base",
       baseSha: BASE_SHA,
@@ -193,9 +205,9 @@ describe("readBoxPatchIdCheckRuns", () => {
     expect(verdict).toMatchObject({ ok: false, reason: "box-patch-id-missing" });
   });
 
-  it("known-BAD: a box-patch-id check run present with unparseable JSON is box-patch-id-missing, never a silent fallback", () => {
+  it("known-BAD: a box-patch-id check run present with unparseable JSON is box-patch-id-unreadable, never box-patch-id-missing (a record was found, it just can't be trusted)", () => {
     const verdict = readBoxPatchIdCheckRuns([runWith("{not json")]);
-    expect(verdict).toMatchObject({ ok: false, reason: "box-patch-id-missing" });
+    expect(verdict).toMatchObject({ ok: false, reason: "box-patch-id-unreadable" });
   });
 
   it("known-BAD: a box-patch-id check run with no output text at all is box-patch-id-missing", () => {
@@ -225,5 +237,11 @@ describe("readBoxPatchIdCheckRuns", () => {
     const record = goodRecord({ tag: "f".repeat(64) });
     const verdict = readBoxPatchIdCheckRuns([runWith(record)]);
     expect(verdict.ok).toBe(true);
+  });
+
+  it("known-BAD, control: an untagged record minted under the current tag-enforcement version is box-patch-id-unreadable when BOX_PATCH_ID_KEY IS supplied — a live key does not honor an untagged record (Rule #381, finding 5)", () => {
+    const record = goodRecord(); // tag left undefined, version defaults to BOX_PATCH_ID_VERSION
+    const verdict = readBoxPatchIdCheckRuns([runWith(record)], "test-key");
+    expect(verdict).toMatchObject({ ok: false, reason: "box-patch-id-unreadable" });
   });
 });

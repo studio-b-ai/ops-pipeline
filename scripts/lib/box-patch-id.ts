@@ -68,6 +68,14 @@ export const BOX_PATCH_ID_CHECK_NAME = "box-patch-id";
  *  used as a `BoxPatchIdRefusalReason` — an untagged mint is still `ok: true`. */
 export const BOX_PATCH_ID_UNKEYED_STATE = "box-patch-id-unkeyed";
 
+/** Rule #381 (tightening a guard is forward-only): the tag-ENFORCEMENT policy's own
+ *  version, stamped onto every record at mint time. Distinct from BOX_PATCH_ID_PREFIX
+ *  (the hash recipe's version) — this one versions readBoxPatchIdCheckRuns's rule for
+ *  when an untagged record is acceptable. Bump this only when that rule changes, so a
+ *  later tightening forces exactly one re-evaluation of records minted under the prior
+ *  version instead of silently grandfathering them forever. */
+export const BOX_PATCH_ID_VERSION = 1;
+
 const HEX40 = /^[0-9a-f]{40}$/;
 const GITATTRIBUTES_PATTERN = /(^|\/)\.gitattributes$/;
 
@@ -106,6 +114,10 @@ export interface BoxPatchIdRecord {
    *  refusal — when BOX_PATCH_ID_KEY wasn't configured at mint time (see
    *  BOX_PATCH_ID_UNKEYED_STATE). */
   tag?: string;
+  /** BOX_PATCH_ID_VERSION at mint time — lets readBoxPatchIdCheckRuns tell a record
+   *  minted under the CURRENT tag-enforcement policy (must be tagged whenever the
+   *  reader has a key) from one minted under a prior, looser policy (grandfathered). */
+  version: number;
   headSha: string;
   baseRef: string;
   baseSha: string;
@@ -182,7 +194,14 @@ function sha256Hex(text: string): string {
 /** `git diff --raw -z <base> <head>` output is NUL-separated records of the form
  *  `:<old-mode> <new-mode> <old-sha> <new-sha> <status>\0<path>\0` (renames/copies are
  *  disabled via `-c diff.renames=false` in `HERMETIC_CONFIG_ARGS`, so every record has
- *  exactly one path field, never two). Extracts a path → post-image-blob-sha map. */
+ *  exactly one path field, never two) — old and new sha are SPACE-separated fields,
+ *  never `..`-joined (that's `git diff --raw` WITHOUT `-z`'s human-readable rendering,
+ *  a different format this file never invokes). Extracts a path →
+ *  post-image-blob-sha map by splitting the meta record positionally: field 0 is
+ *  `:<old-mode>`, field 1 `<new-mode>`, field 2 `<old-sha>`, field 3 `<new-sha>`,
+ *  field 4 `<status>`. Falls back to hashing the whole meta record only if a field is
+ *  missing or not hex (defensive — the format above is stable, but this must never
+ *  throw on a real git record). */
 function extractPathHashes(diffRawZ: string): Record<string, string> {
   const fields = diffRawZ.split("\0").filter((f) => f.length > 0);
   const out: Record<string, string> = {};
@@ -190,8 +209,9 @@ function extractPathHashes(diffRawZ: string): Record<string, string> {
     const meta = fields[i];
     const path = fields[i + 1];
     if (meta === undefined || path === undefined) continue;
-    const shaMatch = meta.match(/\.\.([0-9a-f]+)\s+[A-Za-z]\d*$/);
-    out[path] = shaMatch ? shaMatch[1] : sha256Hex(meta);
+    const metaFields = meta.trim().split(/\s+/);
+    const newBlobSha = metaFields[3];
+    out[path] = newBlobSha !== undefined && /^[0-9a-f]+$/.test(newBlobSha) ? newBlobSha : sha256Hex(meta);
   }
   return out;
 }
@@ -284,6 +304,7 @@ export function mintBoxPatchId(input: MintBoxPatchIdInput): BoxPatchIdVerdict {
     record: {
       patchId,
       tag,
+      version: BOX_PATCH_ID_VERSION,
       headSha,
       baseRef,
       baseSha,
@@ -316,6 +337,7 @@ function isBoxPatchIdRecordShape(value: unknown): value is BoxPatchIdRecord {
     typeof v.patchId === "string" &&
     v.patchId.startsWith(BOX_PATCH_ID_PREFIX) &&
     (v.tag === undefined || typeof v.tag === "string") &&
+    typeof v.version === "number" &&
     typeof v.headSha === "string" &&
     typeof v.baseRef === "string" &&
     typeof v.baseSha === "string" &&
@@ -341,36 +363,47 @@ export function readBoxPatchIdCheckRuns(checkRuns: readonly CheckRunLike[], key?
     return { ok: false, reason: "box-patch-id-missing", detail: `no "${BOX_PATCH_ID_CHECK_NAME}" check run exists on this sha.` };
   }
 
-  // Phase 1 — structural parse only (JSON.parse + shape check). Nothing that parses
-  // structurally at all is "box-patch-id-missing": there is genuinely no record to
-  // read, as distinct from a record that exists but can't be trusted (phase 2).
+  // Phase 1 — structural parse only (JSON.parse + shape check). "box-patch-id-missing"
+  // is reserved for a check run with GENUINELY no record (no output text at all) —
+  // a check run present with a record that fails to parse, or doesn't match the
+  // shape, is "box-patch-id-unreadable" per the ruling ("an unparseable one is
+  // box-patch-id-unreadable"), tracked separately from the true-missing case below.
   const structurallyValid: BoxPatchIdRecord[] = [];
-  const structuralProblems: string[] = [];
+  const noRecordProblems: string[] = [];
+  const malformedProblems: string[] = [];
   for (const run of matches) {
     const text = run.output?.text ?? null;
     if (!text) {
-      structuralProblems.push("a matching check run has no output text");
+      noRecordProblems.push("a matching check run has no output text");
       continue;
     }
     let json: unknown;
     try {
       json = JSON.parse(text);
     } catch {
-      structuralProblems.push("a matching check run's output text is not parseable JSON");
+      malformedProblems.push("a matching check run's output text is not parseable JSON");
       continue;
     }
     if (!isBoxPatchIdRecordShape(json)) {
-      structuralProblems.push("a matching check run's JSON does not match the box-patch-id record shape");
+      malformedProblems.push("a matching check run's JSON does not match the box-patch-id record shape");
       continue;
     }
     structurallyValid.push(json);
   }
+  const structuralProblems = [...malformedProblems, ...noRecordProblems];
 
   if (structurallyValid.length === 0) {
+    if (malformedProblems.length > 0) {
+      return {
+        ok: false,
+        reason: "box-patch-id-unreadable",
+        detail: `a "${BOX_PATCH_ID_CHECK_NAME}" check run is present but its record could not be read: ${structuralProblems.join("; ")}.`,
+      };
+    }
     return {
       ok: false,
       reason: "box-patch-id-missing",
-      detail: `a "${BOX_PATCH_ID_CHECK_NAME}" check run is present but no parseable record was found: ${structuralProblems.join("; ")}.`,
+      detail: `a "${BOX_PATCH_ID_CHECK_NAME}" check run is present but no record was found: ${structuralProblems.join("; ")}.`,
     };
   }
 
@@ -379,6 +412,11 @@ export function readBoxPatchIdCheckRuns(checkRuns: readonly CheckRunLike[], key?
   // given) its tag verifies" is now "found something, can't trust which" —
   // box-patch-id-unreadable, never a silent pick-one. A tag that fails HMAC
   // verification lands here too: the record was found, its integrity check failed.
+  // An UNTAGGED record with a key present is honored only when it predates the
+  // current tag-enforcement version — Rule #381: tightening is forward-only, so a
+  // record minted under BOX_PATCH_ID_VERSION (this build's policy: must be tagged
+  // whenever the reader has a key) gets exactly one re-evaluation, and is pruned
+  // (not silently grandfathered) when it fails that re-evaluation.
   const tagProblems: string[] = [];
   const verified: BoxPatchIdRecord[] = [];
   for (const record of structurallyValid) {
@@ -388,6 +426,11 @@ export function readBoxPatchIdCheckRuns(checkRuns: readonly CheckRunLike[], key?
         tagProblems.push(`a record's tag does not verify against BOX_PATCH_ID_KEY (patchId ${record.patchId})`);
         continue;
       }
+    } else if (key && record.tag === undefined && record.version >= BOX_PATCH_ID_VERSION) {
+      tagProblems.push(
+        `a record minted under the current tag-enforcement version (${record.version}) has no tag even though BOX_PATCH_ID_KEY is configured (patchId ${record.patchId}) — a live key does not honor an untagged record.`,
+      );
+      continue;
     }
     verified.push(record);
   }
