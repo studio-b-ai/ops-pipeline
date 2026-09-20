@@ -26,7 +26,7 @@
  *   G(){ GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git \
  *    -c core.attributesFile=/dev/null -c core.autocrlf=false -c core.quotePath=true \
  *    -c diff.algorithm=myers -c diff.noprefix=false -c diff.mnemonicPrefix=false \
- *    -c diff.orderFile= -c diff.renames=false "$@"; }
+ *    -c diff.orderFile=/dev/null -c diff.renames=false "$@"; }
  *   D(){ G diff --no-color --no-ext-diff --no-textconv --no-renames -U0 "$BASE" H; }
  *   pid   = D | git patch-id --stable | cut -d' ' -f1
  *   ws    = D | sed -E 's|^@@ .*|@@|' | sed -E '/^index [0-9a-f]+\.\./d' | shasum -a 256
@@ -89,7 +89,11 @@ const HERMETIC_CONFIG_ARGS: readonly string[] = [
   "-c", "diff.algorithm=myers",
   "-c", "diff.noprefix=false",
   "-c", "diff.mnemonicPrefix=false",
-  "-c", "diff.orderFile=",
+  // `/dev/null`, never the empty string: git reads the value as a PATH and dies on ""
+  // (`fatal: failed to read orderfile ''`, the handler's first live firing on the fixed
+  // label-event code, run 35527162406, 2026-09-20 17:50Z). `/dev/null` still pins the
+  // order to "none" regardless of any repo config the hermetic env does not cover.
+  "-c", "diff.orderFile=/dev/null",
   "-c", "diff.renames=false",
 ];
 

@@ -1,4 +1,8 @@
 import { createHmac } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   BOX_PATCH_ID_CHECK_NAME,
@@ -6,6 +10,7 @@ import {
   BOX_PATCH_ID_UNKEYED_STATE,
   BOX_PATCH_ID_VERSION,
   boxPatchIdKeyState,
+  defaultGitRunner,
   mintBoxPatchId,
   readBoxPatchIdCheckRuns,
   touchesGitattributes,
@@ -243,5 +248,61 @@ describe("readBoxPatchIdCheckRuns", () => {
     const record = goodRecord(); // tag left undefined, version defaults to BOX_PATCH_ID_VERSION
     const verdict = readBoxPatchIdCheckRuns([runWith(record)], "test-key");
     expect(verdict).toMatchObject({ ok: false, reason: "box-patch-id-unreadable" });
+  });
+});
+
+// ───────────── defaultGitRunner against a REAL git (the one seam the fakes never touch) ─────────────
+
+/** A throwaway repo with two commits: `base` has foo.ts=old, `head` has foo.ts=new. Identity
+ *  and config come from env only, so the test is as hermetic as the runner it exercises. */
+function tempRepoWithTwoCommits(): { dir: string; base: string; head: string } {
+  const dir = mkdtempSync(join(tmpdir(), "box-patch-id-realgit-"));
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid",
+    GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid",
+  };
+  const git = (...args: string[]): string =>
+    execFileSync("git", ["-C", dir, ...args], { encoding: "utf-8", env, stdio: ["pipe", "pipe", "pipe"] });
+  git("init", "-q", "-b", "main");
+  writeFileSync(join(dir, "foo.ts"), "old\n");
+  git("add", "foo.ts");
+  git("commit", "-q", "-m", "base");
+  const base = git("rev-parse", "HEAD").trim();
+  writeFileSync(join(dir, "foo.ts"), "new\n");
+  git("commit", "-q", "-am", "head");
+  const head = git("rev-parse", "HEAD").trim();
+  return { dir, base, head };
+}
+
+const RECIPE_DIFF_ARGS = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "-U0"];
+
+describe("defaultGitRunner (real git)", () => {
+  it("known-GOOD: every hermetic -c flag is accepted by a real git and the -U0 diff comes back (2026-09-20 live fatal on `diff.orderFile=` — run 35527162406)", () => {
+    const { dir, base, head } = tempRepoWithTwoCommits();
+    try {
+      const out = defaultGitRunner(dir)([...RECIPE_DIFF_ARGS, base, head]);
+      expect(out).toContain("-old");
+      expect(out).toContain("+new");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("known-BAD, control: the empty-string form `-c diff.orderFile=` is what git refuses, so the test above can tell the two apart (Rule #322)", () => {
+    const { dir, base, head } = tempRepoWithTwoCommits();
+    try {
+      expect(() =>
+        execFileSync("git", ["-C", dir, "-c", "diff.orderFile=", ...RECIPE_DIFF_ARGS, base, head], {
+          encoding: "utf-8",
+          env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" },
+          stdio: ["pipe", "pipe", "pipe"],
+        }),
+      ).toThrow(/orderfile/i);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
