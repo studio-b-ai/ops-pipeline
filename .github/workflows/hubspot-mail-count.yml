@@ -1,0 +1,64 @@
+name: HubSpot Mail Count
+
+# Count Kevin's open HubSpot mail threads across his three Exec Triage
+# channels each morning and post the number to a morning-brief GitHub
+# issue — the count is a script on the timetable, never a promise in
+# prose (#696, crew-696, Kevin 9/17: "the most important thing with the
+# mail is that we burn down/make sure we're tracking the queue as is
+# shows in hubspot").
+
+on:
+  schedule:
+    - cron: "0 11 * * *"  # daily 11:00 UTC (7 AM ET) — GH Actions cron is UTC-only (Rule #94)
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: hubspot-mail-count
+  cancel-in-progress: false
+
+jobs:
+  count:
+    name: "HubSpot mail count — query Exec Triage, post morning-brief issue"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: "Install deps"
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: "Count open threads and post brief"
+        id: count
+        working-directory: scripts
+        env:
+          HUBSPOT_ACCESS_TOKEN: ${{ secrets.HUBSPOT_ACCESS_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+        run: npx tsx hubspot-mail-count.ts
+
+      - name: "Report terminal status"
+        if: always()
+        run: |
+          echo "hubspot-mail-count terminal status: ${{ job.status }} (count outcome: ${{ steps.count.outcome }})"
+
+      - name: "Machinery failure issue"
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="hubspot-mail-count: run failed ($(date -u +%Y-%m-%d))"
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --label bug --search "hubspot-mail-count: run failed in:title" --json number --jq '.[0].number // empty')
+          BODY="Scheduled HubSpot mail count run failed: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID."
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --label bug --body "$BODY"
+          fi
