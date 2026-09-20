@@ -1,0 +1,95 @@
+name: box-patch-id (labeled handler)
+
+# ops-pipeline#190 rollout step 3, OBSERVE-ONLY THIS LAP — Kevin's ruling on board card
+# 808, "the box binds to the patch-id, not the sha" (brain
+# library/supplementary-regulations/2026-09-19-the-box-binds-to-the-patch-id.md,
+# "Where the patch-id is recorded"). Fires on every `box` label application on THIS
+# repo's own pull requests (rollout step 5 widens this to ops-pipeline governing a
+# real merge; step 6 widens it to power-unit and the hourly lap — neither is this PR).
+#
+# Mints the bp2 patch-id via scripts/lib/box-patch-id.ts (this PR's Unit 1) through the
+# companion script scripts/box-patch-id-labeled.ts (this PR's Unit 2b — this repo's own
+# convention is a thin YAML wrapper over a dedicated scripts/*.ts file; no workflow
+# here embeds real logic inline), and records the result as a "box-patch-id" check run
+# on the labeled sha plus a marked, write-only PR comment. Nothing here strips or keeps
+# the box label — that stays label-authority.ts's position predicate, unchanged, until
+# boxPatchIdWins flips in a later rung (rollout step 5). A refusal here (missing base
+# ref, empty diff, .gitattributes touch, etc.) is recorded as a neutral check run and
+# never fails this workflow — observe-only means this job cannot affect the PR's
+# mergeability either way.
+#
+# Uses the studiob-fleet-bot App installation token, never github.token, for the same
+# reason squasher-automerge.yml does (see that file's header): a check run is owned by
+# the App identity that creates it, so only a workflow holding
+# FLEET_APP_ID/FLEET_APP_PRIVATE_KEY can create or update this one — a repo
+# collaborator, or a workflow running with the ambient, widely-triggerable
+# github.token, cannot forge or overwrite it.
+#
+# BOX_PATCH_ID_KEY (ruling open item: Kevin's hand to mint, not yet created as of this
+# PR) is read straight from the secret store and passed through unchanged when
+# present; when absent, GH_TOKEN's caller reads process.env directly and the patch-id
+# ships untagged rather than refusing to mint, per the ruling's stated decline path —
+# never fail this workflow for a key that hasn't been minted yet.
+
+on:
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: box-patch-id-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  mint:
+    name: "Mint + record the box-patch-id (observe-only)"
+    if: github.event.label.name == 'box'
+    runs-on: ubuntu-latest
+    steps:
+      # Rule #466 — this checkout IS the one scratch clone this lap uses.
+      # fetch-depth: 0 (full history) is required: mintBoxPatchId computes
+      # `merge-base origin/<baseRef> <headSha>`, which needs both refs' full ancestry,
+      # not just the labeled commit.
+      - name: Checkout full history
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Mint fleet App installation token
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: Fail loud if the mint returned nothing
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::Fleet App token mint returned an empty token — refusing to mint or record a box-patch-id (a github.token fallback would let a collaborator forge/overwrite the check run this design exists to protect; see ops-pipeline#190 rollout step 3)."
+          exit 1
+
+      - name: Mint + record the box-patch-id
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          BOX_REPO: ${{ github.repository }}
+          BOX_PR_NUMBER: ${{ github.event.pull_request.number }}
+          BOX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BOX_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BOX_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BOX_ACTOR_LOGIN: ${{ github.event.sender.login }}
+          BOX_CURRENT_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BOX_PATCH_ID_KEY: ${{ secrets.BOX_PATCH_ID_KEY }}
+        run: npx tsx box-patch-id-labeled.ts
