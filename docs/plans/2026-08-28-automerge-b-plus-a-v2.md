@@ -94,8 +94,8 @@ Cross-check probe available to plants (not the runtime predicate): earliest `che
 
 - **Rung 0** — this doc + codex design review CLEAN/minor (#179). Re-opens ops#190 rung 0.
 - **A1** — authority predicate + stale-label leg in `pr-automerge-gate.ts`/lib. Plants per §5.
-- **A2** — callers: ops-pipeline (self) → price-sync + asthetik-trade-theme → webhook-router (after its pin lifts + #718) → bolt-wms.
-- **B1** — `code-fix` class, everywhere-OFF. **B2** — canary + revert. **B3** — per-repo enablement: webhook-router → bolt-wms → studiob (candidate-flow only, train-class) → price-sync → theme LAST (storefront).
+- **A2** — callers: ops-pipeline (self) → price-sync + asthetik-trade-theme → radio (after its pin lifts + #718) → bolt-wms.
+- **B1** — `code-fix` class, everywhere-OFF. **B2** — canary + revert. **B3** — per-repo enablement: radio → bolt-wms → studiob (candidate-flow only, train-class) → price-sync → theme LAST (storefront).
 - **Closes** when all six rungs carry both-direction plant receipts and Rule #279's text is amended (Dispatcher's batch) to name the v2 mechanism.
 
 ## 7. Out of scope, permanently or here

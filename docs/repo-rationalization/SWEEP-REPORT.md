@@ -28,7 +28,7 @@ no reason to challenge those archivals except the one flagged below), and 4 are
 ## The single most decision-relevant finding: studiob-qa
 
 **`studiob-qa` is flagged `archived: true` in GitHub but is a live, successfully
-running CI dependency** for `webhook-router`. Its `.github/workflows/ci.yml`
+running CI dependency** for `radio`. Its `.github/workflows/ci.yml`
 calls `uses: studio-b-ai/studiob-qa/.github/workflows/qa-runner.yml@main` on
 every pull request. Verified via an actual run: PR run
 `31463593410` on 2026-08-11 — jobs `Cross-System QA / E2E Tests (Playwright)`,
@@ -58,7 +58,7 @@ No repos were added, deleted, transferred, or had their archived flag flipped.
 | **b-studio-website** | **2026-05-10** | **2026-08-11** |
 | client-asthetik | 2026-08-04 | 2026-08-11 |
 | studiob | 2026-08-04 | 2026-08-11 |
-| webhook-router | 2026-08-04 | 2026-08-11 |
+| radio | 2026-08-04 | 2026-08-11 |
 | studiob-price-sync | 2026-08-04 | 2026-08-10 |
 | ops-pipeline | 2026-08-04 | 2026-08-07 |
 | aesthetik-portal | 2026-07-30 | 2026-08-05 |
@@ -166,7 +166,7 @@ repo owner). See COULD-NOT-VERIFY below.
 - `acumatica-configs` (archived) — Acumatica config baseline; superseded by
   `client-asthetik`.
 - `acumatica-hubspot-sync` (archived) — sync agent; superseded, likely by
-  `webhook-router`'s sync pipeline.
+  `radio`'s sync pipeline.
 - `acumatica-mcp` (archived) — consolidated into studiob-api per CLAUDE.md.
 - `bolt-order-entry` (archived) — "CS Agent Order Entry"; superseded lineage
   (bootstrap manifest's `cs-order-entry` alias still points here — it was the
@@ -181,7 +181,7 @@ repo owner). See COULD-NOT-VERIFY below.
   into studiob-api."
 - `health-checker` (archived) — likely superseded by `business-dashboard` +
   the worker-staleness-watchdog pattern (Rule #298/#448).
-- `hubspot-configs` (archived) — likely folded into `webhook-router`/
+- `hubspot-configs` (archived) — likely folded into `radio`/
   `client-asthetik` config.
 - `infra-config` (archived) — likely folded into `ops-pipeline` or per-repo
   configs.
@@ -193,7 +193,7 @@ repo owner). See COULD-NOT-VERIFY below.
 - `studiob-acumatica-ci-cd-template` (archived) — superseded alongside
   `acumatica-ci-cd`'s split.
 - `studiob-aesthetik-orders-sync` (archived) — superseded, likely by
-  `webhook-router`.
+  `radio`.
 - `studiob-templates` (archived) — superseded by the
   `ops-template`/`studiob-client-template`/`studiob-test-template` family.
 

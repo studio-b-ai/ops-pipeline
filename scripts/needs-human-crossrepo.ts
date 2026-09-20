@@ -732,7 +732,7 @@ function searchCrossRepoRoutedOrigins(repo: string): IssueRow[] {
   // searched … resources do not exist or you do not have permission" on any repo whose
   // search index has no indexable content yet — a persistent PER-REPO verdict (most
   // commonly a repo with no issues/comments the search index has ever ingested), not a
-  // fleet outage. It fires the SAME way every hour (webhook-router: 651 consecutive
+  // fleet outage. It fires the SAME way every hour (radio: 651 consecutive
   // failed runs before this catch), and by definition the recall pass has NO candidates
   // to find in an unsearchable repo — the whole run's remaining repos were skipped
   // strictly because one repo's search index is empty. `isUnsearchableRepoFailure`

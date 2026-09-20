@@ -216,7 +216,7 @@ export function latestSuccessfulDeployment(deployments: DeploymentRecord[]): Dep
 
 /**
  * Same root `Query.deployments` connection as SERVICE_DEPLOYMENTS_QUERY plus the `meta` JSON
- * field. LIVE-VERIFIED 2026-08-30 against studiob-platform/webhook-router (3 real deployments):
+ * field. LIVE-VERIFIED 2026-08-30 against studiob-platform/radio (3 real deployments):
  * `meta` is a JSON object whose keys include `commitHash` (full 40-char sha), `branch`, `repo`,
  * `commitMessage`, `imageDigest`. The tripwire attributes a merged PR's deployment by
  * `meta.commitHash === merge_commit_sha` — a deployment with no meta (or no commitHash, e.g. an
@@ -296,7 +296,7 @@ export async function fetchDeploymentsWithMeta(
 // ───────────────────────────── HTTP metrics by status (post-merge tripwire, ops#190 B2) ─────────────────────────────
 
 /**
- * Root `Query.httpMetricsGroupedByStatus` — LIVE-VERIFIED 2026-08-30 against webhook-router
+ * Root `Query.httpMetricsGroupedByStatus` — LIVE-VERIFIED 2026-08-30 against radio
  * production (15-min window): returns one group PER STATUS CODE THAT OCCURRED (200/202/400/404 in
  * the smoke); an ABSENT 5xx group means zero 5xx responses in the window, not missing data. Each
  * sample's `ts` is epoch SECONDS and `value` is the request count in that step bucket.

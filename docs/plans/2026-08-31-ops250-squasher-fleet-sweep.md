@@ -18,7 +18,7 @@ D3; the sweep shape must be fleet-central for the squasher.
    Railway deploys are unaffected (Railway's own GitHub App webhook, not Actions).
 2. **Tripwire revert-mint inert since birth.** `FLEET_APP_ID`/`FLEET_APP_PRIVATE_KEY` exist **only in
    ops-pipeline repo secrets** (verified via `gh secret list` on every caller repo + the org-secrets
-   admin view). webhook-router's tripwire caller maps them anyway → empty strings → the revert-leg App
+   admin view). radio's tripwire caller maps them anyway → empty strings → the revert-leg App
    mint would fail at first TRIP (Rule #38: missing secret = empty string + misleading error).
 3. **Same defect on the train legs.** Per-repo callers also run `train_ready: true` evaluations and
    merge with `github.token` — train merges are equally suppression-broken (never surfaced: both prior
@@ -85,7 +85,7 @@ Caller inputs migrate **verbatim** (extracted from each caller on origin/main, 2
 | studiob-price-sync | :29 | (default) | — | — | — | yes |
 | asthetik-trade-theme | :35 | (default) | — | — | — | yes |
 | asthetik-portal | :47 | (default) | — | — | — | yes |
-| webhook-router | :53 | docs-comment,code-fix | `^\.github/actions/,(^\|/)(auth\|credential\|secret\|token)` | `src/**` | Build & Check,Cross-System QA / API Tests (Vitest) | yes |
+| radio | :53 | docs-comment,code-fix | `^\.github/actions/,(^\|/)(auth\|credential\|secret\|token)` | `src/**` | Build & Check,Cross-System QA / API Tests (Vitest) | yes |
 
 Notes: bolt-wms composes its own `require-review-label.yml` check on sensitive paths — that check
 gates via the full-CI-rollup leg and needs nothing here. wr's gitleaks check name contains a comma and
@@ -117,7 +117,7 @@ the fleet sweep deliberately excludes (one repo, one sweep). It passes the two n
 the same PR; its merges thereby also become App-token merges (side benefit: un-suppressed events on
 ops-pipeline train merges).
 
-**Health leg (build-time discovery, 2026-08-31):** 5 of the 6 caller repos (all but webhook-router)
+**Health leg (build-time discovery, 2026-08-31):** 5 of the 6 caller repos (all but radio)
 also carry a `squasher-health.yml` — the Project 2 monitor, watching the retiring caller's runs by
 hardcoded filename (`squasher-health.ts` `SWEEP_WORKFLOW`). Two consequences, both handled:
 
@@ -133,7 +133,7 @@ hardcoded filename (`squasher-health.ts` `SWEEP_WORKFLOW`). Two consequences, bo
    names. Machinery issues open in ops-pipeline (#165 — fleet-sweep failures are ops-pipeline
    machinery). The `sla_hours` planted-control seam carries over unchanged (#471).
 
-`verify-squash-merge.yml` (bolt-wms/studiob/webhook-router) is unrelated — it is the
+`verify-squash-merge.yml` (bolt-wms/studiob/radio) is unrelated — it is the
 acuops-pipeline squash-completeness monitor on push-to-main, and is a **beneficiary** of this
 redesign: App-token merges will start triggering it where GITHUB_TOKEN merges suppressed it.
 
@@ -154,7 +154,7 @@ ops-pipeline PR:
   ⟨codex P3⟩ Attribution mismatch handled in the same edit: `post-merge-tripwire.ts:73-74` hardcodes
   the revert commit author as `studiob-fleet-bot` while the actor will now be `github-actions[bot]` —
   align the commit identity with the actual actor.
-- webhook-router caller PR: drop the two dead `FLEET_APP_*` secret mappings (they resolve empty
+- radio caller PR: drop the two dead `FLEET_APP_*` secret mappings (they resolve empty
   today).
 - Noted alternative if revert-CI friction proves real: an ops-pipeline-resident revert executor
   (App-token PR creation on a `repository_dispatch`/marker signal). Not built now (#28 vs YAGNI — the
@@ -190,12 +190,12 @@ manual tripwire throughout.
 
 ## 4. Verification (#471 both directions, #280 real firings)
 
-- **Trigger it for real (#280):** `workflow_dispatch` the fleet sweep with `repo=webhook-router`,
+- **Trigger it for real (#280):** `workflow_dispatch` the fleet sweep with `repo=radio`,
   `pr_number=<vehicle>` (wr#811 if still open; else the squasher's next PR — it self-feeds). A
   scheduled run must also be observed completing (cron identifiers/skips are exactly where workflows
   break silently, #280/#320).
 - **Known-good (the non-default verdict, #471):** the vehicle's autonomous merge must show
-  `mergedBy = studiob-fleet-bot[bot]` **and** a tripwire-caller run **CREATED** in webhook-router for
+  `mergedBy = studiob-fleet-bot[bot]` **and** a tripwire-caller run **CREATED** in radio for
   the merged PR (running its health leg, not merely skipped), green. wr#806 = banked known-bad
   baseline (zero runs). ⟨codex P2⟩ Also assert at least one **push-triggered** workflow run exists on
   the merge commit in the target repo (§1 names push-to-main suppression as part of the defect; the

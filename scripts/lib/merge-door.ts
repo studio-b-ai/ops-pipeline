@@ -6,7 +6,7 @@
  * (the workflow run that actually did it) are two different facts; only the
  * rung was ever named, and the rung's own name was reused as a stand-in for
  * the door. Three seats inferred the door from that wrong name on
- * webhook-router#891/#900 (15:24Z) and bolt-wms#2148 (19:17Z) — the real door
+ * radio#891/#900 (15:24Z) and bolt-wms#2148 (19:17Z) — the real door
  * was squasher-fleet-sweep.yml (hourly ~:16, fleet-wide over every open
  * ready-labeled PR); heritage-restart-train.yml is the door only for its OWN
  * ticket repos and never calls evaluateTrainReady at all (it has its own,

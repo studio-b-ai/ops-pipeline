@@ -16,7 +16,7 @@
  * exactly one Dispatcher rail + the label before this leg counts as landed.
  *
  * ## Endpoint
- * `POST /internal/seat-inbox` at webhook-router, bearer-authed with SEAT_INBOX_TOKEN
+ * `POST /internal/seat-inbox` at radio, bearer-authed with SEAT_INBOX_TOKEN
  * (`~/.claude/bin/seat-inbox send <seat> <from> <body>` wraps this same door). Body:
  * `{ to_seat, from_seat, body }` per radio/src/routes/seat-inbox.ts. Consumers:
  * the seat cold-start / prompt-drain hook + the seat-side sender CLI.
