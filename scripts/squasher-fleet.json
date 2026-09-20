@@ -88,7 +88,8 @@
       "sensitive_path_patterns": "(^|/)(LANES|QUEUE|SHIPPED)\\.md,(^|/)scripts/lanes-row-edit\\.py,(^|/)scripts/git-hooks/,(^|/)scripts/brain-push/,(^|/)scripts/stint\\.py,(^|/)scripts/propagate\\.py,(^|/)scripts/reconcile-shared-main\\.sh,(^|/)\\.gitleaksignore$,(^|/)scripts/run-tests\\.sh,(^|/)scripts/board\\.py,(^|/)scripts/board-stale-tree-guard\\.py,(^|/)scripts/bless-pointer-guard\\.py,(^|/)scripts/ask-age-guard\\.py,(^|/)scripts/vault-objdb-commit\\.sh,(^|/)scripts/rules-build\\.py,(^|/)scripts/vault-auto-sync\\.sh,(^|/)scripts/sync-mirror\\.sh,(^|/)scripts/refresh-claude-config-mirror\\.sh,(^|/)scripts/decisions-apply\\.py,(^|/)scripts/runner_roster\\.py,(^|/)scripts/roster-assert\\.py,(^|/)scripts/coldstart-rotate\\.py",
       "safe_path_globs": "scripts/card-lint.py,scripts/claude-md-apply-diet.py,scripts/kit.py,scripts/lanes-holds.py,scripts/promote-learned.py,scripts/receipt-for.py",
       "required_checks": "Protected-path deletion guard,run-tests.sh (python + shell)",
-      "train": true
+      "train": true,
+      "patch_id_wins": true
     },
     {
       "repo": "studio-b-ai/claude-config-plane",
