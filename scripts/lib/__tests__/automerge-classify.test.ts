@@ -8,6 +8,7 @@ import {
   evaluateMergeReadiness,
   gateDecision,
   gateDecisionForClass,
+  isMergeTreeCheckClean,
   isRollupClean,
   reconcileFileClasses,
   repoClassFor,
@@ -431,6 +432,46 @@ describe("isRollupClean", () => {
   });
 });
 
+describe("isMergeTreeCheckClean (stint #476 — deterministic merge-tree fallback)", () => {
+  const MERGE_TREE = "merge-tree (deterministic mergeability)";
+
+  it("returns false when the check is absent (fail-closed — empty rollup or not found)", () => {
+    expect(isMergeTreeCheckClean([])).toBe(false);
+    expect(isMergeTreeCheckClean([{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS" }])).toBe(false);
+  });
+
+  it("returns true when the check is present and SUCCESS", () => {
+    expect(isMergeTreeCheckClean([
+      { name: MERGE_TREE, status: "COMPLETED", conclusion: "SUCCESS" },
+    ])).toBe(true);
+  });
+
+  it("returns false when the check completed but is FAILURE (conflict)", () => {
+    expect(isMergeTreeCheckClean([
+      { name: MERGE_TREE, status: "COMPLETED", conclusion: "FAILURE" },
+    ])).toBe(false);
+  });
+
+  it("returns false when the check is still IN_PROGRESS (not yet terminal)", () => {
+    expect(isMergeTreeCheckClean([
+      { name: MERGE_TREE, status: "IN_PROGRESS", conclusion: null },
+    ])).toBe(false);
+  });
+
+  it("prefers the latest SUCCESS over stale FAILURE (supersession)", () => {
+    expect(isMergeTreeCheckClean([
+      { name: MERGE_TREE, status: "COMPLETED", conclusion: "FAILURE", completedAt: "2026-09-17T08:00:00Z" },
+      { name: MERGE_TREE, status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-09-17T08:01:00Z" },
+    ])).toBe(true);
+  });
+
+  it("uses only the merge-tree check, not a different check with 'merge' in the name", () => {
+    expect(isMergeTreeCheckClean([
+      { name: "merge (not the right name)", status: "COMPLETED", conclusion: "SUCCESS" },
+    ])).toBe(false);
+  });
+});
+
 describe("reconcileFileClasses", () => {
   // ───── Negative controls first (Rule #322) ─────
 
@@ -816,6 +857,31 @@ describe("evaluateMergeReadiness (ci-rollup leg — Rule #471 both-directions co
   it("declines a non-CLEAN mergeStateStatus (BLOCKED)", () => {
     expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "BLOCKED" }).ready).toBe(false);
   });
+
+  // ── stint #476: merge-tree deterministic fallback ──
+
+  it("declines UNKNOWN without merge-tree (existing behavior — no blind pass-through)", () => {
+    // UNKNOWN alone, without a green merge-tree check, must still refuse. This proves
+    // the fallback doesn't open a gate that was previously closed (negative control).
+    expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "UNKNOWN" }).ready).toBe(false);
+  });
+
+  it("known-GOOD: UNKNOWN + mergeTreeClean=true is ready (the #471 non-default-verdict plant)", () => {
+    // This is the whole point of stint #476: when GitHub's mergeStateStatus stays
+    // UNKNOWN for hours on fast-moving repos, a deterministic merge-tree CI check
+    // provides the answer. The door must recognize it.
+    expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "UNKNOWN", mergeTreeClean: true }).ready).toBe(true);
+  });
+
+  it("declines UNKNOWN + mergeTreeClean=false (explicit: merge-tree conflicts)", () => {
+    // merge-tree clean must be explicitly true to pass; false = refusal.
+    expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "UNKNOWN", mergeTreeClean: false }).ready).toBe(false);
+  });
+
+  it("UNKNOWN + mergeTreeClean=true still declines !ciClean (ciClean gates independently)", () => {
+    // mergeTreeClean only substitutes for mergeStateStatus, not for ciClean.
+    expect(evaluateMergeReadiness({ ...ready, mergeStateStatus: "UNKNOWN", mergeTreeClean: true, ciClean: false }).ready).toBe(false);
+  });
 });
 
 describe("compileSafePathGlob (ops#190 B1 — the tiny allowlist grammar)", () => {
@@ -1058,6 +1124,184 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
       safePathGlobs: ["src/**"],
     });
     expect(result.prClass).toBe("code-fix");
+  });
+});
+
+describe("classifyPrDiffClass — fleet-internal class (stint #689 — the second machine class)", () => {
+  function files(paths: string[], fileClass: GateFile["fileClass"] = "code"): GateFile[] {
+    return paths.map((path) => ({ path, fileClass }));
+  }
+  const FI = ["fleet-internal"];
+
+  // ───── Negative controls first (Rule #322/#471) ─────
+
+  it("never joins the candidate set without the label — a denylist-clean code diff with NO labels passed resolves null, byte-identical to before the class existed", () => {
+    const result = classifyPrDiffClass({ files: files(["scripts/kit.py"]), totalChangedLines: 42 });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("class-match");
+    expect(result.reasons.some((r) => r.includes("fleet-internal"))).toBe(false);
+  });
+
+  it("never joins for a PR carrying other labels but not fleet-internal (e.g. bugsquasher only)", () => {
+    const result = classifyPrDiffClass({ files: files(["scripts/kit.py"]), totalChangedLines: 42, labels: ["bugsquasher"] });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("fleet-internal"))).toBe(false);
+  });
+
+  it("denylist: a .github/ file routes to a human even with the label", () => {
+    const result = classifyPrDiffClass({ files: files([".github/workflows/ci.yml", "scripts/kit.py"]), totalChangedLines: 42, labels: FI });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("class-match");
+    expect(result.reasons.some((r) => r.includes("fleet-internal: built-in denylist hit"))).toBe(true);
+  });
+
+  it("denylist: an auth-shaped path routes to a human even with the label", () => {
+    const result = classifyPrDiffClass({ files: files(["src/middleware/session.ts"]), totalChangedLines: 42, labels: FI });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("fleet-internal: built-in denylist hit"))).toBe(true);
+  });
+
+  it("denylist: a migration path routes to a human even with the label", () => {
+    const result = classifyPrDiffClass({ files: files(["db/migrations/0042_add_col.ts"]), totalChangedLines: 42, labels: FI });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("fleet-internal: built-in denylist hit"))).toBe(true);
+  });
+
+  it("denylist: a package manifest routes to a human even with the label (dependency changes are their own risk class)", () => {
+    const result = classifyPrDiffClass({ files: files(["scripts/package.json"]), totalChangedLines: 42, labels: FI });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("fleet-internal: built-in denylist hit"))).toBe(true);
+  });
+
+  it("sensitivePathPatterns still beat the fleet-internal class entirely", () => {
+    const result = classifyPrDiffClass({
+      files: files(["scripts/kit.py"]),
+      totalChangedLines: 42,
+      labels: FI,
+      sensitivePathPatterns: ["kit\\.py"],
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("class-match");
+    expect(result.reasons.some((r) => r.includes("sensitive path"))).toBe(true);
+  });
+
+  // ───── Positives ─────
+
+  it("known-GOOD: a denylist-clean code diff carrying the label resolves fleet-internal (any shape, no line cap)", () => {
+    const result = classifyPrDiffClass({ files: files(["scripts/kit.py", "scripts/board.py"]), totalChangedLines: 1600, labels: FI });
+    expect(result).toEqual({ prClass: "fleet-internal", failureLeg: null, reasons: [] });
+  });
+
+  it("picks up what EVERY narrower class refused: a mixed diff (src code + test + doc) with the label resolves fleet-internal", () => {
+    // The defining 05:22Z failure shape (radio#1141 class-match: "docs-comment:
+    // code-class file(s)") — no SHAPE candidate can hold a mixed diff; the second
+    // machine class can, as long as the built-in denylist stays clean (this mixed
+    // set deliberately avoids .github/**, which IS on the denylist).
+    const result = classifyPrDiffClass({
+      files: files(["src/workers/sync.ts", "scripts/lib/__tests__/sync.test.ts", "docs/runbook.md"]),
+      totalChangedLines: 210,
+      labels: FI,
+    });
+    expect(result.prClass).toBe("fleet-internal");
+  });
+
+  // ───── Precedence: fleet-internal resolves LAST of all ─────
+
+  it("docs-comment still wins over fleet-internal for a comment-only diff with the label", () => {
+    const result = classifyPrDiffClass({
+      files: [{ path: "docs/plans/notes.md", fileClass: "doc" }],
+      totalChangedLines: 3,
+      labels: FI,
+    });
+    expect(result.prClass).toBe("docs-comment");
+  });
+
+  it("code-fix still wins over fleet-internal for a globbed runtime fix with the label", () => {
+    const result = classifyPrDiffClass({
+      files: files(["src/lib/fix.ts"]),
+      totalChangedLines: 30,
+      safePathGlobs: ["src/**"],
+      labels: FI,
+    });
+    expect(result.prClass).toBe("code-fix");
+  });
+
+  it("picks up what code-fix refused: a code diff OUTSIDE the safe_path_globs with the label resolves fleet-internal", () => {
+    const result = classifyPrDiffClass({
+      files: files(["bin/runner.sh"]),
+      totalChangedLines: 30,
+      safePathGlobs: ["src/**"],
+      labels: FI,
+    });
+    expect(result.prClass).toBe("fleet-internal");
+  });
+});
+
+describe("gateDecisionForClass — fleet-internal class label legs (stint #689)", () => {
+  function fiInput(overrides: Partial<GateInputV2> = {}): GateInputV2 {
+    return {
+      prClass: "fleet-internal",
+      author: "kbibelhausen",
+      labels: ["fleet-internal"],
+      ciClean: true,
+      reviewVerdict: "CLEAN",
+      ...overrides,
+    };
+  }
+
+  // ───── Negative controls first (Rule #322/#471) ─────
+
+  it("waits when the fleet-internal label itself is absent — bugsquasher alone does NOT satisfy this class's lane", () => {
+    const result = gateDecisionForClass(fiInput({ labels: ["bugsquasher"] }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("requires the 'fleet-internal' label itself"))).toBe(true);
+  });
+
+  it("waits when needs-human is present — a review FLAG's blue card or a human's ask makes the PR Kevin's; only box opens it", () => {
+    const result = gateDecisionForClass(fiInput({ labels: ["fleet-internal", "needs-human"] }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("'needs-human' is present"))).toBe(true);
+  });
+
+  it("waits when hold is present — parked by Kevin's word (defense-in-depth behind the runner's held leg)", () => {
+    const result = gateDecisionForClass(fiInput({ labels: ["fleet-internal", "hold"] }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("'hold' is present"))).toBe(true);
+  });
+
+  it("waits when the author is not kbibelhausen (the universal author leg still binds this class)", () => {
+    const result = gateDecisionForClass(fiInput({ author: "someone-else" }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("author"))).toBe(true);
+  });
+
+  it("waits when the review verdict is FLAG (the 2-of-3 Sonnet leg still binds this class)", () => {
+    const result = gateDecisionForClass(fiInput({ reviewVerdict: "FLAG" }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("review verdict"))).toBe(true);
+  });
+
+  it("reports every failing class leg at once (needs-human AND hold AND missing label)", () => {
+    const result = gateDecisionForClass(fiInput({ labels: ["needs-human", "hold"] }));
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.filter((r) => r.includes("fleet-internal") || r.includes("needs-human") || r.includes("hold")).length).toBeGreaterThanOrEqual(3);
+  });
+
+  // ───── Positive + scoping controls ─────
+
+  it("known-GOOD: merges with every leg green (label present, no needs-human/hold, CI clean, review CLEAN)", () => {
+    expect(gateDecisionForClass(fiInput())).toEqual({ decision: "merge", reasons: [] });
+  });
+
+  it("scoping control: needs-human does NOT block the OTHER classes (byte-identical — the blue-card flow relies on re-evaluation)", () => {
+    const result = gateDecisionForClass({
+      prClass: "code-fix",
+      author: "kbibelhausen",
+      labels: ["fleet-internal", "needs-human"],
+      ciClean: true,
+      reviewVerdict: "CLEAN",
+    });
+    expect(result).toEqual({ decision: "merge", reasons: [] });
   });
 });
 

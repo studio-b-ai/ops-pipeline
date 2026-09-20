@@ -25,9 +25,15 @@
  *      code-fix (<=800 lines — the live CODE_FIX_LINE_CAP in automerge-classify.ts;
  *      runtime paths allowed — guarded instead by leg 7's allowlist/denylist/
  *      named-checks; ops#190 B1, resolves LAST so the longer-proven classes always
- *      win). A mixed-shape diff (e.g. a workflow file AND a test file together)
- *      satisfies no candidate and resolves to `null` — never a partial/best-effort
- *      merge across classes.
+ *      win), or fleet-internal (stint #689 — the SECOND machine class: NOT a
+ *      diff-shape class; joins only when the PR carries the runner's
+ *      `fleet-internal` label, resolves LAST of all, guarded by the built-in
+ *      denylist backstop, the class's own label legs — `fleet-internal` present,
+ *      no `needs-human`, no `hold` — and leg 7's named-checks; ops-pipeline is
+ *      excluded from the class by contract). A mixed-shape diff (e.g. a workflow
+ *      file AND a test file together) satisfies no shape candidate and resolves
+ *      to `null` unless the fleet-internal candidate picks it up — never a
+ *      partial/best-effort merge across classes.
  *   3. the resolved class is in THIS CALLER's `--enabled-classes` set (defaults to
  *      `docs-comment` ONLY — a caller that never passes `--enabled-classes` gets
  *      EXACTLY the original #279 gate's scope, unchanged; opting into ci-infra/
@@ -48,7 +54,8 @@
  *      2-of-3 re-roll eventually lands CLEAN and merges with no human key;
  *      claude-config-plane#471). Doors off a flagged head: `box`, the
  *      transition-week `reviewed` receipt, `hold`, or a new head.
- *   7. (code-fix ONLY — ops#190 B1, doc §4.1) three extra legs plus a partition:
+ *   7. (code-fix — ops#190 B1, doc §4.1; fleet-internal rides the denylist +
+ *      named-checks legs only, stint #689) three extra legs plus a partition:
  *      every changed file matches >=1 caller-declared safe_path_glob (allowlist-
  *      PRIMARY: empty/absent globs leave the class INERT even when enabled); no
  *      file hits the built-in NON-overridable denylist (migrations, SQL, auth/
@@ -99,6 +106,7 @@ import {
   codeFixRevalidateDeltas,
   evaluateMergeReadiness,
   gateDecisionForClass,
+  isMergeTreeCheckClean,
   isRollupClean,
   parseUnifiedDiff,
   reconcileFileClasses,
@@ -557,6 +565,7 @@ async function evaluate(
     isDraft: prJson.isDraft,
     ciClean,
     mergeStateStatus: prJson.mergeStateStatus,
+    mergeTreeClean: isMergeTreeCheckClean(prJson.statusCheckRollup),
   });
   if (!readiness.ready) {
     const detail = readiness.detail;
@@ -622,7 +631,10 @@ async function evaluate(
   const files: GateFile[] = reconcileFileClasses(authoritativePaths, parsed);
 
   // ── Leg "class-match"/"line-cap": resolve the PR-level diff class ──
-  const classification = classifyPrDiffClass({ files, totalChangedLines, additions: codeFixLines, sensitivePathPatterns, safePathGlobs });
+  // `labels` is passed for the fleet-internal candidate ONLY (stint #689): it joins
+  // the candidate set solely when the PR carries the runner's `fleet-internal` label;
+  // every other candidate ignores labels, so prior resolutions stay byte-identical.
+  const classification = classifyPrDiffClass({ files, totalChangedLines, additions: codeFixLines, sensitivePathPatterns, safePathGlobs, labels });
   if (classification.prClass === null) {
     const leg: GateReceiptLeg = classification.failureLeg ?? "other";
     console.log(`[wait] pr-automerge-gate ${repo}#${pr}: no diff class resolved (${leg}) — ` + classification.reasons.join("; "));
@@ -684,13 +696,15 @@ async function evaluate(
     return;
   }
 
-  // ── Leg "named-checks" (code-fix ONLY, cheap — still before any API spend): the
-  // caller's named-checks allowlist (ops#190 B1, doc §4.1 move 4). STRICTER than the
+  // ── Leg "named-checks" (code-fix and fleet-internal, cheap — still before any API
+  // spend): the caller's named-checks allowlist (ops#190 B1, doc §4.1 move 4; extended
+  // to the fleet-internal class by stint #689 — "every named required_check SUCCESS on
+  // the head sha" is one of that class's contract legs). STRICTER than the
   // ci-rollup leg on purpose: every named check must exist, be terminal, and be
   // strictly SUCCESS on the head commit — SKIPPED is not green here even when the
   // skip allowlist sanctions it elsewhere, NEUTRAL is not SUCCESS, and an EMPTY
   // required_checks list fails closed (the class can never merge without one).
-  if (prClass === "code-fix") {
+  if (prClass === "code-fix" || prClass === "fleet-internal") {
     const effectiveChecks = filterRequiredChecksByPathDeps(
       requiredChecks,
       requiredChecksPathDeps,
@@ -1019,6 +1033,13 @@ async function evaluate(
           `| built-in denylist backstop | ✅ no hits |`,
           `| named checks strictly SUCCESS | ✅ (${requiredChecks.join(", ")}) |`,
           `| B2 tripwire label \`${CODE_FIX_MERGE_LABEL}\` | ✅ applied pre-merge |`,
+        ]
+      : []),
+    ...(prClass === "fleet-internal"
+      ? [
+          `| class label legs (stint #689) | ✅ \`fleet-internal\` present, no \`needs-human\`, no \`hold\` |`,
+          `| built-in denylist backstop (.github/, auth, migrations, …) | ✅ no hits |`,
+          `| named checks strictly SUCCESS | ✅ (${requiredChecks.join(", ")}) |`,
         ]
       : []),
     `| CI clean | ✅ |`,
@@ -1501,6 +1522,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     isDraft: prJson.isDraft,
     ciClean: isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo)),
     mergeStateStatus: prJson.mergeStateStatus,
+    mergeTreeClean: isMergeTreeCheckClean(prJson.statusCheckRollup),
   });
   if (!readiness.ready) {
     const detail = `not merge-ready (${readiness.detail})`;
