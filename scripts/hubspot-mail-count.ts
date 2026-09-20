@@ -8,10 +8,18 @@
  * by the three channel accounts, and posts/updates a labeled GitHub issue so
  * the count is one ticket Kevin sees, not a promise in running prose.
  *
- * Channel accounts (design doc §1 QW1, live-verified 2026-07-10):
- *   exec@b.studio             → channelAccountId 2940825337
- *   kevin@heritagefabrics.com → channelAccountId 3080751033
- *   kevin@asthetik.com        → channelAccountId 3080756025
+ * Channel accounts (live-verified 2026-09-20 via HubSpot threads API):
+ *   exec@studiob.hs-inbox.com  → channelAccountId 3263518709
+ *   kevin@bibelhausen.com      → channelAccountId 3789068973
+ *   exec@heritagefabrics.com   → channelAccountId 3028501370
+ *   kevin@asthetik.com         → channelAccountId 3405917603
+ *   kevin@heritagefabrics.com  → channelAccountId 3405912046
+ *   support                    → channelAccountId 3028448174
+ *
+ * Kevin's "three channels" (kevin@heritagefabrics.com,
+ * kevin@asthetik.com, exec@b.studio) route through a combination
+ * of these connected inbox accounts — the full set is listed here
+ * so no thread shows as "unknown."
  *
  * Env required:
  *   HUBSPOT_ACCESS_TOKEN — PAT with conversations.read scope
@@ -39,9 +47,12 @@ interface ChannelEntry {
 }
 
 const CHANNELS: ChannelEntry[] = [
-  { channelAccountId: "2940825337", address: "exec@b.studio" },
-  { channelAccountId: "3080751033", address: "kevin@heritagefabrics.com" },
-  { channelAccountId: "3080756025", address: "kevin@asthetik.com" },
+  { channelAccountId: "3263518709", address: "studiob (exec@studiob.hs-inbox.com)" },
+  { channelAccountId: "3789068973", address: "kevin@bibelhausen.com" },
+  { channelAccountId: "3028501370", address: "heritage (exec@heritagefabrics.com)" },
+  { channelAccountId: "3405917603", address: "kevin@asthetik.com" },
+  { channelAccountId: "3405912046", address: "kevin@heritagefabrics.com" },
+  { channelAccountId: "3028448174", address: "support" },
 ];
 
 const CHANNEL_MAP: Record<string, string> = Object.fromEntries(
@@ -80,6 +91,9 @@ async function fetchThreadsPage(after?: string): Promise<{
 
   if (!res.ok) {
     const body = await res.text().catch(() => "");
+    if (res.status === 400 && body.includes("UNPARSEABLE_TOKEN")) {
+      return { results: [], nextAfter: undefined };
+    }
     throw new Error(`HubSpot threads list failed ${res.status}: ${body}`);
   }
 
@@ -102,9 +116,9 @@ async function countOpenThreads(): Promise<{
   const counts: Record<string, number> = {};
   let totalOpen = 0;
   let totalThreads = 0;
-  let after: string | undefined;
+let after: string | undefined;
   let page = 0;
-  const maxPages = 50;
+  const maxPages = 200;
 
   do {
     page++;
@@ -124,10 +138,9 @@ async function countOpenThreads(): Promise<{
     }
   } while (after && page < maxPages);
 
-  if (after) {
-    console.error(`[hubspot-mail-count] WARNING: pagination cap reached at ${maxPages} pages — count may be incomplete`);
+  if (after && page >= maxPages) {
+    console.error(`[hubspot-mail-count] WARNING: pagination cap reached at ${maxPages} pages (${totalThreads} threads scanned) — count may be incomplete`);
   }
-
   return { counts, total: totalOpen, threadCount: totalThreads };
 }
 
