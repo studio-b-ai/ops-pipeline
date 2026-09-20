@@ -85,6 +85,16 @@ jobs:
         working-directory: scripts
         run: npm ci || npm install
 
+      # ops#836: restore the sweep's fingerprint state so changed.ts can skip
+      # PRs whose fingerprint hasn't changed since their last evaluation.
+      - name: Restore sweep state
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/fleet-sweep-state.json
+          key: fleet-sweep-state-${{ github.run_id }}
+          restore-keys: |
+            fleet-sweep-state-
+
       # Tokens are never passed between jobs (GitHub masks secrets in outputs) —
       # this job and the reusable gate each mint their own.
       - name: Mint fleet App installation token
@@ -107,7 +117,7 @@ jobs:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           ONLY_REPO: ${{ inputs.repo }}
           ONLY_PR: ${{ inputs.pr_number }}
-          MAX_FANOUT: "50"   # 9/13: 47 labeled PRs, 20 evaluated → 27 never seen per tick; Principal sitting
+          MAX_FANOUT: "100"   # ops#836: raised from 50 — the change-driven filter prevents unchanged PRs from consuming slots, so the fanout is now a safety measure (#382). 9/13 baseline: 47 labeled PRs, 20 evaluated → 27 never seen per tick; Principal sitting.
           # ops#327: no single repo can crowd more than PER_REPO_CAP entries into
           # either group (box/train, bugsquasher) inside the global fanout — so one
           # repo's backlog cannot starve the rest. 5 leaves headroom for four
@@ -252,20 +262,39 @@ jobs:
             echo "No open labeled PRs anywhere in the fleet this cycle (per-repo counts above are the receipt)."
           fi
 
+          # ops#836: change-driven filter — only evaluate PRs whose fingerprint changed
+          # since their last evaluation (#382: key on the monotonic fact, not the clock).
+          # The sweep used to re-evaluate every labeled PR every hour (cp#277: 20 identical
+          # DIRTY verdicts in 10h) and rationed the waste with a fanout cap — which starved
+          # the unboxed lane. Now a PR is evaluated only when its fingerprint differs from
+          # the one recorded at its last evaluation. Unchanged PRs are skipped with a
+          # receipt line to stderr. The state file lives in the GitHub Actions cache
+          # (fleet-sweep-state-* key).
+          GATE_SHA=$(git rev-parse HEAD 2>/dev/null || echo "0000000")
+          entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-changed.ts /tmp/fleet-sweep-state.json "$GATE_SHA" --record)
+          changed_count=$(jq length <<<"$entries")
+          if [ "$changed_count" -lt "$count" ]; then
+            echo "Change-driven filter: $changed_count of $count labeled PRs have new fingerprints (fleet-sweep-changed.ts, ops#836). Skipped entries printed to stderr above."
+          fi
+
           # ops#327: order for this cycle — box (train) FIRST fleet-wide,
           # per-repo cap inside each group, round-robin rotation of the
           # bugsquasher group by run_number, global fanout applied last. The
           # ordering logic (pure) + tests live in scripts/lib/fleet-sweep-order.ts.
-          # The old "first-20-in-enumeration-order" cap starved train-labeled PRs in a
-          # stable order (issue #327 — webhook-router#915 at entry 28 of 30 was
-          # never evaluated); a per-repo cap alone can't fix that without the
-          # train-first rule (Kevin's door word is never behind bot PRs).
+          # With the change-driven filter above (ops#836), the fanout cap is a safety
+          # measure — unchanged PRs aren't re-evaluated each cycle.
           entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-order.ts "$MAX_FANOUT" "$PER_REPO_CAP" "$RUN_OFFSET")
           ordered_count=$(jq length <<<"$entries")
-          if [ "$ordered_count" -lt "$count" ]; then
-            echo "::warning::Fanout applied: $count labeled PRs found, $ordered_count evaluated this cycle (per-repo cap=$PER_REPO_CAP, global cap=$MAX_FANOUT, run_offset=$RUN_OFFSET; #327 — train-first, round-robin rotation of the bugsquasher group). The hourly cron rotates the tail into subsequent windows."
+          if [ "$ordered_count" -lt "$changed_count" ]; then
+            echo "::warning::Fanout applied: $changed_count changed PRs found, $ordered_count evaluated this cycle (per-repo cap=$PER_REPO_CAP, global cap=$MAX_FANOUT, run_offset=$RUN_OFFSET; #327 — train-first, round-robin rotation of the bugsquasher group)."
           fi
           echo "entries=$entries" >> "$GITHUB_OUTPUT"
+
+      - name: Save sweep state
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/fleet-sweep-state.json
+          key: fleet-sweep-state-${{ github.run_id }}
 
   gate:
     name: "Gate ${{ matrix.repo }}#${{ matrix.pr_number }}"
