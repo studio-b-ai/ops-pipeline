@@ -37,6 +37,26 @@ name: Squasher fleet auto-merge sweep
 # A PR carrying BOTH labels yields two entries; the reusable gate's per-(repo,PR)
 # concurrency group serializes them and the second evaluation finds the PR already
 # merged (or refuses) — idempotent by construction.
+#
+# ROLLOUT STEP 6 (ops-pipeline#807, "[waits on step 5]"): adds a `patch_id_wins`
+# dispatch override so a maintainer (or, once step 5 lands, a per-repo config flag)
+# can force-evaluate one box PR under bp2 patch-id authority instead of
+# scripts/squasher-fleet.json's per-repo default. Threaded into the registry `$tr`
+# (box) entries below ONLY — `boxPatchIdWins` is a label-authority.ts concept for
+# the box gate, not the bugsquasher `$sq` legs, and the org-wide (unregistered-repo)
+# box leg has no `$cfg.patch_id_wins` to read, so it is left carrying its unrelated
+# fields unchanged (documented as an open item in this step's docs section — a
+# future rung that wants the override to reach an unregistered repo needs its own
+# design, not a silent default here). SCOPE-LOCKED (amendment, 2026-09-20): a
+# non-"config" override hard-refuses (exit 1, before any entry is built) unless the
+# dispatch names both `repo` and `pr_number` — this override is never a fleet-wide
+# lever. A scheduled run always reads "config" (the input default; schedule
+# triggers carry no `inputs` at all, so `inputs.patch_id_wins` evaluates empty and
+# falls to the `|| 'config'` default below). This lap does not change what merges:
+# `matrix.patch_id_wins` is NOT forwarded to squasher-automerge.yml's `with:` block
+# below — nothing in the reusable gate or pr-automerge-gate.ts reads it yet. That
+# wiring is step 5's, not this change's (Rule #1: build exactly what this step
+# names).
 
 on:
   schedule:
@@ -51,6 +71,15 @@ on:
         description: "Optional (requires repo): evaluate ONLY this PR number. The PR must carry `bugsquasher`, `fleet-internal` or `box` — the label filter is the enumeration. The repo need not be registered: an unregistered org repo is evaluated on `box` only."
         required: false
         type: string
+      patch_id_wins:
+        description: 'Rollout step 6: override boxPatchIdWins for this dispatch''s box entries only. "config" (default) reads scripts/squasher-fleet.json per repo; "true"/"false" forces it — REQUIRES both repo and pr_number (refused otherwise).'
+        required: false
+        type: choice
+        default: config
+        options:
+          - config
+          - "true"
+          - "false"
 
 # github.token is only used for the own-repo checkout below; all cross-repo work
 # (enumeration here, evaluation + merge in the reusable gate) runs on the minted
@@ -117,6 +146,7 @@ jobs:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           ONLY_REPO: ${{ inputs.repo }}
           ONLY_PR: ${{ inputs.pr_number }}
+          PATCH_ID_WINS: ${{ inputs.patch_id_wins || 'config' }}
           MAX_FANOUT: "100"   # ops#836: raised from 50 — the change-driven filter prevents unchanged PRs from consuming slots, so the fanout is now a safety measure (#382). 9/13 baseline: 47 labeled PRs, 20 evaluated → 27 never seen per tick; Principal sitting.
           # ops#327: no single repo can crowd more than PER_REPO_CAP entries into
           # either group (box/train, bugsquasher) inside the global fanout — so one
@@ -154,6 +184,14 @@ jobs:
               # org repo is evaluated on its box PRs only (the org-wide leg below), never refused here.
               echo "repo '$ONLY_REPO' is not registered in $CONFIG — box-only evaluation (org-wide leg)."
             fi
+          fi
+          # Rollout step 6 amendment, scope-lock: patch_id_wins is never a fleet-wide
+          # lever — a non-"config" override with either repo or pr_number unset would
+          # otherwise apply to every box entry this cycle enumerates. Checked before any
+          # entry is built (never a soft downgrade to "config").
+          if [ "${PATCH_ID_WINS:-config}" != "config" ] && { [ -z "${ONLY_REPO:-}" ] || [ -z "${ONLY_PR:-}" ]; }; then
+            echo "::error::patch_id_wins override ('$PATCH_ID_WINS') requires BOTH repo and pr_number — refusing a fleet-wide patch-id-authority override (rollout step 6 amendment: scope-lock the new sweep input)."
+            exit 1
           fi
 
           entries='[]'
@@ -226,7 +264,12 @@ jobs:
             # Train entries pass ONLY train_ready — the squasher inputs are blanked
             # deliberately (the reusable ignores them in train mode; forwarding
             # enabled_classes would trip the script's mutual-exclusion fail-loud).
-            entries=$(jq -c --argjson cfg "$repo_json" --argjson sq "$sq" --argjson tr "$tr" '
+            # Rollout step 6: patch_id_wins rides ONLY the $tr (box) entries — $cfg's
+            # own registry default when this dispatch's override is "config" (or on
+            # the scheduled trigger, which always reads "config"), else the override,
+            # forced boolean. Inert plumbing this lap (see the step-6 header note):
+            # nothing downstream of `matrix.*` reads this field until step 5.
+            entries=$(jq -c --argjson cfg "$repo_json" --argjson sq "$sq" --argjson tr "$tr" --arg OVERRIDE "$PATCH_ID_WINS" '
               . + ($sq | map({repo: $cfg.repo, pr_number: (. | tostring), train_ready: false,
                               enabled_classes: $cfg.enabled_classes,
                               sensitive_path_patterns: $cfg.sensitive_path_patterns,
@@ -236,7 +279,8 @@ jobs:
                 + ($tr | map({repo: $cfg.repo, pr_number: (. | tostring), train_ready: true,
                               enabled_classes: "", sensitive_path_patterns: "",
                               safe_path_globs: "", required_checks: "",
-                              required_checks_path_deps: ""}))' <<<"$entries")
+                              required_checks_path_deps: "",
+                              patch_id_wins: (if $OVERRIDE == "config" then ($cfg.patch_id_wins // false) else ($OVERRIDE == "true") end)}))' <<<"$entries")
           done < <(jq -c '.repos[]' "$CONFIG")
 
           # Kevin 2026-09-15 05:5xZ: "box ... should be picked up by the cron in any repo." Repos outside the
