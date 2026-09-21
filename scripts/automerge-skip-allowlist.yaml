@@ -131,6 +131,24 @@ repos:
     - "Slack Alert on Failure"
     - "Slack Recovery Notice"
 
+  # RULING 2026-09-21 (stint #861, Mechanic crew): amplify enrolled in the
+  # fleet registry (squasher-fleet.json) this same PR — it had been reachable
+  # only via the org-wide box leg, whose blank-inputs evaluation refused
+  # amplify#69 (boxed by Kevin 2026-09-16T15:34:42Z) at the 04:16Z gate run:
+  # `ciClean=false mergeStateStatus=CLEAN` — GitHub called the PR CLEAN while
+  # our rollup leg called it dirty (the radio 9/13 class, ops#274 shape).
+  # The sole non-SUCCESS entry on the head is this one job, verified
+  # event-gated on amplify's origin/main ci.yml (Rule #466 — deployed ref):
+  #   Slack Notification  (notify-failure)  if: failure() && github.ref == 'refs/heads/main'
+  # — structurally unable to report SUCCESS on a pull_request head: a
+  # by-design PR-event skip, not an absent load-bearing check. The same name
+  # is already sanctioned for bolt-wms above. Fail-closed posture unchanged:
+  # amplify's registry row names all six always-run PR checks in
+  # required_checks, so the stricter named-checks leg still refuses a
+  # code-fix whose real CI didn't run green.
+  studio-b-ai/amplify:
+    - "Slack Notification"
+
 # RULING 2026-09-02 (amends the ops#235 ruling above; incident: the restart
 # train's 22:18Z first after-hours tick refused studio-b-ai/client-asthetik#359
 # citing these same 5 by-design PR-event skips — "Auto-qualifier (shadow)" is
