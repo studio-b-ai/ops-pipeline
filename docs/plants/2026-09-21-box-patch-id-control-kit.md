@@ -55,6 +55,7 @@ the thing under test).
 
 ## Plant lines
 
+<!-- control-2 marker: 2026-09-21T23:25:45Z -->
 <!-- Controls 1, 2, 3, 5 and 6 each insert exactly one line immediately below this heading via
      kit_write_line (which skips this blank separator line), so new plants stack newest-on-top.
      Nothing below this comment is planted yet. -->
