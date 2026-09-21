@@ -156,6 +156,7 @@ import {
   readBoxPatchIdCheckRuns,
   refreshBoxPatchId,
   type CheckRunLike,
+  type GitCommandRunner,
 } from "./lib/box-patch-id.js";
 
 const REVIEW_MODEL = "claude-sonnet-5";
@@ -279,7 +280,7 @@ const GATE_PATCH_ID_WINS = process.env.GATE_PATCH_ID_WINS === "true";
  * evaluateTrainReadyInner's / evaluate()'s existing fail-closed handling — never
  * guessed past (Rule #4).
  */
-function fetchCurrentBoxLabelEventDbId(repo: string, prNumber: number, labelName: string): number | undefined {
+export function fetchCurrentBoxLabelEventDbId(repo: string, prNumber: number, labelName: string): number | undefined {
   const out = gh([
     "api",
     `repos/${repo}/issues/${prNumber}/events?per_page=100`,
@@ -309,7 +310,7 @@ function fetchCurrentBoxLabelEventDbId(repo: string, prNumber: number, labelName
  * `--paginate` concatenates the results, so this yields one JSON object per line
  * across all pages.
  */
-function fetchCheckRuns(repo: string, sha: string): CheckRunLike[] {
+export function fetchCheckRuns(repo: string, sha: string): CheckRunLike[] {
   const out = gh([
     "api",
     `repos/${repo}/commits/${sha}/check-runs?per_page=100`,
@@ -354,14 +355,23 @@ function fetchCheckRuns(repo: string, sha: string): CheckRunLike[] {
  * patch-id-agrees "keep anyway" upside cannot fire in production yet even with
  * GATE_PATCH_ID_WINS=true (Rule #464: presumed inert until a follow-up adds real
  * git access and a planted positive-control firing proves it).
+ *
+ * `repoDir`/`runner` are accepted as OPTIONAL trailing parameters purely so this
+ * function stays testable end-to-end (a test can inject a fake `GitCommandRunner`
+ * and assert a real computed patch-id comes back) without changing production
+ * behavior one bit: no call site in this file passes either argument, so every real
+ * invocation still resolves exactly the "box-patch-id-uncomputable" branch described
+ * above until the cross-repo checkout gap this PR's title flags is closed.
  */
-function buildTrainAuthorityPatchIdFields(
+export function buildTrainAuthorityPatchIdFields(
   repo: string,
   pr: number,
   headSha: string,
   headRepo: string | undefined,
   baseRef: string,
   changedPaths: readonly string[],
+  repoDir?: string,
+  runner?: GitCommandRunner,
 ): Pick<AuthorityInput, "boxPatchId" | "boxPatchIdWins"> {
   if (headRepo === undefined) {
     // Fork deleted (GitHub's own documented behavior for headRepository turning
@@ -381,7 +391,9 @@ function buildTrainAuthorityPatchIdFields(
     headRepo,
     headSha,
     changedPaths: [...changedPaths],
-    // repoDir/runner intentionally omitted — see the doc comment above.
+    // No real call site in this file supplies either — see the doc comment above.
+    repoDir,
+    runner,
   });
   return { boxPatchId: context, boxPatchIdWins: GATE_PATCH_ID_WINS };
 }
@@ -391,7 +403,7 @@ function buildTrainAuthorityPatchIdFields(
  *  is always "neutral" — same reasoning as that file: a "skipped" conclusion on a
  *  NAMED check run ("box-patch-id") is unclean in this repo's release check unless
  *  allowlisted, and this repo carries no such row. */
-function postBoxPatchIdCheckRun(repo: string, headSha: string, title: string, text: string): void {
+export function postBoxPatchIdCheckRun(repo: string, headSha: string, title: string, text: string): void {
   gh([
     "api",
     `repos/${repo}/check-runs`,
@@ -425,16 +437,34 @@ function postBoxPatchIdCheckRun(repo: string, headSha: string, title: string, te
  * needed, unlike buildBoxPatchIdContext/mintBoxPatchId above — so this leg works
  * today regardless of the scratch-clone gap documented there.
  *
- * Polls off a monotonic start (Rule #382 — an instant/zero-elapsed check proves
- * nothing) for the new head sha to actually land before refreshing; gives up after
- * ~60s (matches this file's existing UNKNOWN-mergeStateStatus retry budget shape:
- * 3×20s) and logs, never throws — a refresh is best-effort: worst case the record
- * simply goes missing on the new sha and the next cycle's read side fails closed via
+ * `start` is the monotonic clock (Rule #382 — an instant/zero-elapsed check proves
+ * nothing) captured by the CALLER **before** the update-branch API call itself is
+ * issued, not after it returns — threaded in as a parameter rather than captured
+ * here so the ~60s budget below measures the full async lag from the moment the
+ * rebase was actually requested, matching this file's existing UNKNOWN-
+ * mergeStateStatus retry budget shape (3×20s). Gives up after ~60s from that `start`
+ * and logs, never throws — a refresh is best-effort: worst case the record simply
+ * goes missing on the new sha and the next cycle's read side fails closed via
  * "box-patch-id-missing", exactly as if update-branch had never been requested.
  * Gated on GATE_PATCH_ID_WINS so this poll-and-refresh only ever runs in an
  * environment that opted in.
+ *
+ * PATCH vs. POST (amendment note, mirrors the DESIGN DECISION comment on
+ * `buildTrainAuthorityPatchIdFields` above): GitHub's real "Update a check run"
+ * endpoint (`PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}`) cannot move a
+ * check run's `head_sha` — that field is immutable at creation and isn't in that
+ * endpoint's writable field list (confirmed against GitHub's own Checks API
+ * reference this session, not assumed). A record minted on the pre-update-branch
+ * sha therefore has no existing check run on the NEW sha to PATCH; `postBoxPatchIdCheckRun`
+ * below issues a fresh POST there of NECESSITY, not by omission. This is not a
+ * "double-POST": the call is reached from exactly one `try` in this file (guarded by
+ * the DIRTY+fleet-internal branch above, itself gated on a single synchronous
+ * update-branch call), and fires at most once per invocation — only after the poll
+ * loop has observed a genuine `headRefOid` change away from `oldHeadSha`. The
+ * `newHeadSha === undefined` branch below returns before ever reaching the POST, so a
+ * timed-out poll cannot produce one either.
  */
-function refreshBoxPatchIdAfterUpdateBranch(repo: string, pr: number, oldHeadSha: string): void {
+export function refreshBoxPatchIdAfterUpdateBranch(repo: string, pr: number, oldHeadSha: string, start: bigint): void {
   if (!GATE_PATCH_ID_WINS) return;
   const currentLabelEventDbId = fetchCurrentBoxLabelEventDbId(repo, pr, QUEUED_LABEL);
   if (currentLabelEventDbId === undefined) return; // nothing recorded to refresh (amendment 6 grandfathering)
@@ -447,7 +477,6 @@ function refreshBoxPatchIdAfterUpdateBranch(repo: string, pr: number, oldHeadSha
     );
     return;
   }
-  const start = process.hrtime.bigint();
   const maxWaitMs = 60_000;
   let newHeadSha: string | undefined;
   while (Number(process.hrtime.bigint() - start) / 1e6 < maxWaitMs) {
@@ -461,8 +490,9 @@ function refreshBoxPatchIdAfterUpdateBranch(repo: string, pr: number, oldHeadSha
   const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
   if (newHeadSha === undefined) {
     console.log(
-      `[warn] pr-automerge-gate ${repo}#${pr}: update-branch refresh gave up after ${Math.round(elapsedMs)}ms — head sha ` +
-        `never changed from ${oldHeadSha.slice(0, 7)}; record NOT refreshed (next cycle's read fails closed if a new sha ever lands)`,
+      `[warn] pr-automerge-gate ${repo}#${pr}: update-branch refresh gave up after ${Math.round(elapsedMs)}ms (measured from ` +
+        `before the update-branch call) — head sha never changed from ${oldHeadSha.slice(0, 7)}; record NOT refreshed ` +
+        `(next cycle's read fails closed if a new sha ever lands)`,
     );
     return;
   }
@@ -471,7 +501,7 @@ function refreshBoxPatchIdAfterUpdateBranch(repo: string, pr: number, oldHeadSha
   postBoxPatchIdCheckRun(repo, newHeadSha, `${refreshed.patchId} (${keyState})`, JSON.stringify(refreshed));
   console.log(
     `[info] pr-automerge-gate ${repo}#${pr}: box-patch-id refreshed ${oldHeadSha.slice(0, 7)} → ${newHeadSha.slice(0, 7)} ` +
-      `after update-branch (waited ${Math.round(elapsedMs)}ms)`,
+      `after update-branch (waited ${Math.round(elapsedMs)}ms, measured from before the update-branch call)`,
   );
 }
 
@@ -805,11 +835,16 @@ async function evaluate(
   // never a force-push; conflicts leave it DIRTY and the receipt says so). The PR re-runs CI and is re-evaluated when its
   // fingerprint changes (change-driven sweep). Only for fleet-internal — a human's PR is theirs to rebase.
   if (prJson.mergeStateStatus === "DIRTY" && labels.includes(FLEET_INTERNAL_LABEL)) {
+    // Captured BEFORE the update-branch call fires (Rule #382 / amendment note on
+    // refreshBoxPatchIdAfterUpdateBranch below) — the ~60s refresh budget measures
+    // from the moment the rebase was actually requested, not from whenever this
+    // synchronous `gh` call happens to return.
+    const updateBranchStart = process.hrtime.bigint();
     try {
       gh(["api", "-X", "PUT", `repos/${repo}/pulls/${pr}/update-branch`, "-f", `expected_head_sha=${prJson.headRefOid}`]);
       console.log(`[info] pr-automerge-gate ${repo}#${pr}: DIRTY fleet-internal — requested update-branch from base; re-evaluated when CI lands`);
       try {
-        refreshBoxPatchIdAfterUpdateBranch(repo, pr, prJson.headRefOid);
+        refreshBoxPatchIdAfterUpdateBranch(repo, pr, prJson.headRefOid, updateBranchStart);
       } catch (refreshErr) {
         // Advisory leg (amendment 1) — never let a refresh failure turn a successful
         // update-branch request into a gate crash. Worst case the record goes missing
