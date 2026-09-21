@@ -197,3 +197,102 @@ lives instead in the section this PR itself appended.
 This PR also adds a `.github/workflows/` file for the first time in the row-807 build
 (`box-patch-id-observe.yml`) — from this commit forward, this PR merges only on the box, the single
 human merge key, same as any other change that touches `.github/workflows/`.
+
+## Rollout step 6 (ops-pipeline#807, "[waits on step 5]" — two draft PRs)
+
+Rollout step 6 of six, per the ruling's list:
+
+> 6. power-unit, then the hourly lap.
+
+This step does **not** wait on rollout step 4 (the six controls firing live) having run — it waits on
+rollout step 5 (`boxPatchIdWins` flipping `true` in ops-pipeline's own call site), which as of this
+build has **not started** (its worktree matches `origin/main` exactly, unpushed, no PR). Both PRs
+below are opened as **drafts** titled `[waits on step 5]` for that reason: nothing in either PR
+changes what merges anywhere until step 5 lands a call site that reads `boxPatchIdWins` /
+`matrix.patch_id_wins` for real.
+
+**Locked scope (D3):** no power-unit file changes and no new power-unit secret. Reaching power-unit
+happens entirely through ops-pipeline's own `studiob-fleet-bot` App token making cross-repo PR/Checks
+API calls — the same shape `squasher-automerge.yml` already uses for its own cross-repo work. A
+`workflow_call` shape hosted in power-unit was rejected: it would need its own copy of
+`FLEET_APP_ID`/`FLEET_APP_PRIVATE_KEY` in a second repo's secret store, which is exactly the drift
+Rule #99 (dual-store secret rotation) exists to prevent — one store, one repo, stays true.
+
+### 6A — `box-patch-id-labeled.yml` dispatch + `squasher-fleet-sweep.yml` override (branch `tp/807-power-unit-patch-id-dispatch`)
+
+| unit | file(s) | what it does |
+|---|---|---|
+| A | `.github/workflows/box-patch-id-labeled.yml` | Adds a `workflow_dispatch` trigger (`repo`, `pr_number`, both required strings) alongside the existing `pull_request: [labeled]` one. Every step's `if:` gains `\|\| github.event_name == 'workflow_dispatch'` at the **step level** (never the job level — a job-level `if: false` reads as an unclean `SKIPPED` at the release-check gate; see this workflow's own header, carried from rollout step 3's P1 fix). A new "Validate dispatch repo is fleet-registered" step refuses (`exit 1`) a dispatch whose `repo` input isn't a `scripts/squasher-fleet.json` entry — added per this step's own amendment (below). A new "Resolve dispatch target" step does `gh pr view` + an `issues/events` REST page to reconstruct `head-sha`/`base-ref`/`head-repo`/`current-labels`/`actor-login` for the dispatched PR — the same facts the `pull_request:labeled` path reads straight off the webhook payload. `concurrency.group` widens to key on `inputs.repo`/`inputs.pr_number` when present. `permissions: contents: read` and `secrets.BOX_PATCH_ID_KEY` are unchanged. |
+| B | `scripts/box-patch-id-labeled.ts` | Adds `cloneScratch(repo, baseRef, headSha)` — a `--filter=blob:none` partial clone of the dispatched repo into `RUNNER_TEMP`, used as `mintBoxPatchId`'s `repoDir` whenever `BOX_REPO !== process.env.GITHUB_REPOSITORY` (i.e. every cross-repo dispatch). A same-repo dispatch or the ordinary labeled-event path still computes against `process.cwd()`, exactly as before — this is additive, not a behavior change for the existing trigger. |
+| C | `.github/workflows/squasher-fleet-sweep.yml` | Adds a `workflow_dispatch` input `patch_id_wins` (`choices: config \| true \| false`, default `config`), threaded into the registry `$tr` (box) jq map only, as `(if $OVERRIDE == "config" then ($cfg.patch_id_wins // false) else ($OVERRIDE == "true") end)`. A scheduled run always resolves to `"config"` (the input default; `schedule` triggers carry no `inputs` at all). **Not wired further this lap** — `matrix.patch_id_wins` is not forwarded to `squasher-automerge.yml`'s `with:` block, and nothing in the reusable gate or `pr-automerge-gate.ts` reads it. That call-site wiring is rollout step 5's, not this change's (Rule #1: build exactly what this step names, not the downstream steps it waits on). |
+| D | `scripts/lib/__tests__/label-authority.test.ts` | One new test: a PR whose box-patch-id was never recorded (`boxPatchId: { currentPatchId: "bp2:def" }`, i.e. no `recordedPatchId`) under `boxPatchIdWins: true` still falls through to the position predicate — `authorized: false, reason: "stale-label"` — never a refusal (nothing to compare) and never a silent keep (absence of a record is not evidence of an unchanged diff). Pins the grandfathering property rollout step 5's wiring must preserve for every pre-existing PR that predates step 3. |
+| E | this file | This section. |
+
+**Amendment — scope-lock the new sweep input (2026-09-20):** `squasher-fleet-sweep.yml`'s
+`patch_id_wins` override hard-refuses (`exit 1`, before any entry is built) unless the dispatch names
+**both** `repo` and `pr_number` — it is never a fleet-wide lever, only a single-PR override. Verified
+locally in isolation (see below) across all combinations: `config` with no scope → allowed (the
+scheduled-run shape); `true`/`false` with only one of `repo`/`pr_number` set → refused; `true`/`false`
+with both set → allowed. Separately, `box-patch-id-labeled.yml`'s dispatch `repo` input is allowlisted
+against `scripts/squasher-fleet.json`'s `.repos[].repo` before anything else runs (unit A above),
+failing loud (`::error::` + `exit 1`) on a repo not in the registry.
+
+**Known gap, carried forward rather than silently closed:** the org-wide box leg in
+`squasher-fleet-sweep.yml` (PRs on repos *outside* `scripts/squasher-fleet.json`, found via the
+`label:box` org search) has no `$cfg.patch_id_wins` to read and is untouched by this change — its
+entries carry no `patch_id_wins` field at all, unlike the registry `$tr` entries. This is consistent
+with this step's literal scope (item C names the `$tr` jq map only) but means a future rung that wants
+the override to reach an unregistered repo needs its own design; power-unit is itself a registered
+repo (`scripts/squasher-fleet.json` — `enabled_classes: docs-comment,vault-doc,code-fix,fleet-internal`,
+`train: true`), so 6B's flip is unaffected by this gap.
+
+### 6B — power-unit's registry flag (branch `tp/807-power-unit-patch-id-hourly`)
+
+One line in `scripts/squasher-fleet.json`: `"patch_id_wins": true` added to the `studio-b-ai/power-unit`
+entry. This is the config 6A's `$tr` jq map reads when a dispatch (or, once step 5 lands, the hourly
+scheduled sweep) resolves `OVERRIDE == "config"` for a power-unit box PR. **Gated on 6A merging
+first** — 6B's PR body cites 6A's dispatch receipts; until 6A ships, `patch_id_wins` doesn't exist as
+a registry key power-unit's row can carry (the jq map in 6A's unmerged workflow is the only reader).
+
+### Amendment — defer the `BOX_PATCH_ID_KEY` mint until after step 6
+
+Per this step's amendments, `BOX_PATCH_ID_KEY` (open item 1, carried since rollout step 3 above) is
+**not minted by this build**. Recorded here as a decision, not an oversight: minting it now, before
+`boxPatchIdWins` has a real call site (step 5) or a live cross-repo firing has been observed (step 6's
+own open items below), would create a secret with no consumer yet exercising the tagged path — nothing
+in this PR or 6B reads `secrets.BOX_PATCH_ID_KEY` differently than rollout step 3 already does
+(env-passthrough, absent-tolerant). Kevin mints it whenever step 5 or step 6's live verification makes
+the tagged path worth exercising; not before.
+
+### Verified this session (local only — see open items for what is NOT verified)
+
+- `.github/workflows/box-patch-id-labeled.yml` and `.github/workflows/squasher-fleet-sweep.yml` both
+  parse cleanly under `yaml.safe_load` after every edit.
+- The `patch_id_wins` jq threading (unit C) was dry-run in isolation with `jq -n` against four fixed
+  inputs — `OVERRIDE=config` with `cfg.patch_id_wins=true`, `OVERRIDE=config` with the key absent
+  (defaults `false`), `OVERRIDE=true` forcing `true` over a `false` config, `OVERRIDE=false` forcing
+  `false` over a `true` config — all four returned the expected `patch_id_wins` value (Rule #322: both
+  directions, plus the default-config path in both directions).
+- The scope-lock refusal predicate (amendment) was dry-run in isolation as a standalone shell function
+  against six `(patch_id_wins, repo, pr_number)` combinations — the scheduled shape (`config`, both
+  empty) and the fully-scoped shape (`true`/`false`, both set) allowed; every partially-scoped
+  combination refused.
+- `npm run typecheck` and `npm test` in `scripts/` (see the PR body for this run's actual output).
+
+### NOT verified this session (open items for 6A/6B's PR bodies)
+
+- **No live `gh workflow run` dispatch was fired against `box-patch-id-labeled.yml` or
+  `squasher-fleet-sweep.yml` this session**, in either repo. A cross-repo dispatch of the kind this
+  step builds posts a real check run and a real PR comment on whatever PR it targets — Rule #97 (never
+  modify live customer-facing/user-visible surfaces without authorization) covers a check-run/comment
+  side effect on a real pull request the same way it covers a deploy. This build is code-complete and
+  locally verified only; the actual cross-repo dispatch receipts (run id, log grep, the cross-repo
+  check-run appearing on the target PR, and — per Rule #322 — one dispatch each with
+  `patch_id_wins=true` and `patch_id_wins=false` proving both directions live) are the next session's
+  or Kevin's to produce, post-merge, exactly as 6A's PR body states.
+- **The `checks:write` scope open item (carried from rollout step 3, above) is unresolved and now more
+  exposed, not less:** a cross-repo check-run POST is exactly the call that would 403 first, on
+  whichever repo is dispatched against first. Still unverifiable from a worktree.
+- **6B's first post-merge scheduled cron run has no receipt** — it cannot, since 6B only takes effect
+  after both 6A and (eventually) rollout step 5 merge, and the hourly cron fires on its own schedule.
+  6B's PR body asks for that first run's receipt rather than claiming one.

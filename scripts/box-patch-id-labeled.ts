@@ -39,6 +39,14 @@
  * same reason squasher-automerge.yml does: a check run is owned by the App identity
  * that creates it, so only a workflow holding the App's credentials can create or
  * update this one.
+ *
+ * ROLLOUT STEP 6 (ops-pipeline#807, "[waits on step 5]"): BOX_REPO may now name a repo
+ * other than this one (studio-b-ai/power-unit, dispatched via the workflow's new
+ * workflow_dispatch trigger) — cloneScratch() below gives mintBoxPatchId a real
+ * checkout of THAT repo instead of assuming `process.cwd()` (this workflow's own
+ * checkout) is the repo under analysis. No power-unit file changes and no new
+ * power-unit secret: the App token this script already holds reaches power-unit
+ * through GitHub's cross-repo REST/git-over-https surface alone (locked D3).
  */
 
 import { execFileSync } from "node:child_process";
@@ -84,6 +92,29 @@ function fetchLabelEventDbId(owner: string, repo: string, prNumber: number, labe
   throw new Error(
     `box-patch-id-labeled: no "labeled" issue event found for label "${labelName}" among ${lines.length} labeled events on ${owner}/${repo}#${prNumber}.`,
   );
+}
+
+/** Clones `repo` into a scratch dir under $RUNNER_TEMP and fetches exactly the two
+ *  refs mintBoxPatchId needs (`git merge-base origin/<baseRef> <headSha>` —
+ *  scripts/lib/box-patch-id.ts). `--filter=blob:none` keeps a cross-repo dispatch
+ *  cheap: tree/commit history without blob content, populated lazily as `git
+ *  diff`/`git patch-id` touch objects. Used only when BOX_REPO differs from this
+ *  workflow's own repo (rollout step 6) — the pull_request:labeled path and a
+ *  same-repo dispatch both keep using `process.cwd()`, which the workflow's own
+ *  "Checkout full history" step already populated at the exact head sha with
+ *  fetch-depth: 0. The token embedded in the clone URL is the same App installation
+ *  token already in GH_TOKEN; actions/create-github-app-token@v1 registers it as a
+ *  masked Actions secret, so it never appears unredacted in logs even on a git error. */
+function cloneScratch(repo: string, baseRef: string, headSha: string): string {
+  const slug = repo.replace("/", "-");
+  const runnerTemp = env("RUNNER_TEMP");
+  const dir = `${runnerTemp}/bpid-${slug}-${process.env.BOX_PR_NUMBER ?? "0"}-${process.env.GITHUB_RUN_ID ?? "0"}`;
+  const token = env("GH_TOKEN");
+  execFileSync("git", ["clone", "--filter=blob:none", `https://x-access-token:${token}@github.com/${repo}.git`, dir], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  execFileSync("git", ["-C", dir, "fetch", "origin", baseRef, headSha], { stdio: ["ignore", "pipe", "pipe"] });
+  return dir;
 }
 
 function fetchChangedPaths(repo: string, prNumber: number): string[] {
@@ -153,6 +184,11 @@ function main(): void {
   const changedPaths = fetchChangedPaths(repo, prNumber);
   const labelEventDbId = fetchLabelEventDbId(owner, repoName, prNumber, TRAIN_READY_LABEL);
 
+  // Rollout step 6: process.cwd() is only a checkout of `repo` when this script is
+  // running against its OWN repo (pull_request:labeled, or a same-repo dispatch) — a
+  // cross-repo dispatch (e.g. BOX_REPO=studio-b-ai/power-unit) needs its own clone.
+  const repoDir = repo !== process.env.GITHUB_REPOSITORY ? cloneScratch(repo, baseRef, headSha) : process.cwd();
+
   const verdict = mintBoxPatchId({
     repo,
     prNumber,
@@ -161,7 +197,7 @@ function main(): void {
     baseRef,
     labelEventDbId,
     changedPaths,
-    repoDir: process.cwd(),
+    repoDir,
     key,
   });
 

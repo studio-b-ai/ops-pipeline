@@ -331,6 +331,28 @@ describe("evaluateLabelAuthority", () => {
     });
   });
 
+  // ops-pipeline#807 rollout step 6 amendment (2026-09-20): grandfathering. A PR whose
+  // box-patch-id was never recorded (it predates rollout step 3, or minting was
+  // skipped for a gate-authorized actor) must fall through to the POSITION predicate
+  // even with boxPatchIdWins: true — never a refusal (there is nothing to compare) and
+  // never a silent keep (an absent record is not evidence of an unchanged diff). Still
+  // inert this lap (nothing branches on boxPatchIdWins until step 5 wires a call
+  // site) — this test pins the property step 5's wiring must preserve.
+  it("grandfathers a missing recorded patch-id under boxPatchIdWins: true — position predicate governs, a strip, never refusal or keep", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        timeline: [labeledBy("kbibelhausen", 0), commitAt(1)],
+        boxPatchId: { currentPatchId: "bp2:def" },
+        boxPatchIdWins: true,
+      }),
+    );
+    expect(verdict).toEqual({
+      authorized: false,
+      reason: "stale-label",
+      detail: expect.stringContaining("PULL_REQUEST_COMMIT"),
+    });
+  });
+
   it("logs the observe-only comparison at the stale-label gate (proves the branch is live, not dead code — Rule #464)", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {

@@ -7,6 +7,18 @@ name: box-patch-id (labeled handler)
 # repo's own pull requests (rollout step 5 widens this to ops-pipeline governing a
 # real merge; step 6 widens it to power-unit and the hourly lap — neither is this PR).
 #
+# ROLLOUT STEP 6 (this change, ops-pipeline#807, "[waits on step 5]"): adds a
+# `workflow_dispatch` trigger alongside the existing `pull_request: [labeled]` one, so a
+# maintainer (or the hourly lap, once step 6B lands) can exercise this exact mint+record
+# path against a repo OTHER than this one — power-unit — without a second copy of
+# FLEET_APP_ID/FLEET_APP_PRIVATE_KEY ever existing outside this repo's secret store
+# (locked D3: a `workflow_call` shape from power-unit would need that duplication,
+# violating Rule #99's dual-store-secret-rotation risk). Reaching power-unit happens
+# purely through this workflow's own App token making cross-repo Checks/PR API calls —
+# the same shape squasher-automerge.yml already uses for its own cross-repo work. This
+# is still observe-only: dispatching does not touch boxPatchIdWins (that flip is step
+# 5, not built by this change) and never strips or keeps any label on any repo.
+#
 # Mints the bp2 patch-id via scripts/lib/box-patch-id.ts (this PR's Unit 1) through the
 # companion script scripts/box-patch-id-labeled.ts (this PR's Unit 2b — this repo's own
 # convention is a thin YAML wrapper over a dedicated scripts/*.ts file; no workflow
@@ -43,12 +55,22 @@ name: box-patch-id (labeled handler)
 on:
   pull_request:
     types: [labeled]
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Target "owner/repo" (e.g. studio-b-ai/power-unit) — required, and validated against scripts/squasher-fleet.json before anything else runs.'
+        required: true
+        type: string
+      pr_number:
+        description: "Pull request number on `repo` to mint + record a box-patch-id for."
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: box-patch-id-${{ github.repository }}-${{ github.event.pull_request.number }}
+  group: box-patch-id-${{ inputs.repo || github.repository }}-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: false
 
 jobs:
@@ -56,30 +78,13 @@ jobs:
     name: "Mint + record the box-patch-id (observe-only)"
     runs-on: ubuntu-latest
     steps:
-      # Rule #466 — this checkout IS the one scratch clone this lap uses.
-      # fetch-depth: 0 (full history) is required: mintBoxPatchId computes
-      # `merge-base origin/<baseRef> <headSha>`, which needs both refs' full ancestry,
-      # not just the labeled commit.
-      - name: Checkout full history
-        if: github.event.label.name == 'box'
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.pull_request.head.sha }}
-          fetch-depth: 0
-
-      - if: github.event.label.name == 'box'
-        uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-
-      - name: Install deps
-        if: github.event.label.name == 'box'
-        working-directory: scripts
-        run: npm ci || npm install
-
+      # Minted first (moved ahead of checkout for rollout step 6): the new "Validate
+      # dispatch repo" and "Resolve dispatch target" steps below both need the App
+      # token to read a possibly-private, possibly-cross-repo PR — github.token is
+      # scoped to this repo (ops-pipeline) only and cannot see power-unit.
       - name: Mint fleet App installation token
         id: mint
-        if: github.event.label.name == 'box'
+        if: github.event.label.name == 'box' || github.event_name == 'workflow_dispatch'
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.FLEET_APP_ID }}
@@ -87,22 +92,110 @@ jobs:
           owner: studio-b-ai
 
       - name: Fail loud if the mint returned nothing
-        if: github.event.label.name == 'box' && steps.mint.outputs.token == ''
+        if: (github.event.label.name == 'box' || github.event_name == 'workflow_dispatch') && steps.mint.outputs.token == ''
         run: |
           echo "::error::Fleet App token mint returned an empty token — refusing to mint or record a box-patch-id (a github.token fallback would let a collaborator forge/overwrite the check run this design exists to protect; see ops-pipeline#190 rollout step 3)."
           exit 1
 
+      # Rollout step 6 scope-lock: a dispatch may only ever target a repo this fleet
+      # already governs — reading scripts/squasher-fleet.json via the Contents API
+      # (no checkout needed yet) rather than trusting an arbitrary "owner/repo" string
+      # typed into the dispatch form.
+      - name: Validate dispatch repo is fleet-registered
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          DISPATCH_REPO: ${{ inputs.repo }}
+        run: |
+          set -euo pipefail
+          registered=$(gh api "repos/${GITHUB_REPOSITORY}/contents/scripts/squasher-fleet.json" --jq '.content' \
+            | base64 -d \
+            | jq -r --arg r "$DISPATCH_REPO" '[.repos[].repo] | index($r) != null')
+          if [ "$registered" != "true" ]; then
+            echo "::error::patch-id dispatch refused — \"$DISPATCH_REPO\" is not a repo entry in scripts/squasher-fleet.json (rollout step 6 scope-lock: a dispatch may only target a fleet-registered repo)."
+            exit 1
+          fi
+
+      # gh pr view + the issues/events REST page both come back oldest-first-safe; the
+      # most recent `box` LabeledEvent's actor is what BOX_ACTOR_LOGIN carries for the
+      # pull_request path today (github.event.sender.login) — this reproduces the same
+      # fact for a dispatch, where there is no label-event webhook payload to read it
+      # from directly.
+      - name: Resolve dispatch target
+        id: resolve
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          DISPATCH_REPO: ${{ inputs.repo }}
+          DISPATCH_PR: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          pr_json=$(gh pr view "$DISPATCH_PR" --repo "$DISPATCH_REPO" --json headRefOid,baseRefName,headRepositoryOwner,headRepository,labels)
+          head_sha=$(jq -r '.headRefOid' <<<"$pr_json")
+          base_ref=$(jq -r '.baseRefName' <<<"$pr_json")
+          head_repo=$(jq -r '.headRepositoryOwner.login + "/" + .headRepository.name' <<<"$pr_json")
+          current_labels=$(jq -r '[.labels[].name] | join(",")' <<<"$pr_json")
+
+          actor_login=$(gh api "repos/${DISPATCH_REPO}/issues/${DISPATCH_PR}/events?per_page=100" --paginate \
+            --jq '.[] | select(.event == "labeled" and .label.name == "box") | .actor.login' \
+            | tail -n1)
+          if [ -z "$actor_login" ]; then
+            echo "::error::patch-id dispatch refused — no \"labeled\" issue event with label \"box\" found on ${DISPATCH_REPO}#${DISPATCH_PR}; this handler needs the actor who applied it, the same fact the pull_request:labeled path reads from github.event.sender.login."
+            exit 1
+          fi
+
+          {
+            echo "head-sha=$head_sha"
+            echo "base-ref=$base_ref"
+            echo "head-repo=$head_repo"
+            echo "current-labels=$current_labels"
+            echo "actor-login=$actor_login"
+          } >>"$GITHUB_OUTPUT"
+
+          # Only meaningful (and only consumed below) when the dispatch targets THIS
+          # repo — a same-repo dispatch still checks out at the exact resolved head sha
+          # with full history, exactly like the pull_request:labeled path, so
+          # mintBoxPatchId's repoDir stays process.cwd() rather than a fresh clone.
+          if [ "$DISPATCH_REPO" = "$GITHUB_REPOSITORY" ]; then
+            echo "same-repo-head-sha=$head_sha" >>"$GITHUB_OUTPUT"
+          fi
+
+      # Rule #466 — this checkout IS the one scratch clone this lap uses, for the
+      # pull_request:labeled path and for a same-repo dispatch. A cross-repo dispatch
+      # (resolve.outputs.same-repo-head-sha empty) checks out this repo's own trigger
+      # ref instead — only scripts/ is needed then, since box-patch-id-labeled.ts's
+      # cloneScratch() (rollout step 6B) fetches the TARGET repo itself.
+      # fetch-depth: 0 (full history) is required whenever this checkout IS the
+      # analyzed repo: mintBoxPatchId computes `merge-base origin/<baseRef> <headSha>`,
+      # which needs both refs' full ancestry, not just the one commit.
+      - name: Checkout full history
+        if: github.event.label.name == 'box' || github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || steps.resolve.outputs.same-repo-head-sha || github.sha }}
+          fetch-depth: 0
+
+      - if: github.event.label.name == 'box' || github.event_name == 'workflow_dispatch'
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        if: github.event.label.name == 'box' || github.event_name == 'workflow_dispatch'
+        working-directory: scripts
+        run: npm ci || npm install
+
       - name: Mint + record the box-patch-id
-        if: github.event.label.name == 'box'
+        if: github.event.label.name == 'box' || github.event_name == 'workflow_dispatch'
         working-directory: scripts
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
-          BOX_REPO: ${{ github.repository }}
-          BOX_PR_NUMBER: ${{ github.event.pull_request.number }}
-          BOX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          BOX_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          BOX_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          BOX_ACTOR_LOGIN: ${{ github.event.sender.login }}
-          BOX_CURRENT_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BOX_REPO: ${{ inputs.repo || github.repository }}
+          BOX_PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+          BOX_HEAD_SHA: ${{ steps.resolve.outputs.head-sha || github.event.pull_request.head.sha }}
+          BOX_HEAD_REPO: ${{ steps.resolve.outputs.head-repo || github.event.pull_request.head.repo.full_name }}
+          BOX_BASE_REF: ${{ steps.resolve.outputs.base-ref || github.event.pull_request.base.ref }}
+          BOX_ACTOR_LOGIN: ${{ steps.resolve.outputs.actor-login || github.event.sender.login }}
+          BOX_CURRENT_LABELS: ${{ steps.resolve.outputs.current-labels || join(github.event.pull_request.labels.*.name, ',') }}
           BOX_PATCH_ID_KEY: ${{ secrets.BOX_PATCH_ID_KEY }}
         run: npx tsx box-patch-id-labeled.ts
