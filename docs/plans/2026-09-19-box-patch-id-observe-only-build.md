@@ -180,3 +180,20 @@ function scope, making every subsequent command in that scope — `python3` incl
 "command not found" even though `$PATH` was correct everywhere else in the process. Fixed by
 renaming the local to `target_path`; re-verified with the same positive-path-plus-three-negative-
 controls test above.
+
+### Checks:write grant — confirmed, and this PR's own merge gate
+
+The `studiob-fleet-bot` `checks:write` scope flagged as unconfirmed in the Open items section above
+is now **DONE** — granted 19:15Z on 2026-09-20. Re-verified live this session:
+`gh api /orgs/studio-b-ai/installations --jq '.installations[] | select(.app_id==4595770)'` returns
+`"permissions":{...,"checks":"write",...}` with `"updated_at":"2026-09-20T15:15:07.000-04:00"`
+(`-04:00` → `2026-09-20T19:15:07Z`, matching the claimed grant time exactly). Both
+`box-patch-id-labeled.yml`'s existing `POST repos/{owner}/{repo}/check-runs` call and this PR's own
+`box-patch-id-observe.yml` (Unit 4) are unblocked by this grant. The Open items bullet above is left
+as written rather than edited in place — it was authored by an already-merged prior PR (commit
+`9c77dd91`, ops-pipeline#536, on `main` before this branch was cut), not by this one, and this note
+lives instead in the section this PR itself appended.
+
+This PR also adds a `.github/workflows/` file for the first time in the row-807 build
+(`box-patch-id-observe.yml`) — from this commit forward, this PR merges only on the box, the single
+human merge key, same as any other change that touches `.github/workflows/`.
