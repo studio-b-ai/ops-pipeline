@@ -1,0 +1,118 @@
+name: box-patch-id (observe-only control kit)
+
+# ops-pipeline#807 rollout step 4 — the box-patch-id-observe lap.
+#
+# Manual workflow_dispatch companion to box-patch-id-labeled.yml's `mint` job. That job
+# fires on a real `box` label event and records the RECORDED "box-patch-id" check run at
+# label time. This job never mints or labels anything — it re-reads that recorded check
+# run and the PR's CURRENT head, computes an observe verdict entirely through
+# scripts/lib/box-patch-id.ts's + scripts/lib/label-authority.ts's existing exports (via
+# scripts/lib/box-patch-id-observe.ts — this PR's Unit 1), and records the result as a
+# SEPARATE "box-patch-id-observe" check run. It can only ever fire by hand or from the
+# box-patch-id-controls/ kit's control scripts (workflow_dispatch cannot fire until this
+# file is merged to main — see this PR's own build notes).
+#
+# Same observe-only doctrine as box-patch-id-labeled.yml: this job's own entry point
+# (scripts/box-patch-id-observe.ts) guarantees `process.exit(0)` on every path, including
+# an unexpected thrown error, so this job never fails on an observe error. Nothing here
+# strips, keeps, or otherwise touches the `box` label — that stays label-authority.ts's
+# position predicate, unchanged, until boxPatchIdWins flips in a later rung.
+#
+# Uses the studiob-fleet-bot App installation token, never github.token, for the same
+# reason box-patch-id-labeled.yml does (see that file's header) — the mint steps below
+# are copied verbatim from it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "owner/repo the PR lives in"
+        required: false
+        default: ${{ github.repository }}
+      pr_number:
+        description: "PR number to observe"
+        required: true
+      control:
+        description: "control-kit control number (e.g. \"3\"), or \"n/a\" outside the kit"
+        required: false
+        default: "n/a"
+      mode:
+        description: "observe mode — only \"observe\" is implemented by this build; any other value fails closed"
+        required: false
+        default: "observe"
+      head_sha_override:
+        description: "reserved for a future mode=mint-dry sibling unit — unused by mode=observe"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: box-patch-id-observe-${{ inputs.repo }}-${{ inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    name: "Observe the box-patch-id (never blocks)"
+    runs-on: ubuntu-latest
+    steps:
+      # Copied verbatim from box-patch-id-labeled.yml's mint job (see that file's header
+      # for why this must be the fleet App token, never github.token).
+      - name: Mint fleet App installation token
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: Fail loud if the mint returned nothing
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::Fleet App token mint returned an empty token — refusing to observe (a github.token fallback would let a collaborator forge/overwrite the check run this design exists to protect; see ops-pipeline#190 rollout step 3)."
+          exit 1
+
+      # workflow_dispatch carries no payload sha (unlike the `labeled` event
+      # box-patch-id-labeled.yml handles) — resolve the PR's CURRENT head before checkout.
+      - name: Resolve the PR's current head sha
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+        run: |
+          SHA=$(gh pr view "${{ inputs.pr_number }}" --repo "${{ inputs.repo }}" --json headRefOid --jq .headRefOid)
+          if [ -z "$SHA" ]; then
+            echo "::error::Could not resolve a head sha for ${{ inputs.repo }}#${{ inputs.pr_number }}"
+            exit 1
+          fi
+          echo "head_sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      # Rule #466 — this checkout IS the one scratch clone this lap uses. fetch-depth: 0
+      # (full history) is required: mintBoxPatchId computes `merge-base origin/<baseRef>
+      # <headSha>`, which needs both refs' full ancestry, not just the head commit.
+      - name: Checkout full history at the PR's current head
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repo }}
+          ref: ${{ steps.pr.outputs.head_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Observe the box-patch-id
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          BOX_REPO: ${{ inputs.repo }}
+          BOX_PR_NUMBER: ${{ inputs.pr_number }}
+          BOX_CONTROL: ${{ inputs.control }}
+          BOX_MODE: ${{ inputs.mode }}
+          BOX_HEAD_SHA_OVERRIDE: ${{ inputs.head_sha_override }}
+          BOX_PATCH_ID_KEY: ${{ secrets.BOX_PATCH_ID_KEY }}
+        run: npx tsx box-patch-id-observe.ts
