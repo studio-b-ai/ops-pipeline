@@ -70,7 +70,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: box-patch-id-${{ github.repository }}-${{ github.event.pull_request.number || inputs.repo }}-${{ github.event.pull_request.number || inputs.pr_number }}
+  group: box-patch-id-${{ inputs.repo || github.repository }}-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: false
 
 jobs:
