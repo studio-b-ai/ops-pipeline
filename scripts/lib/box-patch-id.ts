@@ -3,12 +3,14 @@
  * the "bp2" patch-id per Kevin's ruling on board card 808 ("A", 2026-09-19 ~19:2xZ —
  * brain library/supplementary-regulations/2026-09-19-the-box-binds-to-the-patch-id.md).
  *
- * OBSERVE-ONLY THIS LAP: nothing exported from this file strips or keeps a label.
- * label-authority.ts's `boxPatchIdWins` flag defaults false and this rung never flips
- * it — see that file's Step 3 comment. This module only computes the patch-id and
- * reads back a previously-recorded one; the labeled-handler workflow records it on a
- * check run and the release check keeps evaluating the position predicate exactly as
- * before.
+ * ROLLOUT STEP 5 UPDATE (ops-pipeline#190, the patch-id-wins flip): this file now
+ * also exports `refreshBoxPatchId` (a real, append-only implementation — no longer
+ * the step-3-era `never`-throwing stub) and `buildBoxPatchIdContext` (combines
+ * `readBoxPatchIdCheckRuns` + `mintBoxPatchId` into the `BoxPatchIdObserveContext`
+ * shape `label-authority.ts`'s Step 3 gate consumes). Nothing in THIS file decides
+ * whether a label strips or keeps — that decision still lives entirely in
+ * `evaluateLabelAuthority`'s Step 3, gated on `boxPatchIdWins`; this file only
+ * computes, reads back, and refreshes the patch-id record the gate compares against.
  *
  * Pure/impure split mirrors label-authority.ts (`evaluateLabelAuthority` vs.
  * `fetchAuthorityTimeline`): `mintBoxPatchId` and `readBoxPatchIdCheckRuns` are pure —
@@ -360,8 +362,22 @@ function isBoxPatchIdRecordShape(value: unknown): value is BoxPatchIdRecord {
  * never a silent fall back to the position predicate." `key`, when given, additionally
  * verifies a tagged record's HMAC — a mismatch is `box-patch-id-unreadable` (never
  * trust an unverifiable tag over silently accepting it).
+ *
+ * `currentLabelEventDbId`, when given (amendment 8, "a re-box must not poison the PR
+ * forever"), narrows every verified record to the one(s) minted FOR THIS labeling
+ * before the ambiguity gate runs. Without it, a check run left over from an earlier
+ * box/unbox cycle (a stale `labelEventDbId`) would be read back as authoritative for
+ * a brand-new labeling that happens to share the sha — whether it was the ONLY
+ * record present (silently poisoning the re-box) or one of several (silently
+ * refusing on an ambiguity that a fresh box never actually has). Omitting the
+ * parameter reproduces the exact pre-amendment-8 behavior byte-for-byte — every
+ * caller that predates rollout step 5 keeps working unchanged.
  */
-export function readBoxPatchIdCheckRuns(checkRuns: readonly CheckRunLike[], key?: string): BoxPatchIdVerdict {
+export function readBoxPatchIdCheckRuns(
+  checkRuns: readonly CheckRunLike[],
+  key?: string,
+  currentLabelEventDbId?: number,
+): BoxPatchIdVerdict {
   const matches = checkRuns.filter((c) => c.name === BOX_PATCH_ID_CHECK_NAME);
   if (matches.length === 0) {
     return { ok: false, reason: "box-patch-id-missing", detail: `no "${BOX_PATCH_ID_CHECK_NAME}" check run exists on this sha.` };
@@ -439,6 +455,33 @@ export function readBoxPatchIdCheckRuns(checkRuns: readonly CheckRunLike[], key?
     verified.push(record);
   }
 
+  // Amendment 8: narrow to the current labeling BEFORE the ambiguity gate below runs,
+  // but only once every record present is already garbage-free (structuralProblems
+  // and tagProblems still fail closed exactly as before — a malformed or
+  // tag-mismatched record's labelEventDbId can never be trusted, so it is never
+  // safely excluded from the count by this narrowing).
+  if (currentLabelEventDbId !== undefined && structuralProblems.length === 0 && tagProblems.length === 0) {
+    const eligible = verified.filter((r) => r.labelEventDbId === currentLabelEventDbId);
+    if (eligible.length === 1) {
+      return { ok: true, record: eligible[0]! };
+    }
+    if (eligible.length > 1) {
+      return {
+        ok: false,
+        reason: "box-patch-id-unreadable",
+        detail: `${eligible.length} "${BOX_PATCH_ID_CHECK_NAME}" records share the current LabeledEvent databaseId (${currentLabelEventDbId}) — ambiguous even after narrowing to this labeling, refusing rather than guessing.`,
+      };
+    }
+    // eligible.length === 0: every verified record belongs to an EARLIER box/unbox
+    // cycle — a re-box must not be poisoned by that leftover, so this reads as "no
+    // record for the current labeling", never a stale record's answer.
+    return {
+      ok: false,
+      reason: "box-patch-id-missing",
+      detail: `${verified.length} "${BOX_PATCH_ID_CHECK_NAME}" record(s) found, but none carry the current LabeledEvent databaseId (${currentLabelEventDbId}) — treated as no record for this labeling (amendment 8: a re-box must not be poisoned by a record left over from an earlier box/unbox cycle).`,
+    };
+  }
+
   if (matches.length > 1 || structuralProblems.length > 0 || tagProblems.length > 0 || verified.length === 0) {
     return {
       ok: false,
@@ -450,15 +493,119 @@ export function readBoxPatchIdCheckRuns(checkRuns: readonly CheckRunLike[], key?
   return { ok: true, record: verified[0]! };
 }
 
-// ───────────────────────────── explicitly out of scope this lap ─────────────────────────────
+// ───────────────────────────── refresh (rollout step 5) ─────────────────────────────
 
 /**
- * The refresh leg (ruling §3 "Authority and refresh": recompute-on-`behind_by`,
- * `update-branch` polling, `refresh_shas` appending, `base-changed`/`base-moved`
- * detection, `BOX_PATCH_ID_MAX_BEHIND=2000`) is rollout step 4/5, not this PR's scope
- * (ops-pipeline#190 rollout step 3, observe-only). This export exists only so the
- * surface is visible to a future rung; nothing in this build calls it.
+ * ops-pipeline#190 rollout step 5, amendment 1: the append-only half of the refresh
+ * leg the ruling's §3 describes. The gate's `update-branch` call (pr-automerge-gate.ts,
+ * the confirmed L545-552 site) replays the base into the PR branch and produces a NEW
+ * head sha whose CONTENT is unchanged (a mechanical rebase, not a new commit from the
+ * PR author) — `refreshBoxPatchId` records that this new sha is accounted for, so the
+ * next lap's `unrefreshedShas` computation (label-authority.ts Step 3, amendment 6)
+ * finds it already covered instead of reading it as an unprovable post-label change.
+ *
+ * Deliberately append-only and NOT a re-mint: recomputing the patch-id itself against
+ * the new sha is `buildBoxPatchIdContext`'s job (it calls `mintBoxPatchId` fresh every
+ * time), not this function's — conflating the two would let a refresh silently paper
+ * over a genuine content change by re-minting a DIFFERENT patch-id and calling it the
+ * same record. This function only ever appends; the caller is responsible for PATCHing
+ * the check run with the record this returns.
  */
-export function refreshBoxPatchId(): never {
-  throw new Error("refreshBoxPatchId is not implemented in ops-pipeline#190 rung 3 (observe-only) — see ruling §3, rollout step 4/5.");
+export function refreshBoxPatchId(record: BoxPatchIdRecord, newHeadSha: string): BoxPatchIdRecord {
+  if (!HEX40.test(newHeadSha)) {
+    throw new Error(`refreshBoxPatchId: newHeadSha must be a 40-hex sha (got "${newHeadSha}").`);
+  }
+  return {
+    ...record,
+    headSha: newHeadSha,
+    // Dedup rather than blindly push: a caller that fires twice against the same sha
+    // (a retried PATCH after a transient network error, say) must not grow an
+    // ever-longer duplicate list — `unrefreshedShas`'s `.includes()` check only needs
+    // presence, never a count.
+    refreshShas: record.refreshShas.includes(newHeadSha) ? record.refreshShas : [...record.refreshShas, newHeadSha],
+  };
+}
+
+// ───────────────────────────── observe context (rollout step 5) ─────────────────────────────
+
+/**
+ * The shape `buildBoxPatchIdContext` returns, field-for-field identical to
+ * `BoxPatchIdObserveContext` (scripts/lib/label-authority.ts) WITHOUT importing that
+ * module — this file's own architectural doctrine (see that file's own comment on
+ * `BoxPatchIdComputeFailureReason`) keeps every `scripts/lib/*.ts` file independently
+ * readable; the caller (pr-automerge-gate.ts) passes this object straight through as
+ * `AuthorityInput.boxPatchId` since the two shapes are structurally identical by
+ * construction — `BoxPatchIdRefusalReason` and `BoxPatchIdComputeFailureReason` are
+ * required to keep the exact same string members for exactly this reason.
+ */
+export interface BoxPatchIdContext {
+  recordedPatchId?: string;
+  currentPatchId?: string;
+  failure?: BoxPatchIdRefusalReason;
+  refreshShas?: string[];
+}
+
+export interface BuildBoxPatchIdContextInput {
+  checkRuns: readonly CheckRunLike[];
+  /** The CURRENT `box` LabeledEvent's databaseId — threaded straight into
+   *  `readBoxPatchIdCheckRuns`'s amendment-8 narrowing so a re-box's fresh labeling
+   *  never reads back a record minted for an earlier one. */
+  currentLabelEventDbId: number;
+  repo: string;
+  prNumber: number;
+  headRepo: string;
+  headSha: string;
+  changedPaths: readonly string[];
+  runner?: GitCommandRunner;
+  repoDir?: string;
+  key?: string;
+}
+
+/**
+ * Combines `readBoxPatchIdCheckRuns` + `mintBoxPatchId` into the one call
+ * `label-authority.ts`'s Step 3 gate actually needs: "what was recorded, what does
+ * the content hash to right now, and can either side be trusted." Recomputes against
+ * the RECORDED record's OWN `baseRef` and `labelEventDbId` (never today's caller-
+ * supplied assumptions about either) — `mintBoxPatchId` hashes `labelEventDbId` as
+ * one of its own inputs, so recomputing with any id other than the one the record was
+ * actually minted under could never produce a matching patch-id even for
+ * byte-identical content; agreement is only meaningful when both sides used the same
+ * recipe inputs.
+ *
+ * Amendment 7 ("do not encode a compute failure as `recordedPatchId: undefined`"):
+ * every refusal from either the read or the mint step surfaces as an explicit
+ * `failure`, never a silent empty context that would read as "grandfathered, nothing
+ * to compare" (grandfathering is reserved for the read step's genuine
+ * `box-patch-id-missing` case in `readBoxPatchIdCheckRuns`, which is the one refusal
+ * reason that legitimately means "no record ever existed for this labeling," not
+ * "one existed but couldn't be trusted").
+ */
+export function buildBoxPatchIdContext(input: BuildBoxPatchIdContextInput): BoxPatchIdContext {
+  const readVerdict = readBoxPatchIdCheckRuns(input.checkRuns, input.key, input.currentLabelEventDbId);
+  if (!readVerdict.ok) {
+    return { failure: readVerdict.reason };
+  }
+  const record = readVerdict.record;
+
+  const currentVerdict = mintBoxPatchId({
+    repo: input.repo,
+    prNumber: input.prNumber,
+    headRepo: input.headRepo,
+    headSha: input.headSha,
+    baseRef: record.baseRef,
+    labelEventDbId: record.labelEventDbId,
+    changedPaths: input.changedPaths,
+    runner: input.runner,
+    repoDir: input.repoDir,
+  });
+
+  if (!currentVerdict.ok) {
+    return { recordedPatchId: record.patchId, failure: currentVerdict.reason, refreshShas: record.refreshShas };
+  }
+
+  return {
+    recordedPatchId: record.patchId,
+    currentPatchId: currentVerdict.record.patchId,
+    refreshShas: record.refreshShas,
+  };
 }

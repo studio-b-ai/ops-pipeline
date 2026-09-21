@@ -10,11 +10,15 @@ import {
   BOX_PATCH_ID_UNKEYED_STATE,
   BOX_PATCH_ID_VERSION,
   boxPatchIdKeyState,
+  buildBoxPatchIdContext,
   defaultGitRunner,
   mintBoxPatchId,
   readBoxPatchIdCheckRuns,
+  refreshBoxPatchId,
   touchesGitattributes,
+  type BoxPatchIdContext,
   type BoxPatchIdRecord,
+  type BuildBoxPatchIdContextInput,
   type CheckRunLike,
   type GitCommandRunner,
   type MintBoxPatchIdInput,
@@ -225,6 +229,47 @@ describe("readBoxPatchIdCheckRuns", () => {
     expect(verdict).toMatchObject({ ok: false, reason: "box-patch-id-unreadable" });
   });
 
+  // ─────── amendment 8 ("a re-box must not poison the PR forever") ───────
+  // These fixtures replay the exact scenarios above but supply a 3rd
+  // `currentLabelEventDbId` argument — every test above them passes only 2 args and
+  // must keep behaving identically (proven by the fact that they were not touched).
+
+  it("amendment 8: with currentLabelEventDbId, the two-records ambiguity above resolves to the ONE record minted for the current labeling instead of refusing", () => {
+    const verdict = readBoxPatchIdCheckRuns(
+      [runWith(goodRecord()), runWith(goodRecord({ labelEventDbId: 555 }))],
+      undefined,
+      555,
+    );
+    expect(verdict.ok).toBe(true);
+    if (!verdict.ok) throw new Error("unreachable");
+    expect(verdict.record.labelEventDbId).toBe(555);
+  });
+
+  it("amendment 8: a SINGLE record left over from an earlier box/unbox cycle (a different labelEventDbId) reads as box-patch-id-missing for the current labeling, never as that stale record", () => {
+    const verdict = readBoxPatchIdCheckRuns([runWith(goodRecord({ labelEventDbId: 111111 }))], undefined, 424242);
+    expect(verdict).toMatchObject({ ok: false, reason: "box-patch-id-missing" });
+  });
+
+  it("amendment 8: two records that BOTH carry the current labelEventDbId (a genuine duplicate) still refuse as ambiguous", () => {
+    const verdict = readBoxPatchIdCheckRuns(
+      [runWith(goodRecord({ patchId: `${BOX_PATCH_ID_PREFIX}${"1".repeat(64)}` })), runWith(goodRecord({ patchId: `${BOX_PATCH_ID_PREFIX}${"2".repeat(64)}` }))],
+      undefined,
+      424242,
+    );
+    expect(verdict).toMatchObject({ ok: false, reason: "box-patch-id-unreadable" });
+    if (!verdict.ok) expect(verdict.detail).toMatch(/share the current LabeledEvent databaseId/);
+  });
+
+  it("amendment 8: a malformed record alongside a clean one for the current labeling still fails closed (narrowing never forgives a structural problem)", () => {
+    const verdict = readBoxPatchIdCheckRuns([runWith(goodRecord()), runWith("{not json")], undefined, 424242);
+    expect(verdict).toMatchObject({ ok: false, reason: "box-patch-id-unreadable" });
+  });
+
+  it("amendment 8: omitting currentLabelEventDbId reproduces the pre-amendment-8 single-record behavior even when its labelEventDbId would not have matched anything", () => {
+    const verdict = readBoxPatchIdCheckRuns([runWith(goodRecord({ labelEventDbId: 111111 }))]);
+    expect(verdict.ok).toBe(true);
+  });
+
   it("known-BAD, control: a tag that fails HMAC verification against BOX_PATCH_ID_KEY is box-patch-id-unreadable", () => {
     const record = goodRecord({ tag: "0".repeat(64) });
     const verdict = readBoxPatchIdCheckRuns([runWith(record)], "test-key");
@@ -304,5 +349,158 @@ describe("defaultGitRunner (real git)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ───────────────── ops-pipeline#190 rollout step 5 (the patch-id-wins flip) ─────────────────
+
+describe("refreshBoxPatchId", () => {
+  function baseRecord(overrides: Partial<BoxPatchIdRecord> = {}): BoxPatchIdRecord {
+    return {
+      patchId: `${BOX_PATCH_ID_PREFIX}${"d".repeat(64)}`,
+      version: BOX_PATCH_ID_VERSION,
+      headSha: HEAD_SHA,
+      baseRef: "tp/807-box-patch-id-base",
+      baseSha: BASE_SHA,
+      labelEventDbId: 424242,
+      refreshShas: [HEAD_SHA],
+      pathHashes: {},
+      ...overrides,
+    };
+  }
+  const NEW_HEAD_SHA = "e".repeat(40);
+
+  it("known-GOOD: appends the new head sha to refreshShas and updates headSha, leaving every other field untouched", () => {
+    const record = baseRecord();
+    const refreshed = refreshBoxPatchId(record, NEW_HEAD_SHA);
+    expect(refreshed).toEqual({ ...record, headSha: NEW_HEAD_SHA, refreshShas: [HEAD_SHA, NEW_HEAD_SHA] });
+  });
+
+  it("is append-only: the patchId, tag, baseRef, baseSha, labelEventDbId and pathHashes never change", () => {
+    const record = baseRecord({ tag: "f".repeat(64) });
+    const refreshed = refreshBoxPatchId(record, NEW_HEAD_SHA);
+    expect(refreshed.patchId).toBe(record.patchId);
+    expect(refreshed.tag).toBe(record.tag);
+    expect(refreshed.baseRef).toBe(record.baseRef);
+    expect(refreshed.baseSha).toBe(record.baseSha);
+    expect(refreshed.labelEventDbId).toBe(record.labelEventDbId);
+    expect(refreshed.pathHashes).toBe(record.pathHashes);
+  });
+
+  it("dedups: refreshing twice against the same sha (a retried PATCH) does not grow refreshShas a second time", () => {
+    const record = baseRecord();
+    const once = refreshBoxPatchId(record, NEW_HEAD_SHA);
+    const twice = refreshBoxPatchId(once, NEW_HEAD_SHA);
+    expect(twice.refreshShas).toEqual([HEAD_SHA, NEW_HEAD_SHA]);
+  });
+
+  it("known-BAD: throws on a newHeadSha that is not a 40-hex sha, rather than silently recording garbage", () => {
+    expect(() => refreshBoxPatchId(baseRecord(), "not-a-sha")).toThrow(/40-hex sha/);
+  });
+});
+
+describe("buildBoxPatchIdContext", () => {
+  function goodRecord(overrides: Partial<BoxPatchIdRecord> = {}): BoxPatchIdRecord {
+    return {
+      patchId: `${BOX_PATCH_ID_PREFIX}${"d".repeat(64)}`,
+      version: BOX_PATCH_ID_VERSION,
+      headSha: HEAD_SHA,
+      baseRef: "tp/807-box-patch-id-base",
+      baseSha: BASE_SHA,
+      labelEventDbId: 424242,
+      refreshShas: [HEAD_SHA],
+      pathHashes: {},
+      ...overrides,
+    };
+  }
+  function runWith(record: unknown): CheckRunLike {
+    return { name: BOX_PATCH_ID_CHECK_NAME, output: { text: typeof record === "string" ? record : JSON.stringify(record) } };
+  }
+  function baseContextInput(overrides: Partial<BuildBoxPatchIdContextInput> = {}): BuildBoxPatchIdContextInput {
+    return {
+      checkRuns: [runWith(goodRecord())],
+      currentLabelEventDbId: 424242,
+      repo: "studio-b-ai/ops-pipeline",
+      prNumber: 807,
+      headRepo: "studio-b-ai/ops-pipeline",
+      headSha: HEAD_SHA,
+      changedPaths: ["scripts/lib/box-patch-id.ts"],
+      ...overrides,
+    };
+  }
+
+  it("known-GOOD: recorded and current agree when the mint recomputes to the SAME patch-id (mint is deterministic on identical inputs)", () => {
+    // Mint once, up front, to learn the exact patchId this recipe produces for these
+    // inputs — then record THAT id, so the assertion below is a real equality check
+    // against a freshly-computed value, never a hardcoded guess at the hash.
+    const minted = mintBoxPatchId(baseMintInput({ runner: fakeRunner(repliesFor()), labelEventDbId: 424242, baseRef: "tp/807-box-patch-id-base" }));
+    if (!minted.ok) throw new Error("unreachable: fixture mint must succeed");
+
+    const runner = fakeRunner(repliesFor());
+    const context = buildBoxPatchIdContext(
+      baseContextInput({
+        checkRuns: [runWith(goodRecord({ patchId: minted.record.patchId, baseRef: "tp/807-box-patch-id-base", labelEventDbId: 424242 }))],
+        runner,
+      }),
+    );
+    expect(context.failure).toBeUndefined();
+    expect(context.recordedPatchId).toBe(minted.record.patchId);
+    expect(context.currentPatchId).toBe(minted.record.patchId);
+    expect(context.recordedPatchId).toBe(context.currentPatchId);
+  });
+
+  it("recomputes against the RECORDED record's own baseRef/labelEventDbId, never the caller's — a differing recorded labelEventDbId still recomputes under that recorded id", () => {
+    const calls: { args: string[]; stdin?: string }[] = [];
+    const runner = fakeRunner(repliesFor(), calls);
+    buildBoxPatchIdContext(
+      baseContextInput({
+        checkRuns: [runWith(goodRecord({ baseRef: "tp/some-other-base", labelEventDbId: 999999 }))],
+        currentLabelEventDbId: 999999,
+        runner,
+      }),
+    );
+    const mergeBaseCall = calls.find((c) => c.args[0] === "merge-base");
+    expect(mergeBaseCall?.args).toEqual(["merge-base", "origin/tp/some-other-base", HEAD_SHA]);
+  });
+
+  it("known-BAD: surfaces the read step's refusal as an explicit `failure`, never a silent empty context (amendment 7)", () => {
+    const context = buildBoxPatchIdContext(baseContextInput({ checkRuns: [runWith("{not json")] }));
+    expect(context).toEqual({ failure: "box-patch-id-unreadable" });
+  });
+
+  it("grandfathering: no record at all for the current labeling is box-patch-id-missing, carried straight through as `failure`", () => {
+    const context = buildBoxPatchIdContext(baseContextInput({ checkRuns: [] }));
+    expect(context).toEqual({ failure: "box-patch-id-missing" });
+  });
+
+  it("known-BAD: a record found but the CURRENT mint is uncomputable (e.g. a .gitattributes-touching diff) surfaces `failure` while still carrying the recordedPatchId and refreshShas", () => {
+    const context = buildBoxPatchIdContext(
+      baseContextInput({
+        checkRuns: [runWith(goodRecord({ refreshShas: [HEAD_SHA, "f".repeat(40)] }))],
+        changedPaths: [".gitattributes"],
+      }),
+    );
+    expect(context.failure).toBe("box-patch-id-uncomputable");
+    expect(context.recordedPatchId).toBeDefined();
+    expect(context.currentPatchId).toBeUndefined();
+    expect(context.refreshShas).toEqual([HEAD_SHA, "f".repeat(40)]);
+  });
+
+  it("amendment 8 wiring: a re-box's stale leftover record (different labelEventDbId) surfaces box-patch-id-missing via the narrowing, not a mismatched comparison", () => {
+    const context = buildBoxPatchIdContext(
+      baseContextInput({
+        checkRuns: [runWith(goodRecord({ labelEventDbId: 111111 }))],
+        currentLabelEventDbId: 424242,
+      }),
+    );
+    expect(context).toEqual({ failure: "box-patch-id-missing" });
+  });
+
+  it("passes the recorded refreshShas straight through on a successful comparison", () => {
+    const runner = fakeRunner(repliesFor());
+    const context = buildBoxPatchIdContext(
+      baseContextInput({ checkRuns: [runWith(goodRecord({ refreshShas: [HEAD_SHA, "e".repeat(40)] }))], runner }),
+    );
+    expect(context.refreshShas).toEqual([HEAD_SHA, "e".repeat(40)]);
   });
 });

@@ -12,6 +12,7 @@ import {
   QUEUED_LABEL,
   HOLD_LABEL,
   QUEUED_LABEL_PAIR,
+  TRAIN_LABEL_PAIR,
   evaluateLabelAuthority,
   normalizeActorLogin,
   fetchAuthorityTimeline,
@@ -31,11 +32,15 @@ function labeledBy(actorLogin: string, position: number, label = TRAIN_READY_LAB
 function unlabeledBy(actorLogin: string, position: number, label = TRAIN_READY_LABEL): AuthorityTimelineItem {
   return { type: "UNLABELED", label, actorLogin, position };
 }
-function commitAt(position: number): AuthorityTimelineItem {
-  return { type: "PULL_REQUEST_COMMIT", position };
+// `oid` is optional and defaults to unset (every pre-existing call site keeps behaving
+// exactly as before — an item with no oid is "unprovable" per amendment 6, which is
+// precisely what makes the rollout-step-3-era fixtures below still exercise the
+// fail-closed path under the rollout-step-5 predicate without any of them changing).
+function commitAt(position: number, oid?: string): AuthorityTimelineItem {
+  return { type: "PULL_REQUEST_COMMIT", position, ...(oid !== undefined ? { oid } : {}) };
 }
-function forcePushAt(position: number): AuthorityTimelineItem {
-  return { type: "HEAD_REF_FORCE_PUSHED", position };
+function forcePushAt(position: number, oid?: string): AuthorityTimelineItem {
+  return { type: "HEAD_REF_FORCE_PUSHED", position, ...(oid !== undefined ? { oid } : {}) };
 }
 
 // A baseline "authorized happy path" input — commit BEFORE the authorizing label, by a
@@ -270,10 +275,13 @@ describe("evaluateLabelAuthority", () => {
   });
 
   // ops-pipeline#190 rollout step 3 (observe-only lap) — see AuthorityInput.boxPatchId.
-  // These prove the addition is genuinely inert: the same stale-label verdict comes
-  // back whether the observation says the patch-id would KEEP or STRIP, and whether
-  // boxPatchIdWins is left at its default or explicitly set true (not wired to any
-  // branch this lap — see label-authority.ts's Step 3 comment).
+  // These predate rollout step 5 (the patch-id-wins flip) and their fixtures never set
+  // an `oid` on the post-label commit/force-push item, so under the amendment-6
+  // fail-closed rule every one of them is still "unprovable" and `patchIdKeeps` is
+  // still false — the stale-label verdict comes back unchanged for the same reason it
+  // always did (no observation, or the observation can't be proven current), NOT
+  // because the flag is unwired. See the step-5-era tests below (after "does not log
+  // when no boxPatchId observation context is given") for the load-bearing cases.
   it("still flags stale-label when boxPatchId observation would KEEP (patch-ids match) — verdict is unchanged this lap", () => {
     const verdict = evaluateLabelAuthority(
       baseAuthorityInput({
@@ -316,7 +324,7 @@ describe("evaluateLabelAuthority", () => {
     });
   });
 
-  it("still flags stale-label even with boxPatchIdWins: true — not wired to any branch this lap", () => {
+  it("still flags stale-label even with boxPatchIdWins: true when the post-label commit has no provable oid (amendment 6 fail-closed, not an unwired flag)", () => {
     const verdict = evaluateLabelAuthority(
       baseAuthorityInput({
         timeline: [labeledBy("kbibelhausen", 0), commitAt(1)],
@@ -378,6 +386,84 @@ describe("evaluateLabelAuthority", () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  // ─────────────── ops-pipeline#190 rollout step 5 (the patch-id-wins flip) ───────────────
+  // Unlike the step-3 block above, every fixture here gives the post-label commit a real
+  // `oid` that IS present in `refreshShas` — the only way `patchIdKeeps` can ever be
+  // true — so these are the first tests in this file where the override is actually
+  // reachable and load-bearing.
+
+  it("keeps-on-agreeing-patch-id: authorizes past a stale-label when the patch-id agrees and the post-label sha was refreshed", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        timeline: [labeledBy("kbibelhausen", 0), commitAt(1, "sha-1")],
+        boxPatchId: { recordedPatchId: "bp2:abc", currentPatchId: "bp2:abc", refreshShas: ["sha-1"] },
+        boxPatchIdWins: true,
+      }),
+    );
+    expect(verdict).toEqual({
+      authorized: true,
+      authorizingEvent: { actorLogin: "kbibelhausen", position: 0, label: TRAIN_READY_LABEL, databaseId: undefined },
+    });
+  });
+
+  it("strips-on-differing-patch-id: still flags stale-label when the recorded and current patch-ids disagree, even with a refreshed sha", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        timeline: [labeledBy("kbibelhausen", 0), commitAt(1, "sha-1")],
+        boxPatchId: { recordedPatchId: "bp2:abc", currentPatchId: "bp2:def", refreshShas: ["sha-1"] },
+        boxPatchIdWins: true,
+      }),
+    );
+    expect(verdict).toEqual({
+      authorized: false,
+      reason: "stale-label",
+      detail: expect.stringContaining("PULL_REQUEST_COMMIT"),
+    });
+  });
+
+  it("uncomputable-falls-back: still flags stale-label when the observation carries an explicit compute failure, even though the ids happen to match", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        timeline: [labeledBy("kbibelhausen", 0), commitAt(1, "sha-1")],
+        boxPatchId: { recordedPatchId: "bp2:abc", currentPatchId: "bp2:abc", refreshShas: ["sha-1"], failure: "box-patch-id-unreadable" },
+        boxPatchIdWins: true,
+      }),
+    );
+    expect(verdict).toEqual({
+      authorized: false,
+      reason: "stale-label",
+      detail: expect.stringContaining("PULL_REQUEST_COMMIT"),
+    });
+  });
+
+  it("strips-when-post-label-sha-not-refreshed: still flags stale-label when the post-label commit's oid is absent from refreshShas, even though the ids match", () => {
+    const verdict = evaluateLabelAuthority(
+      baseAuthorityInput({
+        timeline: [labeledBy("kbibelhausen", 0), commitAt(1, "sha-1")],
+        boxPatchId: { recordedPatchId: "bp2:abc", currentPatchId: "bp2:abc", refreshShas: [] },
+        boxPatchIdWins: true,
+      }),
+    );
+    expect(verdict).toEqual({
+      authorized: false,
+      reason: "stale-label",
+      detail: expect.stringContaining("PULL_REQUEST_COMMIT"),
+    });
+  });
+
+  it("does not throw when boxPatchIdWins produces a keep for the train pair (object-identity check passes for the default/undefined labels case)", () => {
+    expect(() =>
+      evaluateLabelAuthority(
+        baseAuthorityInput({
+          timeline: [labeledBy("kbibelhausen", 0), commitAt(1, "sha-1")],
+          boxPatchId: { recordedPatchId: "bp2:abc", currentPatchId: "bp2:abc", refreshShas: ["sha-1"] },
+          boxPatchIdWins: true,
+          labels: TRAIN_LABEL_PAIR,
+        }),
+      ),
+    ).not.toThrow();
   });
 
   it("authorizes on label -> unlabel -> relabel by an authorized actor with no later commits (last event wins)", () => {
@@ -489,6 +575,24 @@ describe("evaluateLabelAuthority — the queued/hold pair (ops-pipeline#260 leg 
   it("a push after Kevin's `queued` is stale — the code changed after his word", () => {
     const verdict = evaluateLabelAuthority(queuedInput({ timeline: [labeledBy("kbibelhausen", 0, QUEUED_LABEL), commitAt(1)] }));
     expect(verdict).toMatchObject({ authorized: false, reason: "stale-label" });
+  });
+
+  // Amendment 3 ("only the box pair may carry the flag"): `QUEUED_LABEL_PAIR` is
+  // structurally identical to `TRAIN_LABEL_PAIR` (see the ONE-vocabulary test above)
+  // but is a DISTINCT object instance — `isTrainPair`'s `===` check must tell them
+  // apart, or a caller passing this pair alongside boxPatchIdWins:true could silently
+  // gain merge authority it was never meant to carry. This proves the fail-loud guard
+  // actually fires rather than being dead code (Rule #464).
+  it("throws rather than silently keeping a stale-label override on the queued pair, even though it's structurally identical to the train pair", () => {
+    expect(() =>
+      evaluateLabelAuthority(
+        queuedInput({
+          timeline: [labeledBy("kbibelhausen", 0, QUEUED_LABEL), commitAt(1, "sha-1")],
+          boxPatchId: { recordedPatchId: "bp2:abc", currentPatchId: "bp2:abc", refreshShas: ["sha-1"] },
+          boxPatchIdWins: true,
+        }),
+      ),
+    ).toThrow(/non-train label pair/);
   });
 
   it("a bot's `queued` never authorizes, roster or not", () => {
