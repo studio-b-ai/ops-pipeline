@@ -131,7 +131,7 @@
       "enabled_classes": "docs-comment,ci-infra,test-only,code-fix",
       "sensitive_path_patterns": "^\\.github/actions/,(^|/)(auth|credential|secret|token)",
       "safe_path_globs": "apps/**,packages/**,scripts/**,docs/**",
-      "required_checks": "Build + Test (amplify-engine),Build + Test (amplify-workers),Deprecated-API lint,Cross-workspace dep build coverage,Lint script unit tests,gitleaks / Secret scan (gitleaks, Rule 363)",
+      "required_checks": "Build + Test (amplify-engine),Build + Test (amplify-workers),Deprecated-API lint,Cross-workspace dep build coverage,Lint script unit tests",
       "train": true
     }
   ]

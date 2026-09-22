@@ -143,9 +143,12 @@ repos:
   # — structurally unable to report SUCCESS on a pull_request head: a
   # by-design PR-event skip, not an absent load-bearing check. The same name
   # is already sanctioned for bolt-wms above. Fail-closed posture unchanged:
-  # amplify's registry row names all six always-run PR checks in
-  # required_checks, so the stricter named-checks leg still refuses a
-  # code-fix whose real CI didn't run green.
+  # amplify's registry row names the five comma-safe always-run PR checks in
+  # required_checks (gitleaks is excluded there ONLY because its live name
+  # carries a comma the comma-separated input cannot represent — it remains
+  # fully enforced by the ci-rollup leg: an unsanctioned non-SUCCESS entry
+  # makes the rollup unclean), so the stricter named-checks leg still
+  # refuses a code-fix whose real CI didn't run green.
   studio-b-ai/amplify:
     - "Slack Notification"
 
