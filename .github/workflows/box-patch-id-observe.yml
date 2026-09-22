@@ -26,9 +26,14 @@ on:
   workflow_dispatch:
     inputs:
       repo:
+        # No expression here: GitHub refuses to parse `${{ github.repository }}` inside a
+        # workflow_dispatch input default (HTTP 422 "Unrecognized named-value: 'github'"
+        # at dispatch time, which made every control-kit observe/harvest undispatchable
+        # on 2026-09-21). The kit always passes `-f repo=` explicitly; this literal only
+        # serves a by-hand dispatch from the Actions tab.
         description: "owner/repo the PR lives in"
         required: false
-        default: ${{ github.repository }}
+        default: "studio-b-ai/ops-pipeline"
       pr_number:
         description: "PR number to observe"
         required: true
