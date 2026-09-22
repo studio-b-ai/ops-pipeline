@@ -42,11 +42,11 @@ step 4 actually plants each one.
 | control | planted | required verdict | receipt |
 |---|---|---|---|
 | 1 | a live ops-pipeline pull request behind its base, refreshed by a lap | `kept`, merge pinned to the new head | _(pending — rollout step 4)_ |
-| 2 | one changed comment line pushed to a keyed head | `stripped`, path named | _(pending — rollout step 4)_ |
-| 3 | one added line re-indented, whitespace only | `stripped` | _(pending — rollout step 4)_ |
+| 2 | one changed comment line pushed to a keyed head | `stripped`, path named | run [35676527593](https://github.com/studio-b-ai/ops-pipeline/actions/runs/35676527593) · `stripped` · check-run neutral |
+| 3 | one added line re-indented, whitespace only | `stripped` | run [35677172632](https://github.com/studio-b-ai/ops-pipeline/actions/runs/35677172632) · `stripped` · check-run neutral |
 | 4 | a change landed on the base in a non-adjacent region of the same file | `kept` | _(pending — rollout step 4)_ |
-| 5 | the diff pointed at a nonexistent ref | `box-patch-id-uncomputable` | _(pending — rollout step 4)_ |
-| 6 | a seat pushes a commit leaving the net diff unchanged | `stripped` | _(pending — rollout step 4)_ |
+| 5 | the diff pointed at a nonexistent ref | `box-patch-id-uncomputable` | run [35675907280](https://github.com/studio-b-ai/ops-pipeline/actions/runs/35675907280) · `box-patch-id-observe-unsupported-mode` · check-run neutral · Caveat: this control fires through the mint-dry dispatch, not a box LabeledEvent; the planted `uncomputable` verdict is unreachable until mint-dry exists (row 865), so the observe run reports `unsupported-mode` by design. |
+| 6 | a seat pushes a commit leaving the net diff unchanged | `stripped` | run [35677181782](https://github.com/studio-b-ai/ops-pipeline/actions/runs/35677181782) · `stripped` · check-run neutral |
 
 Control 1 is the known-good Rule #471 requires, because this guard's default verdict is stale and
 every stale test passes on a guard that can only say stale. Controls 2, 5 and 6 are the known-bads
