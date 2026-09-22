@@ -69,9 +69,7 @@ function main(): void {
   const mode = process.env.BOX_MODE || "observe";
   const runId = process.env.GITHUB_RUN_ID || "local";
   const key = process.env.BOX_PATCH_ID_KEY || undefined;
-  // head_sha_override is accepted (per the workflow's input contract) but unused by mode=observe —
-  // it exists for mode=mint-dry, a sibling unit's job (control-5-nonexistent-ref.zsh's header).
-  void process.env.BOX_HEAD_SHA_OVERRIDE;
+  const headShaOverride = process.env.BOX_HEAD_SHA_OVERRIDE || undefined;
 
   let line: string;
   let checkRunTitle: string;
@@ -114,6 +112,7 @@ function main(): void {
       shasWithCheckRuns,
       key,
       repoDir: process.cwd(),
+      headShaOverride,
     });
 
     line = result.line;
@@ -128,6 +127,7 @@ function main(): void {
       control,
       mode,
       runId,
+      headShaOverride: result.headShaOverride,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

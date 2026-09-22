@@ -18,6 +18,11 @@ name: box-patch-id (observe-only control kit)
 # strips, keeps, or otherwise touches the `box` label — that stays label-authority.ts's
 # position predicate, unchanged, until boxPatchIdWins flips in a later rung.
 #
+# mode=mint-dry (plan section E, crew mechanic stint #865) mints directly against a
+# head_sha_override without reading any recorded check run — the probe PR is never boxed
+# (a nonexistent ref cannot reach the normal labeled-event path). The logic lives in
+# scripts/lib/box-patch-id-observe.ts and scripts/box-patch-id-observe.ts.
+#
 # Uses the studiob-fleet-bot App installation token, never github.token, for the same
 # reason box-patch-id-labeled.yml does (see that file's header) — the mint steps below
 # are copied verbatim from it.
@@ -27,8 +32,7 @@ on:
     inputs:
       repo:
         description: "owner/repo the PR lives in"
-        required: false
-        default: ${{ github.repository }}
+        required: true
       pr_number:
         description: "PR number to observe"
         required: true
@@ -37,11 +41,11 @@ on:
         required: false
         default: "n/a"
       mode:
-        description: "observe mode — only \"observe\" is implemented by this build; any other value fails closed"
+        description: "observe mode — \"observe\" or \"mint-dry\" (any other value fails closed)"
         required: false
         default: "observe"
       head_sha_override:
-        description: "reserved for a future mode=mint-dry sibling unit — unused by mode=observe"
+        description: "for mode=mint-dry: override SHA to mint against (unused by mode=observe)"
         required: false
         default: ""
 
@@ -90,23 +94,39 @@ jobs:
       # Rule #466 — this checkout IS the one scratch clone this lap uses. fetch-depth: 0
       # (full history) is required: mintBoxPatchId computes `merge-base origin/<baseRef>
       # <headSha>`, which needs both refs' full ancestry, not just the head commit.
+      # The PR's head may not have the latest box-patch-id-observe code (e.g. a mint-dry
+      # dispatch before the sibling unit lands on main). Checkout the PR for full git
+      # history, then overlay the workflow's own scripts/lib/ directory so the observe
+      # step runs the code from THIS ref, not the PR's.
       - name: Checkout full history at the PR's current head
         uses: actions/checkout@v5
         with:
           repository: ${{ inputs.repo }}
           ref: ${{ steps.pr.outputs.head_sha }}
           fetch-depth: 0
+          path: pr-checkout
+
+      - name: Checkout the workflow's own ref (for the observe script)
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref }}
+          path: workflow-checkout
+
+      - name: Overlay workflow's scripts/lib onto PR checkout (mint-dry code may not be on the PR's head)
+        run: |
+          cp -r workflow-checkout/scripts/lib pr-checkout/scripts/
+          cp workflow-checkout/scripts/box-patch-id-observe.ts pr-checkout/scripts/
 
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
 
       - name: Install deps
-        working-directory: scripts
+        working-directory: pr-checkout/scripts
         run: npm ci || npm install
 
       - name: Observe the box-patch-id
-        working-directory: scripts
+        working-directory: pr-checkout/scripts
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           BOX_REPO: ${{ inputs.repo }}
