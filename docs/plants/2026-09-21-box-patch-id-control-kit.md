@@ -98,6 +98,7 @@ for itself, by design (Rule #97 / #279 exception 1).
 
 ## Base-edit region
 
+- control 4 base edit · 2026-09-22T03:15:39Z · non-adjacent region
 <!-- Control 4's `push` step inserts its base-edit-branch line immediately below this heading, on
      the SIBLING `tp/807-control-4-base-edit` branch — never on control 4's own probe branch. This
      section must stay at least `MIN_LINE_GAP` (40) lines below "## Plant lines", separated by the
