@@ -32,8 +32,7 @@ on:
     inputs:
       repo:
         description: "owner/repo the PR lives in"
-        required: false
-        default: ${{ github.repository }}
+        required: true
       pr_number:
         description: "PR number to observe"
         required: true
