@@ -6,10 +6,11 @@
 // scripts/lib/box-patch-id.ts and scripts/lib/label-authority.ts — it adds no new patch-id math
 // and no new authority predicate of its own (import, never re-implement).
 //
-// mode=mint-dry belongs to a sibling unit (plan section E) — see
-// scripts/box-patch-id-controls/control-5-nonexistent-ref.zsh's header comment: "until the sibling
-// unit ships mode=mint-dry, firing this control for real fails closed (unknown mode)". This file
-// implements mode=observe only; any other mode value fails closed here.
+// mode=mint-dry (plan section E, built by crew mechanic stint #865) dispatches
+// mintBoxPatchId directly with a head_sha_override without reading any recorded check run —
+// see scripts/box-patch-id-controls/control-5-nonexistent-ref.zsh for the consumer contract.
+// Mode=observe reads the recorded box-patch-id check run and compares; mode=mint-dry mints
+// the patch-id for a caller-supplied override sha directly.
 
 import {
   BOX_PATCH_ID_CHECK_NAME,
@@ -27,7 +28,7 @@ import { evaluateLabelAuthority, resolveAuthorityLogins, type AuthorityTimelineI
  *  reads. */
 export const BOX_PATCH_ID_OBSERVE_CHECK_NAME = "box-patch-id-observe";
 
-export const SUPPORTED_OBSERVE_MODES = ["observe"] as const;
+export const SUPPORTED_OBSERVE_MODES = ["observe", "mint-dry"] as const;
 export type SupportedObserveMode = (typeof SUPPORTED_OBSERVE_MODES)[number];
 
 export type ObserveVerdict = "kept" | "stripped" | BoxPatchIdRefusalReason | "box-patch-id-observe-unsupported-mode";
@@ -49,6 +50,11 @@ export interface ObserveBoxPatchIdInput {
   /** GITHUB_RUN_ID, or a caller-supplied stand-in outside Actions. */
   runId: string;
   headSha: string;
+  /** For mode=mint-dry only: the override SHA to mint against (a nonexistent ref, typically a blob
+   *  oid produced by `git hash-object --stdin`). When present and mode is "mint-dry",
+   *  mintBoxPatchId is called with this as headSha instead of the PR's real headRefOid. The PR's
+   *  real headSha is still used for the check-run API call (GitHub rejects a nonexistent head_sha). */
+  headShaOverride?: string;
   headRepo: string;
   baseRef: string;
   changedPaths: readonly string[];
@@ -77,6 +83,8 @@ export interface ObserveBoxPatchIdResult {
   movedShas: string[];
   unrefreshedShas: string[];
   record: BoxPatchIdRecord | null;
+  /** For mint-dry, the override SHA used for the mint call (absent for observe mode). */
+  headShaOverride: string | null;
   /** The EXACT required stdout line — callers print this verbatim, never reformat it. */
   line: string;
 }
@@ -96,9 +104,10 @@ function findRecordedCheckRun(
 }
 
 function formatLine(input: ObserveBoxPatchIdInput, verdict: ObserveVerdict, recordedPatchId: string | null, currentPatchId: string | null, unrefreshedShas: readonly string[], movedShas: readonly string[]): string {
+  const override = input.headShaOverride ? ` overridden=${input.headShaOverride}` : "";
   return (
     `[box-patch-id observe-only] control=${input.control} repo=${input.repo} pr=${input.prNumber} ` +
-    `mode=${input.mode} recorded=${recordedPatchId ?? "none"} current=${currentPatchId ?? "none"} ` +
+    `mode=${input.mode}${override} recorded=${recordedPatchId ?? "none"} current=${currentPatchId ?? "none"} ` +
     `verdict=${verdict} unrefreshed=[${unrefreshedShas.join(",")}] moved=[${movedShas.join(",")}] run=${input.runId}`
   );
 }
@@ -130,9 +139,47 @@ export function observeBoxPatchId(input: ObserveBoxPatchIdInput): ObserveBoxPatc
       movedShas,
       unrefreshedShas,
       record: extra.record ?? null,
+      headShaOverride: input.headShaOverride ?? null,
       line: formatLine(input, verdict, recordedPatchId, currentPatchId, unrefreshedShas, movedShas),
     };
   };
+
+  if (input.mode === "mint-dry") {
+    const mintHeadSha = input.headShaOverride;
+    if (!mintHeadSha) {
+      return emit("box-patch-id-observe-unsupported-mode");
+    }
+
+    const mintVerdict = mintBoxPatchId({
+      repo: input.repo,
+      prNumber: input.prNumber,
+      headRepo: input.headRepo,
+      headSha: mintHeadSha,
+      baseRef: input.baseRef,
+      labelEventDbId: 0, // no label event — this PR was never boxed
+      changedPaths: input.changedPaths,
+      repoDir: input.repoDir,
+      runner: input.runner,
+      key: input.key,
+    });
+
+    if (!mintVerdict.ok) {
+      return emit(mintVerdict.reason, {
+        recordedPatchId: null,
+        currentPatchId: null,
+        movedShas: [],
+        unrefreshedShas: [],
+      });
+    }
+
+    return emit("kept", {
+      recordedPatchId: null,
+      currentPatchId: mintVerdict.record.patchId,
+      movedShas: [],
+      unrefreshedShas: [],
+      record: mintVerdict.record,
+    });
+  }
 
   if (input.mode !== "observe") {
     return emit("box-patch-id-observe-unsupported-mode");
