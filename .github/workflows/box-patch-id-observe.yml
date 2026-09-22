@@ -18,6 +18,11 @@ name: box-patch-id (observe-only control kit)
 # strips, keeps, or otherwise touches the `box` label — that stays label-authority.ts's
 # position predicate, unchanged, until boxPatchIdWins flips in a later rung.
 #
+# mode=mint-dry (plan section E, crew mechanic stint #865) mints directly against a
+# head_sha_override without reading any recorded check run — the probe PR is never boxed
+# (a nonexistent ref cannot reach the normal labeled-event path). The logic lives in
+# scripts/lib/box-patch-id-observe.ts and scripts/box-patch-id-observe.ts.
+#
 # Uses the studiob-fleet-bot App installation token, never github.token, for the same
 # reason box-patch-id-labeled.yml does (see that file's header) — the mint steps below
 # are copied verbatim from it.
@@ -37,11 +42,11 @@ on:
         required: false
         default: "n/a"
       mode:
-        description: "observe mode — only \"observe\" is implemented by this build; any other value fails closed"
+        description: "observe mode — \"observe\" or \"mint-dry\" (any other value fails closed)"
         required: false
         default: "observe"
       head_sha_override:
-        description: "reserved for a future mode=mint-dry sibling unit — unused by mode=observe"
+        description: "for mode=mint-dry: override SHA to mint against (unused by mode=observe)"
         required: false
         default: ""
 
