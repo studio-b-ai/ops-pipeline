@@ -179,6 +179,26 @@ export interface AuthorityTimelineItem {
    *  this field and makes every staleness decision from `position` (timeline order),
    *  never a timestamp comparison (doc §3.1 item 3 — unchanged by this addition). */
   createdAt?: string;
+  /**
+   * Rollout step 5 (ops-pipeline#190, "patch-id binds not sha"): the commit sha for
+   * PULL_REQUEST_COMMIT (`commit.oid`) / HEAD_REF_FORCE_PUSHED (`afterCommit.oid`)
+   * items — used ONLY to build the box-patch-id refresh-sha set below (`unrefreshedShas`).
+   * Absent for every other item type, and absent for these two types on a timeline
+   * fetched before this field existed (an older cached fixture, a test literal) — an
+   * absent oid on an in-scope item is NOT "no sha", it's "can't prove which sha", and
+   * `patchIdKeeps` (below) fails closed on it rather than treating it as refreshed.
+   */
+  oid?: string;
+  /**
+   * Rollout step 5: only meaningful for LABELED — the GraphQL `databaseId` of the
+   * LabeledEvent itself (distinct from `position`, which is this array's own index,
+   * not a GitHub-assigned id). Used by `box-patch-id.ts`'s `readBoxPatchIdCheckRuns`
+   * to select the recorded patch-id that belongs to THIS labeling, never a stale one
+   * left over from an earlier box/unbox cycle on the same PR (doc "a re-box must not
+   * poison the PR forever"). Absent on older fixtures — treated the same as "can't
+   * select a specific record", never a wildcard match.
+   */
+  databaseId?: number;
 }
 
 export interface AuthorityInput {
@@ -215,31 +235,76 @@ export interface AuthorityInput {
    */
   boxPatchId?: BoxPatchIdObserveContext;
   /**
-   * OBSERVE-ONLY THIS LAP. Defaults to false. No branch in `evaluateLabelAuthority`
-   * reads this to change the returned `AuthorityVerdict` yet — it exists on this
-   * interface now so a later rung (rollout step 5) is a call-site change, not another
-   * signature change. Read only for the observe-only log line's own wording below.
+   * ROLLOUT STEP 5 (ops-pipeline#190; ruling "the box binds to the patch-id, not the
+   * sha"): true makes the Step 3 staleness gate below CONSULT `input.boxPatchId` and
+   * keep an otherwise-stale label authorized when the patch-id predicate agrees
+   * (`patchIdKeeps`, below). Defaults to false, which reproduces rollout step 3's
+   * observe-only behavior exactly (log only, verdict unchanged).
+   *
+   * ONLY the box/train pair may ever be passed `true` here (amendment 3) — the
+   * queued-override pair (`QUEUED_LABEL_PAIR`) and the human-review receipt pair
+   * (`{ready: REVIEWED_LABEL, hold: "hold"}`) must always pass `false` or omit this
+   * field. `evaluateLabelAuthority` below defends this with a same-lap assertion
+   * (`staleOverridden` can only be true when `isTrainPair`) rather than trusting every
+   * call site to get it right — a caller bug here is a live merge-authority bypass,
+   * not a cosmetic mistake, so it fails LOUD (throws) rather than closed-but-silent.
    */
   boxPatchIdWins?: boolean;
 }
 
 /**
- * The two ids `evaluateLabelAuthority` compares, log-only, at the Step 3 staleness
- * gate this lap. See `AuthorityInput.boxPatchId`. Mirrors `BoxPatchIdRecord.patchId`
- * (scripts/lib/box-patch-id.ts) without importing that module — this file's own
- * doctrine keeps each `scripts/lib/*.ts` file's dependency surface independently
- * readable (see this file's `gh()` below), and the two id strings need no shared
- * runtime code, only the same `bp2:...` format.
+ * Rollout step 5's box-patch-id compute-failure taxonomy, log-only text mirrored from
+ * `BoxPatchIdRefusalReason` (scripts/lib/box-patch-id.ts) WITHOUT importing that
+ * module (this file's own doctrine — see `BoxPatchIdObserveContext` below). Every
+ * member here must keep the exact same string as its box-patch-id.ts counterpart so
+ * the two can be compared/logged interchangeably without a translation table.
+ */
+export type BoxPatchIdComputeFailureReason = "box-patch-id-uncomputable" | "box-patch-id-unreadable" | "box-patch-id-missing";
+
+/**
+ * The ids/state `evaluateLabelAuthority` reads at the Step 3 staleness gate. Rollout
+ * step 3 shipped this log-only; rollout step 5 makes it load-bearing when
+ * `input.boxPatchIdWins` is true (see that field's doc). Mirrors
+ * `BoxPatchIdRecord`/`BoxPatchIdVerdict` (scripts/lib/box-patch-id.ts) without
+ * importing that module — this file's own doctrine keeps each `scripts/lib/*.ts`
+ * file's dependency surface independently readable (see this file's `gh()` below),
+ * and this shape needs no shared runtime code, only the same `bp2:...` format and
+ * refusal-reason spellings.
  */
 export interface BoxPatchIdObserveContext {
   /** The bp2 patch-id minted for the authorizing LabeledEvent, if one was ever
-   *  recorded. Absent means "no observation available" (e.g. minted before this
-   *  rollout step shipped, or the key-tag state differs) — never treated as a
-   *  mismatch on its own. */
+   *  recorded AND `failure` below is undefined. Absent with `failure` also undefined
+   *  means grandfathering (amendment 6): no record exists for the CURRENT LabeledEvent
+   *  — never a mismatch, never a failure, just nothing to compare against yet. Absent
+   *  with `failure` set means a record WAS found but could not be trusted (see
+   *  `failure`) — a genuine compute failure, never conflated with "no record". */
   recordedPatchId?: string;
   /** The bp2 patch-id computed fresh against the CURRENT head, against the same base
-   *  used to mint `recordedPatchId` (`mintBoxPatchId`, scripts/lib/box-patch-id.ts). */
-  currentPatchId: string;
+   *  used to mint `recordedPatchId` (`mintBoxPatchId`, scripts/lib/box-patch-id.ts).
+   *  Absent whenever `failure` is set (the current id itself was uncomputable) —
+   *  never a placeholder empty string. */
+  currentPatchId?: string;
+  /**
+   * Amendment 7 ("do not encode a compute failure as recordedPatchId: undefined"):
+   * set whenever EITHER side of the comparison could not be trusted — a truncated or
+   * oid-incomplete timeline (amendment 6), an unreadable/ambiguous recorded check run,
+   * or an uncomputable current mint (a `.gitattributes`-touching diff, a git failure).
+   * `patchIdKeeps` below is false whenever this is set, REGARDLESS of what
+   * `recordedPatchId`/`currentPatchId` happen to hold — a failure is never papered
+   * over by a coincidental id match. Printed verbatim in the log line.
+   */
+  failure?: BoxPatchIdComputeFailureReason;
+  /**
+   * The recorded record's own `refreshShas` list (`BoxPatchIdRecord.refreshShas`,
+   * scripts/lib/box-patch-id.ts) — every head sha the record has been refreshed to
+   * cover, starting with the sha it was minted against. Used alongside the timeline's
+   * post-label commit/force-push `oid`s (amendment 6) to compute `unrefreshedShas`
+   * below: any post-label sha NOT in this list means a real code change (or an
+   * unrefreshed branch update) sits between the label and the current head, and
+   * `patchIdKeeps` fails closed rather than trust a patch-id computed against a base
+   * the record was never actually refreshed onto.
+   */
+  refreshShas?: readonly string[];
 }
 
 // ───────────────────────────── verdict ─────────────────────────────
@@ -255,7 +320,22 @@ export type AuthorityRefusalReason =
 
 export type AuthorityVerdict =
   | { authorized: false; reason: AuthorityRefusalReason; detail: string }
-  | { authorized: true; authorizingEvent: { actorLogin: string; position: number; label?: string } };
+  | {
+      authorized: true;
+      authorizingEvent: {
+        actorLogin: string;
+        position: number;
+        label?: string;
+        /** Rollout step 5 (amendment 8): the authorizing LabeledEvent's GraphQL
+         *  `databaseId`, when the timeline fetch provided one — lets a caller (e.g.
+         *  `box-patch-id.ts`'s `readBoxPatchIdCheckRuns`) select the ONE recorded
+         *  box-patch-id record that belongs to THIS labeling, never a stale record
+         *  left over from an earlier box/unbox cycle. Absent on older fixtures/test
+         *  literals that predate this field — never a wildcard, callers must treat
+         *  absent the same as "can't scope the selection". */
+        databaseId?: number;
+      };
+    };
 
 /**
  * The narrowed shape of an `AuthorityVerdict` specifically for `reason: "stale-label"`
@@ -312,6 +392,16 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
   const ALIASES = input.labels?.readyAliases ?? (input.labels === undefined ? TRAIN_READY_ALIASES : []);
   const READY_SPELLINGS = [READY, ...ALIASES];
   const SPELLING_NOTE = ALIASES.length > 0 ? ` (or the transition alias ${ALIASES.map((a) => `\`${a}\``).join(", ")})` : "";
+  // Rollout step 5 (amendment 3): object-IDENTITY check, never a string/shape
+  // comparison — `TRAIN_LABEL_PAIR` and `QUEUED_LABEL_PAIR` are structurally
+  // IDENTICAL (`{ready, hold, readyAliases}` with the same field names), so only
+  // reference equality (or the `undefined`-defaults-to-train convention every
+  // existing caller already relies on) can tell them apart. This is the ONLY gate
+  // standing between "patch-id-wins" and every non-box call site in this file
+  // (`QUEUED_LABEL_PAIR` at the queued-override call sites, the ad-hoc
+  // `{ready: REVIEWED_LABEL, hold: "hold"}` pair at the human-review-receipt call
+  // site) — see the defensive throw at the bottom of Step 3 below.
+  const isTrainPair = input.labels === undefined || input.labels === TRAIN_LABEL_PAIR;
 
   // ── Step 1: label state, read DIRECTLY from currentLabels (no timeline dependency
   // at all) — checked first because it's the cheapest possible check and because
@@ -417,28 +507,91 @@ export function evaluateLabelAuthority(input: AuthorityInput): AuthorityVerdict 
       item.position > currentApplier!.position,
   );
   if (staleItem) {
-    // OBSERVE-ONLY (ops-pipeline#190 rollout step 3 — see AuthorityInput.boxPatchId):
-    // logs what the patch-id predicate WOULD decide here, never returns it. The
-    // `return` below this block is unconditional and unchanged regardless of what
-    // this branch logs or whether `input.boxPatchId` is even present.
+    // ROLLOUT STEP 5 (ops-pipeline#190; ruling "the box binds to the patch-id, not the
+    // sha"): two DELIBERATELY separate predicates.
+    //   `patchIdAgrees` — the same cheap, direct id-equality rollout step 3 ever
+    //     computed (kept byte-for-byte so its existing "KEEP"/"STRIP" log wording and
+    //     the tests asserting on it stay meaningful) — display-only, NEVER load-bearing.
+    //   `patchIdKeeps` — the amendment-6 fail-closed gate actually consulted below to
+    //     decide `staleOverridden`: agrees AND no compute `failure` AND every post-label
+    //     sha is PROVABLY accounted for in the record's `refreshShas`. A caller that
+    //     never supplies `refreshShas`/`oid` data (every pre-existing observe-only test
+    //     fixture, which predates rollout step 5) is `unprovable` by construction and
+    //     `patchIdKeeps` is always false for it — reproducing "verdict unchanged" for
+    //     every such caller without a single line of test-fixture surgery.
+    let patchIdAgrees = false;
+    let patchIdKeeps = false;
+    let logSuffix = "no boxPatchId observation context given";
+    // Logging (and the comparison itself) stays scoped to callers that actually pass
+    // an observation — an absent `boxPatchId` means the caller never asked, not "asked
+    // and got a STRIP", so it must produce neither a log line nor a decision (matches
+    // rollout step 3's original inert behavior for these callers, verbatim).
     if (input.boxPatchId) {
-      const { recordedPatchId, currentPatchId } = input.boxPatchId;
-      const patchIdAgrees = recordedPatchId !== undefined && recordedPatchId === currentPatchId;
-      console.error(
-        `[box-patch-id observe-only] stale-label at position ${staleItem.position} ` +
-          `(recorded=${recordedPatchId ?? "none"}, current=${currentPatchId}): the patch-id predicate would ` +
-          `${patchIdAgrees ? "KEEP" : "STRIP"} this label — boxPatchIdWins=${input.boxPatchIdWins ?? false}, ` +
-          `verdict unchanged this lap.`,
+      const { recordedPatchId, currentPatchId, failure, refreshShas } = input.boxPatchId;
+      patchIdAgrees = recordedPatchId !== undefined && currentPatchId !== undefined && recordedPatchId === currentPatchId;
+      const postLabelItems = timeline.filter(
+        (item) => (item.type === "PULL_REQUEST_COMMIT" || item.type === "HEAD_REF_FORCE_PUSHED") && item.position > currentApplier!.position,
+      );
+      // Amendment 6 ("fail closed when the refresh-shas leg cannot see"):
+      // `AuthorityTimelineItem.oid` is absent on fixtures/fetches that predate rollout
+      // step 5, and `truncated` (refused earlier in this function, Step 0 — repeated
+      // here defensively, this predicate must never rely on a refusal elsewhere to stay
+      // safe) means an EARLIER post-label item could be missing from `timeline`
+      // entirely. Either case means this predicate cannot PROVE every post-label sha
+      // was refreshed, so it must never read that as "nothing to refresh" —
+      // `unrefreshedShas` is populated with a literal `<unprovable>` marker per missing
+      // item rather than staying empty, so an empty array can only ever mean "provably
+      // nothing outstanding", never "couldn't check".
+      const unprovable = truncated || postLabelItems.some((item) => item.oid === undefined);
+      const unrefreshedShas = unprovable
+        ? postLabelItems.map((item) => item.oid ?? "<unprovable>")
+        : postLabelItems.filter((item) => !(refreshShas ?? []).includes(item.oid!)).map((item) => item.oid!);
+      patchIdKeeps = failure === undefined && !unprovable && patchIdAgrees && unrefreshedShas.length === 0;
+      logSuffix =
+        `recorded=${recordedPatchId ?? "none"}, current=${currentPatchId ?? "none"}` +
+        (failure !== undefined ? `, failure=${failure}` : "") +
+        `, unrefreshedShas=[${unrefreshedShas.join(", ")}]`;
+    }
+    // Amendment 3 ("only the box pair may carry the flag"): a caller bug that passes
+    // `boxPatchIdWins: true` alongside a non-train `labels:` pair (`QUEUED_LABEL_PAIR`,
+    // the `reviewed` receipt pair) is a live merge-authority-scoping bug, not a
+    // cosmetic one — fail LOUD (throw) rather than silently do the right thing, so the
+    // bug surfaces at the call site that introduced it instead of staying invisible
+    // forever because `patchIdKeeps` also happened not to fire that lap.
+    const staleOverridden = (input.boxPatchIdWins ?? false) && patchIdKeeps;
+    if (staleOverridden && !isTrainPair) {
+      throw new Error(
+        "evaluateLabelAuthority: boxPatchIdWins produced an override for a non-train label pair — this must never " +
+          "happen (amendment 3: only the box/train pair may carry the patch-id-wins flag); refusing to return a " +
+          "verdict rather than risk merge authority leaking onto the queued-override or human-review-receipt pairs.",
       );
     }
-    return {
-      authorized: false,
-      reason: "stale-label",
-      detail: `a ${staleItem.type} event at position ${staleItem.position} sits AFTER the authorizing ${READY} LabeledEvent at position ${currentApplier.position} (applied by "${actorLogin}") — the code changed after authorization was granted.`,
-    };
+    if (input.boxPatchId) {
+      console.error(
+        `[box-patch-id observe-only] stale-label at position ${staleItem.position} (${logSuffix}): the patch-id ` +
+          `predicate would ${patchIdAgrees ? "KEEP" : "STRIP"} this label — boxPatchIdWins=${input.boxPatchIdWins ?? false}, ` +
+          `verdict ${staleOverridden ? "OVERRIDDEN (kept)" : "stale-label"}.`,
+      );
+      if (staleOverridden) {
+        console.error(
+          `[box-patch-id] kept: stale-label at position ${staleItem.position} overridden by patch-id agreement ` +
+            `(${logSuffix}) — authorizing ${READY} LabeledEvent at position ${currentApplier.position} still governs.`,
+        );
+      }
+    }
+    if (!staleOverridden) {
+      return {
+        authorized: false,
+        reason: "stale-label",
+        detail: `a ${staleItem.type} event at position ${staleItem.position} sits AFTER the authorizing ${READY} LabeledEvent at position ${currentApplier.position} (applied by "${actorLogin}") — the code changed after authorization was granted.`,
+      };
+    }
   }
 
-  return { authorized: true, authorizingEvent: { actorLogin, position: currentApplier.position, label: currentApplier.label } };
+  return {
+    authorized: true,
+    authorizingEvent: { actorLogin, position: currentApplier.position, label: currentApplier.label, databaseId: currentApplier.databaseId },
+  };
 }
 
 // ───────────────────────────── revalidate-drift comparator (doc §3.1 step 7) ─────────────────────────────

@@ -140,7 +140,24 @@ import {
   type AuthorityTimelineItem,
   type AuthoritySnapshot,
   type StaleLabelAuthorityVerdict,
+  type AuthorityInput,
 } from "./lib/label-authority.js";
+// ops-pipeline#190 rollout step 5 ("the box binds to the patch-id, not the sha") —
+// read side (buildBoxPatchIdContext, via buildTrainAuthorityPatchIdFields below) and
+// write side (refreshBoxPatchId, via refreshBoxPatchIdAfterUpdateBranch below).
+// NOT imported from ./lib/label-authority.js — box-patch-id.ts is a deliberately
+// independent file (see that file's own BoxPatchIdContext doc comment); this repo's
+// established doctrine (label-authority.ts's own header) is that scripts/lib/*.ts
+// files mirror each other's shapes without importing one another.
+import {
+  BOX_PATCH_ID_CHECK_NAME,
+  boxPatchIdKeyState,
+  buildBoxPatchIdContext,
+  readBoxPatchIdCheckRuns,
+  refreshBoxPatchId,
+  type CheckRunLike,
+  type GitCommandRunner,
+} from "./lib/box-patch-id.js";
 
 const REVIEW_MODEL = "claude-sonnet-5";
 const REVIEW_MAX_TOKENS = 512;
@@ -178,6 +195,14 @@ interface PrFile {
   path: string;
 }
 
+interface PrHeadRepoOwner {
+  login: string;
+}
+
+interface PrHeadRepo {
+  name: string;
+}
+
 interface PrJson {
   author: PrAuthor;
   labels: PrLabel[];
@@ -203,14 +228,281 @@ interface PrJson {
    *  detects that silent truncation and fails closed instead of classifying an
    *  incomplete file list as safe. */
   changedFiles: number;
+  /** Rollout step 5 (box-patch-id): who the PR's head commits actually live on —
+   *  mintBoxPatchId's `headRepo` must name the FORK a cross-repo PR's commits sit
+   *  on, never assume same-repo. Both null when the fork has been deleted (GitHub's
+   *  own documented behavior for that case) — headRepoOf() below treats that as
+   *  "cannot determine headRepo" and callers omit boxPatchId entirely rather than
+   *  guess `repo` (Rule #4). */
+  headRepositoryOwner: PrHeadRepoOwner | null;
+  headRepository: PrHeadRepo | null;
 }
 
 function fetchPr(repo: string, pr: number): PrJson {
   const out = gh([
     "pr", "view", String(pr), "--repo", repo,
-    "--json", "author,labels,state,isDraft,mergeStateStatus,additions,deletions,headRefOid,baseRefName,statusCheckRollup,files,changedFiles",
+    "--json",
+    "author,labels,state,isDraft,mergeStateStatus,additions,deletions,headRefOid,baseRefName,statusCheckRollup,files,changedFiles,headRepositoryOwner,headRepository",
   ]);
   return JSON.parse(out) as PrJson;
+}
+
+/** See PrJson.headRepositoryOwner/headRepository doc comment above. */
+function headRepoOf(prJson: PrJson): string | undefined {
+  if (!prJson.headRepositoryOwner || !prJson.headRepository) return undefined;
+  return `${prJson.headRepositoryOwner.login}/${prJson.headRepository.name}`;
+}
+
+// ───────────────────────────── box-patch-id wiring (ops-pipeline#190 rollout step 5) ─────────────────────────────
+//
+// PLAN DEVIATION (flagged in this PR's body): a `GATE_PATCH_ID_WINS=true` env var
+// gates this, not a new `--patch-id-wins` CLI flag — automerge-args.ts is explicitly
+// out of this unit's scope (plan item D). Read once at module load so a single
+// process's behavior cannot change mid-sweep. Defaults false, reproducing rollout
+// step 3's observe-only behavior exactly everywhere this var is unset (every real
+// environment today).
+const GATE_PATCH_ID_WINS = process.env.GATE_PATCH_ID_WINS === "true";
+
+/**
+ * REST-sourced replacement for AuthorityTimelineItem.databaseId, which
+ * fetchAuthorityTimeline (label-authority.ts) never populates — confirmed by reading
+ * that function's full return-object construction: GitHub's GraphQL schema exposes
+ * no databaseId on LabeledEvent (the same finding scripts/box-patch-id-labeled.ts
+ * documents from its own production crash, run 35523361685, PR #536). Mirrors that
+ * file's private fetchLabelEventDbId, duplicated here (not imported — that symbol
+ * isn't exported, and box-patch-id-labeled.ts is outside this unit's scope) with two
+ * deliberate differences: this NEVER throws on "not found" — a PR whose current
+ * `box` predates rollout step 3, or was applied by a gate-authorized actor
+ * box-patch-id-labeled.ts skips minting for, is a normal, expected case
+ * (amendment 6 grandfathering: evaluateLabelAuthority's own Step 2 is the true
+ * source of truth for whether an authorizing event exists at all) — this returns
+ * undefined for it. A genuine API/network failure still throws and propagates into
+ * evaluateTrainReadyInner's / evaluate()'s existing fail-closed handling — never
+ * guessed past (Rule #4).
+ */
+export function fetchCurrentBoxLabelEventDbId(repo: string, prNumber: number, labelName: string): number | undefined {
+  const out = gh([
+    "api",
+    `repos/${repo}/issues/${prNumber}/events?per_page=100`,
+    "--paginate",
+    "--jq",
+    '.[] | select(.event == "labeled") | "\\(.id) \\(.label.name)"',
+  ]);
+  const lines = out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const sp = lines[i].indexOf(" ");
+    if (sp < 0) continue;
+    const id = Number(lines[i].slice(0, sp));
+    const name = lines[i].slice(sp + 1);
+    if (name === labelName && Number.isSafeInteger(id) && id > 0) return id;
+  }
+  return undefined;
+}
+
+/**
+ * No existing check-runs READ helper exists anywhere in this codebase (only
+ * scripts/box-patch-id-labeled.ts's POST-only postCheckRun) — new for this unit.
+ * Mirrors that file's `--paginate`/`--jq` convention (Rule confirmed live earlier
+ * this session): `--jq` applies its filter to each page independently and
+ * `--paginate` concatenates the results, so this yields one JSON object per line
+ * across all pages.
+ */
+export function fetchCheckRuns(repo: string, sha: string): CheckRunLike[] {
+  const out = gh([
+    "api",
+    `repos/${repo}/commits/${sha}/check-runs?per_page=100`,
+    "--paginate",
+    "--jq",
+    ".check_runs[] | {name: .name, output: {text: .output.text}}",
+  ]);
+  return out
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .map((l) => JSON.parse(l) as CheckRunLike);
+}
+
+/**
+ * Composes rollout step 5's READ side for the three evaluateLabelAuthority call
+ * sites in evaluateTrainReadyInner (the ONLY call sites authorized to ever receive
+ * boxPatchIdWins: true — amendment 3; both already omit `labels`, which satisfies
+ * evaluateLabelAuthority's own isTrainPair guard for free).
+ *
+ * ⚠️ DESIGN DECISION REQUIRING REVIEWER CONFIRMATION (this PR's #1 open finding —
+ * see PR body): ships with `repoDir`/`runner` UNSET below. mintBoxPatchId (called
+ * inside buildBoxPatchIdContext) requires a real local git checkout of the TARGET
+ * repo/PR being evaluated (its own doc comment: "Required when `runner` is omitted
+ * — the scratch clone the caller already made (Rule #466)"). This workflow
+ * (.github/workflows/squasher-automerge.yml) checks out ONLY ops-pipeline's OWN
+ * `main` (actions/checkout@v5, ref: main) — it never has a local checkout of the
+ * repo/PR this function is evaluating, which is frequently a DIFFERENT repo
+ * entirely (this is a reusable, cross-repo gate). Confirmed via exhaustive grep
+ * this session: pr-automerge-gate.ts has zero pre-existing local git usage, and no
+ * cross-repo scratch-clone mechanism exists anywhere in this codebase to reuse.
+ * Adding one (network clone of an arbitrary third-party repo, on every fleet-sweep
+ * gate evaluation, using the gate's own credentials) is a genuinely new capability
+ * with real security/cost/latency tradeoffs that is NOT named in this unit's plan
+ * (Files A-I) or any of its 17 amendments — building it unreviewed, under a single
+ * pass, for a flag that defaults off, would be the "improvement nobody asked for"
+ * Rule #1 forbids, not scope discipline (Rule #28).
+ *
+ * Net effect: every call below resolves through buildBoxPatchIdContext's mint step
+ * to the "box-patch-id-uncomputable" refusal branch. This is SAFE — fail-closed,
+ * exactly amendment 6/7's designed behavior for a compute failure — but means the
+ * patch-id-agrees "keep anyway" upside cannot fire in production yet even with
+ * GATE_PATCH_ID_WINS=true (Rule #464: presumed inert until a follow-up adds real
+ * git access and a planted positive-control firing proves it).
+ *
+ * `repoDir`/`runner` are accepted as OPTIONAL trailing parameters purely so this
+ * function stays testable end-to-end (a test can inject a fake `GitCommandRunner`
+ * and assert a real computed patch-id comes back) without changing production
+ * behavior one bit: no call site in this file passes either argument, so every real
+ * invocation still resolves exactly the "box-patch-id-uncomputable" branch described
+ * above until the cross-repo checkout gap this PR's title flags is closed.
+ */
+export function buildTrainAuthorityPatchIdFields(
+  repo: string,
+  pr: number,
+  headSha: string,
+  headRepo: string | undefined,
+  baseRef: string,
+  changedPaths: readonly string[],
+  repoDir?: string,
+  runner?: GitCommandRunner,
+): Pick<AuthorityInput, "boxPatchId" | "boxPatchIdWins"> {
+  if (headRepo === undefined) {
+    // Fork deleted (GitHub's own documented behavior for headRepository turning
+    // null) — cannot safely know where the head commits live; omit rather than guess.
+    return { boxPatchId: undefined, boxPatchIdWins: GATE_PATCH_ID_WINS };
+  }
+  const currentLabelEventDbId = fetchCurrentBoxLabelEventDbId(repo, pr, QUEUED_LABEL);
+  if (currentLabelEventDbId === undefined) {
+    return { boxPatchId: undefined, boxPatchIdWins: GATE_PATCH_ID_WINS };
+  }
+  const checkRuns = fetchCheckRuns(repo, headSha);
+  const context = buildBoxPatchIdContext({
+    checkRuns,
+    currentLabelEventDbId,
+    repo,
+    prNumber: pr,
+    headRepo,
+    headSha,
+    changedPaths: [...changedPaths],
+    // No real call site in this file supplies either — see the doc comment above.
+    repoDir,
+    runner,
+  });
+  return { boxPatchId: context, boxPatchIdWins: GATE_PATCH_ID_WINS };
+}
+
+/** Mirrors scripts/box-patch-id-labeled.ts's postCheckRun exactly (not imported —
+ *  that symbol isn't exported, and the file is outside this unit's scope). conclusion
+ *  is always "neutral" — same reasoning as that file: a "skipped" conclusion on a
+ *  NAMED check run ("box-patch-id") is unclean in this repo's release check unless
+ *  allowlisted, and this repo carries no such row. */
+export function postBoxPatchIdCheckRun(repo: string, headSha: string, title: string, text: string): void {
+  gh([
+    "api",
+    `repos/${repo}/check-runs`,
+    "-X",
+    "POST",
+    "-f",
+    `name=${BOX_PATCH_ID_CHECK_NAME}`,
+    "-f",
+    `head_sha=${headSha}`,
+    "-f",
+    "status=completed",
+    "-f",
+    "conclusion=neutral",
+    "-f",
+    `output[title]=${title}`,
+    "-f",
+    `output[summary]=${title}`,
+    "-f",
+    `output[text]=${text}`,
+  ]);
+}
+
+/**
+ * ROLLOUT STEP 5's WRITE side (amendment 1: "STEP 5 IS INERT AS WRITTEN" — the
+ * update-branch merge commit below changes the PR's head sha, which would silently
+ * orphan any box-patch-id record minted against the PRE-update-branch sha: the
+ * record's own headSha would no longer match the PR's new head, and
+ * readBoxPatchIdCheckRuns has no record on the NEW sha at all — the next
+ * evaluateLabelAuthority call would see "box-patch-id-missing", never a keep).
+ * refreshBoxPatchId (scripts/lib/box-patch-id.ts) is a PURE function — no git access
+ * needed, unlike buildBoxPatchIdContext/mintBoxPatchId above — so this leg works
+ * today regardless of the scratch-clone gap documented there.
+ *
+ * `start` is the monotonic clock (Rule #382 — an instant/zero-elapsed check proves
+ * nothing) captured by the CALLER **before** the update-branch API call itself is
+ * issued, not after it returns — threaded in as a parameter rather than captured
+ * here so the ~60s budget below measures the full async lag from the moment the
+ * rebase was actually requested, matching this file's existing UNKNOWN-
+ * mergeStateStatus retry budget shape (3×20s). Gives up after ~60s from that `start`
+ * and logs, never throws — a refresh is best-effort: worst case the record simply
+ * goes missing on the new sha and the next cycle's read side fails closed via
+ * "box-patch-id-missing", exactly as if update-branch had never been requested.
+ * Gated on GATE_PATCH_ID_WINS so this poll-and-refresh only ever runs in an
+ * environment that opted in.
+ *
+ * PATCH vs. POST (amendment note, mirrors the DESIGN DECISION comment on
+ * `buildTrainAuthorityPatchIdFields` above): GitHub's real "Update a check run"
+ * endpoint (`PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}`) cannot move a
+ * check run's `head_sha` — that field is immutable at creation and isn't in that
+ * endpoint's writable field list (confirmed against GitHub's own Checks API
+ * reference this session, not assumed). A record minted on the pre-update-branch
+ * sha therefore has no existing check run on the NEW sha to PATCH; `postBoxPatchIdCheckRun`
+ * below issues a fresh POST there of NECESSITY, not by omission. This is not a
+ * "double-POST": the call is reached from exactly one `try` in this file (guarded by
+ * the DIRTY+fleet-internal branch above, itself gated on a single synchronous
+ * update-branch call), and fires at most once per invocation — only after the poll
+ * loop has observed a genuine `headRefOid` change away from `oldHeadSha`. The
+ * `newHeadSha === undefined` branch below returns before ever reaching the POST, so a
+ * timed-out poll cannot produce one either.
+ */
+export function refreshBoxPatchIdAfterUpdateBranch(repo: string, pr: number, oldHeadSha: string, start: bigint): void {
+  if (!GATE_PATCH_ID_WINS) return;
+  const currentLabelEventDbId = fetchCurrentBoxLabelEventDbId(repo, pr, QUEUED_LABEL);
+  if (currentLabelEventDbId === undefined) return; // nothing recorded to refresh (amendment 6 grandfathering)
+  const oldCheckRuns = fetchCheckRuns(repo, oldHeadSha);
+  const readVerdict = readBoxPatchIdCheckRuns(oldCheckRuns, process.env.BOX_PATCH_ID_KEY || undefined, currentLabelEventDbId);
+  if (!readVerdict.ok) {
+    console.log(
+      `[info] pr-automerge-gate ${repo}#${pr}: update-branch refresh skipped — no readable box-patch-id record on the ` +
+        `pre-update-branch head (${readVerdict.reason}: ${readVerdict.detail})`,
+    );
+    return;
+  }
+  const maxWaitMs = 60_000;
+  let newHeadSha: string | undefined;
+  while (Number(process.hrtime.bigint() - start) / 1e6 < maxWaitMs) {
+    execFileSync("sleep", ["10"]);
+    const fresh = fetchPr(repo, pr);
+    if (fresh.headRefOid !== oldHeadSha) {
+      newHeadSha = fresh.headRefOid;
+      break;
+    }
+  }
+  const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+  if (newHeadSha === undefined) {
+    console.log(
+      `[warn] pr-automerge-gate ${repo}#${pr}: update-branch refresh gave up after ${Math.round(elapsedMs)}ms (measured from ` +
+        `before the update-branch call) — head sha never changed from ${oldHeadSha.slice(0, 7)}; record NOT refreshed ` +
+        `(next cycle's read fails closed if a new sha ever lands)`,
+    );
+    return;
+  }
+  const refreshed = refreshBoxPatchId(readVerdict.record, newHeadSha);
+  const keyState = boxPatchIdKeyState(refreshed);
+  postBoxPatchIdCheckRun(repo, newHeadSha, `${refreshed.patchId} (${keyState})`, JSON.stringify(refreshed));
+  console.log(
+    `[info] pr-automerge-gate ${repo}#${pr}: box-patch-id refreshed ${oldHeadSha.slice(0, 7)} → ${newHeadSha.slice(0, 7)} ` +
+      `after update-branch (waited ${Math.round(elapsedMs)}ms, measured from before the update-branch call)`,
+  );
 }
 
 /**
@@ -543,9 +835,24 @@ async function evaluate(
   // never a force-push; conflicts leave it DIRTY and the receipt says so). The PR re-runs CI and is re-evaluated when its
   // fingerprint changes (change-driven sweep). Only for fleet-internal — a human's PR is theirs to rebase.
   if (prJson.mergeStateStatus === "DIRTY" && labels.includes(FLEET_INTERNAL_LABEL)) {
+    // Captured BEFORE the update-branch call fires (Rule #382 / amendment note on
+    // refreshBoxPatchIdAfterUpdateBranch below) — the ~60s refresh budget measures
+    // from the moment the rebase was actually requested, not from whenever this
+    // synchronous `gh` call happens to return.
+    const updateBranchStart = process.hrtime.bigint();
     try {
       gh(["api", "-X", "PUT", `repos/${repo}/pulls/${pr}/update-branch`, "-f", `expected_head_sha=${prJson.headRefOid}`]);
       console.log(`[info] pr-automerge-gate ${repo}#${pr}: DIRTY fleet-internal — requested update-branch from base; re-evaluated when CI lands`);
+      try {
+        refreshBoxPatchIdAfterUpdateBranch(repo, pr, prJson.headRefOid, updateBranchStart);
+      } catch (refreshErr) {
+        // Advisory leg (amendment 1) — never let a refresh failure turn a successful
+        // update-branch request into a gate crash. Worst case the record goes missing
+        // on the new sha and the next cycle's read side fails closed on it.
+        console.log(
+          `[warn] pr-automerge-gate ${repo}#${pr}: box-patch-id refresh-after-update-branch failed (non-fatal): ${(refreshErr as Error).message.split("\n")[0]}`,
+        );
+      }
     } catch (e) {
       console.log(`[info] pr-automerge-gate ${repo}#${pr}: DIRTY and update-branch refused (real conflict) — ${(e as Error).message.split("\n")[0]}`);
     }
@@ -1381,6 +1688,14 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     timeline: timelineFetch.timeline,
     authorityLogins,
     truncated: timelineFetch.truncated,
+    ...buildTrainAuthorityPatchIdFields(
+      repo,
+      pr,
+      prJson.headRefOid,
+      headRepoOf(prJson),
+      prJson.baseRefName,
+      prJson.files.map((f) => f.path),
+    ),
   });
 
   if (!verdict.authorized) {
@@ -1420,6 +1735,14 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
         timeline: recheckTimelineFetch.timeline,
         authorityLogins,
         truncated: recheckTimelineFetch.truncated,
+        ...buildTrainAuthorityPatchIdFields(
+          repo,
+          pr,
+          recheckPr.headRefOid,
+          headRepoOf(recheckPr),
+          recheckPr.baseRefName,
+          recheckPr.files.map((f) => f.path),
+        ),
       });
       if (recheckVerdict.authorized) {
         const detail =
@@ -1565,6 +1888,14 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     timeline: revalidateTimelineFetch.timeline,
     authorityLogins,
     truncated: revalidateTimelineFetch.truncated,
+    ...buildTrainAuthorityPatchIdFields(
+      repo,
+      pr,
+      revalidatePr.headRefOid,
+      headRepoOf(revalidatePr),
+      revalidatePr.baseRefName,
+      revalidatePr.files.map((f) => f.path),
+    ),
   });
   if (!revalidateVerdict.authorized) {
     const detail =
