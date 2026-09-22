@@ -29,6 +29,12 @@ function runnerFixture(pidHash: string, diffU0: string): GitCommandRunner {
 
 const RUNNER_A = runnerFixture("a".repeat(40), "@@ -1,0 +1,1 @@\n+line A\n");
 const RUNNER_B = runnerFixture("f".repeat(40), "@@ -1,0 +1,1 @@\n+line B (different content)\n");
+const RUNNER_C = runnerFixture("c".repeat(40), "@@ -1,0 +1,1 @@\n+mint-dry probe\n");
+/** Throws at merge-base — the nonexistent-ref path control 5 proves. */
+const RUNNER_NONEXISTENT_REF: GitCommandRunner = (args: string[]) => {
+  if (args[0] === "merge-base") throw new Error("fatal: Not a valid object name nonexistent-ref");
+  throw new Error("unexpected — mint-dry with nonexistent ref should fail at merge-base");
+};
 
 function mintFixture(runner: GitCommandRunner, changedPaths: string[] = ["docs/plants/fixture.md"]): BoxPatchIdRecord {
   const verdict = mintBoxPatchId({
@@ -68,7 +74,7 @@ const BASE_INPUT_FIELDS = {
 describe("observeBoxPatchId", () => {
   // ───── Negative controls first (Rule #322): the two "would obviously read wrong" paths ─────
 
-  it("fails closed on an unsupported mode without reading any check run", () => {
+  it("fails closed on mint-dry when no headShaOverride is provided", () => {
     const result = observeBoxPatchId({
       ...BASE_INPUT_FIELDS,
       mode: "mint-dry",
@@ -76,9 +82,66 @@ describe("observeBoxPatchId", () => {
     });
     expect(result.verdict).toBe("box-patch-id-observe-unsupported-mode");
     expect(result.recordedPatchId).toBeNull();
+    expect(result.headShaOverride).toBeNull();
     expect(result.line).toBe(
       "[box-patch-id observe-only] control=3 repo=studio-b-ai/ops-pipeline pr=900 mode=mint-dry recorded=none current=none verdict=box-patch-id-observe-unsupported-mode unrefreshed=[] moved=[] run=123456",
     );
+  });
+
+  // ───── Mint-dry mode (plan section E, crew mechanic stint #865) ─────
+
+  it("mint-dry: surfaces box-patch-id-uncomputable when pointed at a nonexistent ref (control 5 shape)", () => {
+    const nonexistentSha = "d".repeat(40);
+    const result = observeBoxPatchId({
+      ...BASE_INPUT_FIELDS,
+      mode: "mint-dry",
+      headShaOverride: nonexistentSha,
+      runner: RUNNER_NONEXISTENT_REF,
+      shasWithCheckRuns: shas(),
+    });
+    expect(result.verdict).toBe("box-patch-id-uncomputable");
+    expect(result.recordedPatchId).toBeNull();
+    expect(result.currentPatchId).toBeNull();
+    expect(result.headShaOverride).toBe(nonexistentSha);
+    expect(result.line).toContain(`overridden=${nonexistentSha}`);
+    expect(result.line).toContain("verdict=box-patch-id-uncomputable");
+    expect(result.line).toContain("mode=mint-dry");
+  });
+
+  it("mint-dry: returns kept with the minted patch-id when pointed at a valid ref", () => {
+    const validSha = "b".repeat(40);
+    const result = observeBoxPatchId({
+      ...BASE_INPUT_FIELDS,
+      mode: "mint-dry",
+      headShaOverride: validSha,
+      runner: RUNNER_C,
+      shasWithCheckRuns: shas(),
+    });
+    expect(result.verdict).toBe("kept");
+    expect(result.recordedPatchId).toBeNull(); // never boxed — no recorded check run
+    expect(result.currentPatchId).not.toBeNull();
+    expect(result.currentPatchId).toContain("bp2:");
+    expect(result.headShaOverride).toBe(validSha);
+    expect(result.line).toContain(`overridden=${validSha}`);
+    expect(result.line).toContain("verdict=kept");
+    expect(result.line).toContain("mode=mint-dry");
+  });
+
+  it("mint-dry: never reads recorded check runs (control 5 never boxed — the path would be box-patch-id-missing otherwise)", () => {
+    // Plant a recorded check run on a sha — mint-dry must not read it.
+    const record = mintFixture(RUNNER_A);
+    const overrideSha = "d".repeat(40);
+    const result = observeBoxPatchId({
+      ...BASE_INPUT_FIELDS,
+      mode: "mint-dry",
+      headShaOverride: overrideSha,
+      runner: RUNNER_NONEXISTENT_REF,
+      shasWithCheckRuns: shas(["deadbeef", [recordedCheckRun(record)]]),
+    });
+    // The recorded check run exists but mint-dry never reads it — it goes straight
+    // to mintBoxPatchId with the override, which fails at merge-base.
+    expect(result.verdict).toBe("box-patch-id-uncomputable");
+    expect(result.recordedPatchId).toBeNull();
   });
 
   it("returns box-patch-id-missing when no commit carries a box-patch-id check run", () => {
