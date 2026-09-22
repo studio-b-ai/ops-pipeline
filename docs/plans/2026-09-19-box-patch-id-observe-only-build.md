@@ -41,7 +41,7 @@ step 4 actually plants each one.
 
 | control | planted | required verdict | receipt |
 |---|---|---|---|
-| 1 | a live ops-pipeline pull request behind its base, refreshed by a lap | `kept`, merge pinned to the new head | _(pending — rollout step 4)_ |
+| 1 | a live ops-pipeline pull request behind its base, refreshed by a lap | `kept`, merge pinned to the new head | run [35683125785](https://github.com/studio-b-ai/ops-pipeline/actions/runs/35683125785) · `kept` · check-run neutral · Caveat: partial. The DIRTY trigger was never exercised: the kit's push leg refused because #555 was CLEAN, and a docs-only landing on main makes it BEHIND, never DIRTY. This observe ran against an unchanged base, so the refresh leg was trivial and the verdict is not evidence for the refresh-kept path. |
 | 2 | one changed comment line pushed to a keyed head | `stripped`, path named | run [35676527593](https://github.com/studio-b-ai/ops-pipeline/actions/runs/35676527593) · `stripped` · check-run neutral |
 | 3 | one added line re-indented, whitespace only | `stripped` | run [35677172632](https://github.com/studio-b-ai/ops-pipeline/actions/runs/35677172632) · `stripped` · check-run neutral |
 | 4 | a change landed on the base in a non-adjacent region of the same file | `kept` | _(pending — rollout step 4)_ |
