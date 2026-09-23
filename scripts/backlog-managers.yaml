@@ -81,6 +81,16 @@ repos:
   - repo: "studio-b-ai/toto"
     manager: "Mechanic"
     note: "the cockpit glass — RELEASE leg on via ops#411; nothing live yet (#97 applies the moment it renders)"
+  # 2026-09-23 (Mechanic crew, stint #861) — amplify registered in
+  # squasher-fleet.json with `train: true` (the box door for amplify#69), which
+  # opened the release leg and tripped door-watch-coherence. `manager:` per the
+  # same source the 9/13 rows cite — kits/studio-b.yaml's team-level
+  # `technical: mechanic` (studio-b is amplify's team: amplify.b.studio sits in
+  # the bay's live_surfaces and this stint is team studio-b; NOT invented,
+  # Rule #294).
+  - repo: "studio-b-ai/amplify"
+    manager: "Mechanic"
+    note: "Amplify product repo — RELEASE leg on via stint #861 (ops#564); manager per kits/studio-b.yaml technical: mechanic"
 
 thresholds:
   p0p1_days: 2
