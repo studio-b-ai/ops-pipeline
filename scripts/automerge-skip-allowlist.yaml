@@ -131,6 +131,30 @@ repos:
     - "Slack Alert on Failure"
     - "Slack Recovery Notice"
 
+  # RULING 2026-09-23 (stint #861 — Mechanic crew; incident: amplify#69 carried
+  # Kevin's `box` from 9/16 but the train gate refused it 2026-09-22 23:29Z with
+  # `[train-gate-receipt] repo=studio-b-ai/amplify pr=69 outcome=refused
+  # detail="not merge-ready (state=OPEN isDraft=false ciClean=false
+  # mergeStateStatus=CLEAN)"`, then the change-driven filter skipped it as
+  # "unchanged" every sweep after — GitHub itself called the PR CLEAN while our
+  # ci-rollup leg called it dirty, the radio#1008 shape exactly). amplify was
+  # swept only by the org-wide box leg (outside the fleet registry) and absent
+  # from this file, so it sanctioned NOTHING. Live measurement of #69's real
+  # rollup: every check SUCCESS except "Slack Notification"=SKIPPED.
+  #
+  # Verified structurally unable to run on a pull_request event, read from
+  # amplify's own origin/main .github/workflows/ci.yml (Rule #466 — the
+  # deployed ref, not a checkout):
+  #   Slack Notification   notify-failure job   if: failure() && github.ref == 'refs/heads/main'
+  # A main-only failure notify can never report SUCCESS on a PR head, so
+  # leaving it unsanctioned makes amplify's CI leg permanently inert rather
+  # than protective. The repo's real gates stay fully required via the new
+  # registry row's required_checks ("Build + Test (amplify-engine)",
+  # "Build + Test (amplify-workers)"). Same name + same shape as bolt-wms's
+  # already-sanctioned "Slack Notification".
+  studio-b-ai/amplify:
+    - "Slack Notification"
+
 # RULING 2026-09-02 (amends the ops#235 ruling above; incident: the restart
 # train's 22:18Z first after-hours tick refused studio-b-ai/client-asthetik#359
 # citing these same 5 by-design PR-event skips — "Auto-qualifier (shadow)" is
