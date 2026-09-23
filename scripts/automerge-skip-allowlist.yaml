@@ -131,6 +131,37 @@ repos:
     - "Slack Alert on Failure"
     - "Slack Recovery Notice"
 
+  # RULING 2026-09-23 (stint #861 — Mechanic crew): amplify was never enrolled in
+  # the fleet registry, and its boxed amplify#69 (Kevin's `box`, 2026-09-16) sat
+  # unmerged for a week on TWO converging causes: (a) the sweep reached it only
+  # via the org-wide fallback leg — "org-wide box (repos outside the registry):
+  # 1 — studio-b-ai/amplify#69" logged every tick — fixed by the registry row in
+  # squasher-fleet.json; (b) when the gate DID evaluate it (run 35796899573,
+  # 2026-09-22 23:2xZ), the train path refused:
+  #   [train-gate-receipt] repo=studio-b-ai/amplify pr=69 outcome=refused
+  #     detail="not merge-ready (state=OPEN isDraft=false ciClean=false
+  #     mergeStateStatus=CLEAN)"
+  # — GitHub itself called the PR CLEAN while our ci-rollup leg called it dirty,
+  # the radio#1008 class (studio-b#112 ruling above). Live population probe
+  # (Rule #465: 12 most-recent amplify PRs, #74–#85): "Slack Notification" is
+  # the ONLY conclusion==SKIPPED name in the repo's rollups.
+  #
+  # Independently re-verified as structurally unable to run on a pull_request
+  # event, read from amplify's origin/main .github/workflows/ci.yml (Rule #466
+  # — the deployed ref, not a checkout):
+  #   Slack Notification (job: notify-failure)
+  #     if: failure() && github.ref == 'refs/heads/main'
+  # A failure-conditional, main-only notify job — exactly this file's "failure-
+  # conditional notify jobs" qualifying category, and the same name+shape as
+  # bolt-wms's long-sanctioned entry. This does NOT weaken the Rule #320
+  # protections: amplify's real gates (Build + Test (amplify-engine), Build +
+  # Test (amplify-workers), gitleaks, Deprecated-API lint, Cross-workspace dep
+  # build coverage, Lint script unit tests) stay fully required, and amplify
+  # declares required_checks: "" with docs-comment-only classes, so the stricter
+  # named-checks leg stays fail-closed for any future class widening.
+  studio-b-ai/amplify:
+    - "Slack Notification"
+
 # RULING 2026-09-02 (amends the ops#235 ruling above; incident: the restart
 # train's 22:18Z first after-hours tick refused studio-b-ai/client-asthetik#359
 # citing these same 5 by-design PR-event skips — "Auto-qualifier (shadow)" is

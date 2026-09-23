@@ -213,6 +213,35 @@ describe("committed data file", () => {
     expect(radio).toEqual(["Post-Deploy Smoke", "Slack Alert on Failure", "Slack Recovery Notice"]);
   });
 
+  // ───── stint #861, 2026-09-23: amplify's one by-design PR-event skip ─────
+  // Born from a live defect, not a hypothetical: the 2026-09-22 23:2xZ sweep
+  // refused amplify#69 (Kevin's `box`, GitHub mergeStateStatus=CLEAN) with
+  // `ciClean=false` — amplify had no sanction set, and its rollup carries the
+  // main-only `Slack Notification` notify job (origin/main ci.yml:
+  // `if: failure() && github.ref == 'refs/heads/main'`) as SKIPPED on every PR.
+  // Guards the regression in BOTH directions per Rule #322.
+  it("sanctions amplify's by-design PR-event notification skip (stint #861)", () => {
+    const resolved = loadSanctionedSkips("studio-b-ai/amplify");
+    expect(resolved.has("Slack Notification")).toBe(true);
+  });
+
+  it("NEGATIVE CONTROL: amplify's sanction set never grows past that one name — no real gate is sanctioned", () => {
+    const resolved = loadSanctionedSkips("studio-b-ai/amplify");
+    expect([...resolved]).toEqual(["Slack Notification"]);
+    // amplify's real gates stay required — naming them explicitly so a future
+    // widening of this entry fails loudly here rather than in a live sweep.
+    for (const gate of [
+      "Build + Test (amplify-engine)",
+      "Build + Test (amplify-workers)",
+      "gitleaks / Secret scan (gitleaks, Rule 363)",
+      "Deprecated-API lint",
+      "Cross-workspace dep build coverage",
+      "Lint script unit tests",
+    ]) {
+      expect(resolved.has(gate)).toBe(false);
+    }
+  });
+
   it("NEGATIVE CONTROL: lightsout stays unsanctioned — a repo with zero CI must keep failing closed", () => {
     // ops#405 flipped lightsout on too, but its refusal is CORRECT and is NOT
     // this change's business: it has no .github/workflows at all (GitHub API
