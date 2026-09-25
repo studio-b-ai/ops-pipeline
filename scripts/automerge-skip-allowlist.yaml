@@ -114,6 +114,7 @@ repos:
   #   Post-Deploy Smoke    l.45  if: github.ref == 'refs/heads/main' && github.event_name == 'push'
   #   Slack Alert on Failure l.73 if: failure() && (github.ref == 'refs/heads/main' || github.event_name == 'schedule')
   #   Slack Recovery Notice  l.126 if: success() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+  #   tripwire                  post-merge-tripwire-caller.yml job tripwire (l.18): on pull_request [closed], if: merged == true — structurally SKIPPED on every non-merged PR
   # These are by-design PR-event skips, not absent load-bearing checks: none
   # can ever report SUCCESS on a PR head, so leaving them unsanctioned makes
   # radio's CI leg permanently inert (a fail-closed refusal that no green PR
@@ -130,6 +131,7 @@ repos:
     - "Post-Deploy Smoke"
     - "Slack Alert on Failure"
     - "Slack Recovery Notice"
+    - "tripwire"
 
 # RULING 2026-09-02 (amends the ops#235 ruling above; incident: the restart
 # train's 22:18Z first after-hours tick refused studio-b-ai/client-asthetik#359
