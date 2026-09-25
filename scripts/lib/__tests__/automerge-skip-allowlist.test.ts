@@ -182,19 +182,21 @@ describe("committed data file", () => {
   // ci.yml `if:` conditions pin them to refs/heads/main push) — made radio's
   // CI leg permanently inert. Guards the regression in BOTH directions per
   // Rule #322.
-  it("sanctions radio's three by-design PR-event notification skips (studio-b#112)", () => {
+  it("sanctions radio's four by-design PR-event notification skips (studio-b#112 + stint 914 tripwire)", () => {
     const resolved = loadSanctionedSkips("studio-b-ai/radio");
     expect(resolved.has("Post-Deploy Smoke")).toBe(true);
     expect(resolved.has("Slack Alert on Failure")).toBe(true);
     expect(resolved.has("Slack Recovery Notice")).toBe(true);
+    expect(resolved.has("tripwire")).toBe(true);
   });
 
-  it("NEGATIVE CONTROL: radio's sanction set never grows past those three — no real gate is sanctioned", () => {
+  it("NEGATIVE CONTROL: radio's sanction set never grows past those four — no real gate is sanctioned", () => {
     const resolved = loadSanctionedSkips("studio-b-ai/radio");
     expect([...resolved].sort()).toEqual([
       "Post-Deploy Smoke",
       "Slack Alert on Failure",
       "Slack Recovery Notice",
+      "tripwire",
     ]);
     // radio's real gates stay required — naming them explicitly so a future
     // widening of this entry fails loudly here rather than in a live sweep.
@@ -208,9 +210,9 @@ describe("committed data file", () => {
     }
   });
 
-  it("radio's entry carries the three sanctioned skips (Post-Deploy Smoke, Slack Alert on Failure, Slack Recovery Notice)", () => {
+  it("radio's entry carries the four sanctioned skips (Post-Deploy Smoke, Slack Alert on Failure, Slack Recovery Notice, tripwire)", () => {
     const radio = [...loadSanctionedSkips("studio-b-ai/radio")].sort();
-    expect(radio).toEqual(["Post-Deploy Smoke", "Slack Alert on Failure", "Slack Recovery Notice"]);
+    expect(radio).toEqual(["Post-Deploy Smoke", "Slack Alert on Failure", "Slack Recovery Notice", "tripwire"]);
   });
 
   it("NEGATIVE CONTROL: lightsout stays unsanctioned — a repo with zero CI must keep failing closed", () => {
