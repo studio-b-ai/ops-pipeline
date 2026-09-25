@@ -130,6 +130,7 @@ repos:
     - "Post-Deploy Smoke"
     - "Slack Alert on Failure"
     - "Slack Recovery Notice"
+    - "tripwire"
 
 # RULING 2026-09-02 (amends the ops#235 ruling above; incident: the restart
 # train's 22:18Z first after-hours tick refused studio-b-ai/client-asthetik#359
