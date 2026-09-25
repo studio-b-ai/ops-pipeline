@@ -126,10 +126,26 @@ repos:
   # PRECEDENT: these are the same three job names that were sanctioned
   # for the repo under its former name (webhook-router → radio rename;
   # GitHub redirects the old name).
+  #
+  # RULING 2026-09-25 (radio#1442-1446, stint #914): the post-merge-tripwire
+  # caller (pull_request types: [closed]) registers a "tripwire" check-run
+  # name on every PR event even though its job gates on
+  # `merged == true && has-label 'automerge:code-fix'`.  A close→reopen
+  # cycle leaves a SKIPPED "tripwire" entry in the rollup that never clears
+  # until the next SUCCESS run — a by-design PR-event skip (the job can
+  # never report SUCCESS on an open pull_request), so it belongs here
+  # alongside radio's three ci.yml-main-only notification skips.
+  #
+  # Verified on radio#1442 at 2026-09-25T03:03Z: statusCheckRollup carries
+  # tripwire=SKIPPED (workflow=post-merge-tripwire-caller), triggering the
+  # same ciClean=false refusal this repo's 9/13 ruling fixed for the three
+  # notification jobs.  The tripwire caller was enrolled post-9/13 (added
+  # in the 9/14-9/22 window) — the allowlist was never widened to cover it.
   studio-b-ai/radio:
     - "Post-Deploy Smoke"
     - "Slack Alert on Failure"
     - "Slack Recovery Notice"
+    - "tripwire"
 
 # RULING 2026-09-02 (amends the ops#235 ruling above; incident: the restart
 # train's 22:18Z first after-hours tick refused studio-b-ai/client-asthetik#359
