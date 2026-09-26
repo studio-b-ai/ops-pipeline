@@ -133,6 +133,24 @@ repos:
     - "Slack Recovery Notice"
     - "tripwire"
 
+  # RULING 2026-09-22 (Mechanic stint #861): amplify had no row, so its sanction
+  # set was EMPTY while every PR rollup carries `Slack Notification`=SKIPPED —
+  # the exact radio#1008 defect class (studio-b#112, above). Live receipt at the
+  # 17:31Z fleet sweep: `[train-gate-receipt] repo=studio-b-ai/amplify pr=69
+  # outcome=refused detail="not merge-ready (state=OPEN isDraft=false
+  # ciClean=false mergeStateStatus=CLEAN)"` — GitHub called the PR CLEAN while
+  # our ci-rollup leg called it dirty, and the change-driven filter then pinned
+  # the refusal (fingerprint unchanged ⇒ skipped every sweep since 17:26Z).
+  # Verified skip-by-design from amplify's origin/main ci.yml (Rule #466):
+  #   notify-failure / Slack Notification
+  #     if: failure() && github.ref == 'refs/heads/main'
+  # — a failure-conditional, main-only notify job that can never report SUCCESS
+  # on a PR head. Same name, same shape as bolt-wms's sanctioned entry above.
+  # amplify's real gates (Build + Test (amplify-engine), Build + Test
+  # (amplify-workers), the lint workflows, gitleaks) stay fully required.
+  studio-b-ai/amplify:
+    - "Slack Notification"
+
 # RULING 2026-09-02 (amends the ops#235 ruling above; incident: the restart
 # train's 22:18Z first after-hours tick refused studio-b-ai/client-asthetik#359
 # citing these same 5 by-design PR-event skips — "Auto-qualifier (shadow)" is
