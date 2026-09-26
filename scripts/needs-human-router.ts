@@ -45,6 +45,7 @@ import { railHold, type HoldRail } from "./lib/hold-rail.js";
 import { createAuthorizedReactorChecker } from "./lib/needs-human-authorization.js";
 import { PROBE_MARKER } from "./lib/needs-human-probe-lib.js";
 import {
+  DISPATCH_MARKER,
   HOLD_RECEIPT_MARKER,
   ROUTE_RECEIPT_MARKER,
   hasAnyRouterReceipt,
@@ -242,6 +243,34 @@ function tryApply(apply: () => void, dryRun: boolean): "applied" | "would-apply"
   return dryRun ? "would-apply" : "applied";
 }
 
+// ───────────────────────────── probe dispatch (stint #944 sweep leg) ─────────────────────────────
+
+/**
+ * Dispatches the caller repo's own `needs-human-diagnostic-probe.yml` workflow via
+ * `workflow_dispatch` for the given issue. This is the sweep leg that catches machinery-labeled
+ * issues: the probe's `issues: labeled` trigger only fires on USER-token label events (bot/machinery
+ * labels are suppressed by Actions recursion prevention), so an issue labeled by a bot parks
+ * `no-probe` forever unless the router dispatches the probe explicitly.
+ *
+ * Requires the caller's own ambient GITHUB_TOKEN to carry `actions: write` — a caller without it
+ * gets a failed dispatch (logged, not fatal) and the issue stays `no-probe` unchanged.
+ *
+ * Not metered (#331 ACTION_CAP) — a workflow dispatch is not an issue mutation.
+ */
+function dispatchProbe(repo: string, issueNumber: number): boolean {
+  try {
+    gh([
+      "workflow", "run", "needs-human-diagnostic-probe.yml",
+      "--repo", repo,
+      "-f", `issue_number=${issueNumber}`,
+    ]);
+    return true;
+  } catch (err) {
+    console.error(`[router] dispatchProbe ${repo}#${issueNumber}: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
 // ───────────────────────────── main pass ─────────────────────────────
 
 interface IssueRow {
@@ -282,7 +311,7 @@ async function runMainPass(repo: string, dryRun: boolean, actionedThisRun: Set<n
 
     const row: IssueRow = { number: issue.number, title: truncate(issue.title, 70) };
     const labelNames = (issue.labels ?? []).map((l) => l.name);
-    await logMainOutcome(row, disposition, holdReceiptPresent, dryRun, actionedThisRun, repo, labelNames);
+    await logMainOutcome(row, disposition, holdReceiptPresent, dryRun, actionedThisRun, repo, labelNames, trusted);
   }
 
   return dispositions;
@@ -296,6 +325,7 @@ async function logMainOutcome(
   actionedThisRun: Set<number>,
   repo: string,
   labels: readonly string[],
+  trusted: IssueComment[],
 ): Promise<void> {
   const head = `  #${issue.number} "${issue.title}"`;
 
@@ -317,9 +347,36 @@ async function logMainOutcome(
       // human's explicit action.
       console.log(`${head}  skip-already-routed`);
       return;
-    case "no-probe":
-      console.log(`${head}  no-probe (no findings comment yet — nothing to route on)`);
+    case "no-probe": {
+      // ops-pipeline#944 (stint #944, 2026-09-26): machinery-labeled issues never get a
+      // findings comment because the probe's `issues: labeled` trigger only fires on USER-token
+      // label events — when a bot/machinery adds `needs-human`, the event is suppressed and
+      // the issue parks `no-probe` forever. The sweep leg dispatches the probe explicitly via
+      // `workflow_dispatch` (Rule #447: fire the trigger, don't wait for cron).
+      //
+      // Dedup: the dispatch marker comment prevents re-dispatch on subsequent runs. If the
+      // probe fails (e.g. WIF 401, op#575), no findings comment appears — the issue stays
+      // `no-probe` but the marker prevents re-dispatch. Recovery is manual (a human reopens
+      // or closes the issue once the WIF is fixed). Server-side label re-verify + marker
+      // dedup is #182; the probe's own Gate 1 + PROBE_MARKER still fires independently on
+      // the dispatched run.
+      const dispatchMarkerComment = findLast(trusted, DISPATCH_MARKER);
+      if (dispatchMarkerComment) {
+        console.log(`${head}  no-probe (probe already dispatched on this run — awaiting findings)`);
+        return;
+      }
+      const dispatched = dispatchProbe(repo, issue.number);
+      if (dispatched) {
+        const result = tryApply(() => {
+          commentIssue(repo, issue.number,
+            `${DISPATCH_MARKER}\n🤖 Probe dispatched via workflow_dispatch — awaiting diagnostic findings. _(ops-pipeline#944 router sweep leg)_`);
+        }, dryRun);
+        logResult(head, "no-probe (dispatched probe workflow + posted dispatch marker)", result);
+      } else {
+        console.log(`${head}  no-probe (dispatch failed — likely no probe workflow or missing actions:write — parking)`);
+      }
       return;
+    }
     case "close-rejected": {
       const result = tryApply(() => closeIssue(repo, issue.number, closeRejectedReceipt()), dryRun);
       logResult(head, "close-rejected (authorized 👎, pre-routing)", result);
