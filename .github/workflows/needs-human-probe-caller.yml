@@ -1,0 +1,42 @@
+name: Needs-human diagnostic probe
+
+# ops-pipeline Thin caller for its own reusable needs-human-probe.yml (house
+# pattern, mirrors bolt-wms's caller). When the bug-squasher escalates an issue
+# with the `needs-human` label, dispatch the read-only diagnostic probe: ONE
+# findings comment (hypothesis + quoted evidence + fix-layer recommendation +
+# NEEDS-KEVIN flag) so the human arrives pre-briefed. The reusable workflow lives
+# in this same repo (studio-b-ai/ops-pipeline) alongside the probe script
+# (scripts/needs-human-probe.ts); this thin caller routes the event to it.
+#
+# Trigger: `issues: labeled` fires from USER-token label applications (the
+# squasher CCR session or a human), which Actions recursion prevention never
+# suppresses — the ops-pipeline#23 lesson applied at design time. The probe's
+# own comment is posted with GITHUB_TOKEN and can never re-trigger anything.
+#
+# The probe re-verifies the label and dedups via a marker comment server-side,
+# so a manual dispatch against the wrong issue no-ops loudly instead of
+# commenting (Rule #182: re-probe at evaluation time).
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Escalated issue number to probe immediately (Rule #447: run-now, not cron)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  issues: write
+  id-token: write   # WIF (Kevin 9/06) — reusable probe federates its Claude review
+
+jobs:
+  probe:
+    name: "Dispatch read-only diagnostic probe"
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'needs-human'
+    uses: studio-b-ai/ops-pipeline/.github/workflows/needs-human-probe.yml@main
+    with:
+      repo: ${{ github.repository }}
+      issue_number: ${{ inputs.issue_number || github.event.issue.number }}
