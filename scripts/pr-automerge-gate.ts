@@ -525,6 +525,91 @@ function mergePr(repo: string, pr: number, headRefOid: string): void {
   gh(["pr", "merge", String(pr), "--repo", repo, "--squash", "--match-head-commit", headRefOid]);
 }
 
+/**
+ * stint #951 / L2D-04 (2026-09-26): GitHub answers a SHA-pinned squash merge with
+ * "Base branch was modified. Review and try the merge again." when the base moved
+ * between GitHub's mergeability snapshot and the merge call. On chassis, main moves
+ * every minute (the stint flusher) and every 15 min (the auto-push), so the snapshot
+ * is stale by construction and a boxed PR waited a full sweep cycle (~1h) per failed
+ * attempt (chassis#917: boxed 16:59Z, merge failed 17:24Z, merged 18:31Z on the NEXT
+ * run — an in-run retry merges at the first failure instead). GitHub's own error
+ * instructs the retry; the failure is operational, not a gate signal.
+ *
+ * Bounded IN-RUN retry, fail-closed at every step:
+ *   - ONLY this exact error retries — every other failure keeps the old
+ *     NOT-retried-this-run contract (Rules #109/#161).
+ *   - The head sha is re-read before every retry; a moved head ABORTS — that is the
+ *     real TOCTOU race `--match-head-commit` exists for, and the next run
+ *     re-evaluates the NEW head from scratch (no same-cycle chasing).
+ *   - UNKNOWN mergeStateStatus polls out at the established 3×20s cadence; a state
+ *     still UNKNOWN after the budget, or DIRTY (a real conflict against the moved
+ *     base), aborts — neither can be merged by retrying.
+ *   - ≤ MERGE_MAX_ATTEMPTS total attempts; every attempt logs a
+ *     [merge-retry-after-base-move] line (the L2D-04 receipt).
+ * Returns the attempts used so the caller can receipt "merged on attempt N".
+ */
+const BASE_MOVE_ERROR = /base branch was modified/i;
+const MERGE_MAX_ATTEMPTS = 3;
+
+function mergePrWithBaseMoveRetry(repo: string, pr: number, headRefOid: string): number {
+  for (let attempt = 1; attempt <= MERGE_MAX_ATTEMPTS; attempt++) {
+    try {
+      mergePr(repo, pr, headRefOid);
+      return attempt;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!BASE_MOVE_ERROR.test(message)) throw err; // any other failure: no retry (Rules #109/#161)
+      console.log(
+        `[merge-retry-after-base-move] pr-automerge-gate ${repo}#${pr}: merge attempt ${attempt}/${MERGE_MAX_ATTEMPTS} ` +
+          `failed with "Base branch was modified" — ${message.replace(/\s+/g, " ").slice(0, 300)}`,
+      );
+      if (attempt === MERGE_MAX_ATTEMPTS) {
+        console.log(
+          `[merge-retry-after-base-move] pr-automerge-gate ${repo}#${pr}: retry budget exhausted — ` +
+            `giving up this run; the next scheduled/triggered run re-evaluates`,
+        );
+        throw err;
+      }
+      execFileSync("sleep", ["20"]); // the failed attempt proved GitHub's snapshot lagged the base — give it a beat
+      let fresh = fetchPr(repo, pr);
+      if (fresh.headRefOid !== headRefOid) {
+        console.log(
+          `[merge-retry-after-base-move] pr-automerge-gate ${repo}#${pr}: head moved ` +
+            `${headRefOid.slice(0, 7)} → ${fresh.headRefOid.slice(0, 7)} in the retry window — ABORTING retry ` +
+            `(the real TOCTOU race; the next run re-evaluates the new head)`,
+        );
+        throw err;
+      }
+      // Wait out GitHub's mergeability recompute (UNKNOWN is transient — same 3×20s
+      // cadence as the readiness leg's re-read), re-checking the head pin every read.
+      for (let reread = 1; fresh.mergeStateStatus === "UNKNOWN" && reread <= 3; reread++) {
+        execFileSync("sleep", ["20"]);
+        fresh = fetchPr(repo, pr);
+        console.log(
+          `[merge-retry-after-base-move] pr-automerge-gate ${repo}#${pr}: mergeability UNKNOWN after the base move — ` +
+            `re-read ${reread}/3 after 20s → ${fresh.mergeStateStatus}`,
+        );
+        if (fresh.headRefOid !== headRefOid) {
+          console.log(
+            `[merge-retry-after-base-move] pr-automerge-gate ${repo}#${pr}: head moved ` +
+              `${headRefOid.slice(0, 7)} → ${fresh.headRefOid.slice(0, 7)} in the retry window — ABORTING retry ` +
+              `(the real TOCTOU race; the next run re-evaluates the new head)`,
+          );
+          throw err;
+        }
+      }
+      if (fresh.mergeStateStatus === "UNKNOWN" || fresh.mergeStateStatus === "DIRTY") {
+        console.log(
+          `[merge-retry-after-base-move] pr-automerge-gate ${repo}#${pr}: mergeStateStatus=${fresh.mergeStateStatus} ` +
+            `after the recompute budget — retry cannot merge this state; ABORTING retry`,
+        );
+        throw err;
+      }
+    }
+  }
+  throw new Error("unreachable"); // the loop only exits via return/throw
+}
+
 function commentOnPr(repo: string, pr: number, body: string): void {
   gh(["pr", "comment", String(pr), "--repo", repo, "--body", body]);
 }
@@ -1305,16 +1390,20 @@ async function evaluate(
     }
   }
 
-  // ── All legs pass — attempt the SHA-pinned merge ──
+  // ── All legs pass — attempt the SHA-pinned merge (stint #951: GitHub's own
+  // "Base branch was modified" is retried in-run, bounded, head-pin re-checked
+  // before each attempt; every other failure keeps the no-retry contract). ──
+  let mergeAttempts = 1;
   try {
-    mergePr(repo, pr, prJson.headRefOid);
+    mergeAttempts = mergePrWithBaseMoveRetry(repo, pr, prJson.headRefOid);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.log(
       `[no-op] pr-automerge-gate ${repo}#${pr}: all legs passed but the merge call failed — ` +
         `most likely the head moved between evaluation and merge (TOCTOU race, --match-head-commit ` +
-        `correctly rejected it) or a branch-protection rule blocked it. This is NOT retried in this ` +
-        `run (Rules #109/#161) — the next scheduled/triggered run re-evaluates the current head. ` +
+        `correctly rejected it) or a branch-protection rule blocked it. Retried in-run ONLY for ` +
+        `GitHub's "Base branch was modified" (bounded, stint #951); any other failure is NOT retried ` +
+        `in this run (Rules #109/#161) — the next scheduled/triggered run re-evaluates the current head. ` +
         `Underlying error: ${message}`,
     );
     // No [gate-receipt] line here: the gate itself QUALIFIED (every leg passed) — this
@@ -1357,7 +1446,11 @@ async function evaluate(
 
   commentOnPr(repo, pr, receipt);
   console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "qualified" }));
-  console.log(`[merged] pr-automerge-gate ${repo}#${pr}: all legs passed, squash-merged at ${prJson.headRefOid}.`);
+  console.log(
+    `[merged] pr-automerge-gate ${repo}#${pr}: all legs passed, squash-merged at ${prJson.headRefOid}` +
+      (mergeAttempts > 1 ? ` on attempt ${mergeAttempts} (merge-retry-after-base-move)` : "") +
+      `.`,
+  );
   // ops#260 leg 3: a PR refused at an earlier head and merged now must not leave a
   // stale line in Kevin's block — resolve every key with this PR's prefix.
   await resolveGateRefusals(repo, pr);
@@ -1911,14 +2004,19 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   // stint #372: under the box ruling there is no receipt to re-check.)
 
   // ── All legs pass — attempt the SHA-pinned merge (same TOCTOU contract as
-  // `evaluate()`'s own merge call: --match-head-commit, no same-cycle retry). ──
+  // `evaluate()`'s own merge call: --match-head-commit; stint #951 — GitHub's own
+  // "Base branch was modified" is retried in-run, bounded, head-pin re-checked
+  // before each attempt; every other failure keeps the no-same-cycle-retry law). ──
+  let mergeAttempts = 1;
   try {
-    mergePr(repo, pr, prJson.headRefOid);
+    mergeAttempts = mergePrWithBaseMoveRetry(repo, pr, prJson.headRefOid);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const detail =
       `all legs passed but the merge call failed (most likely a TOCTOU race the SHA pin ` +
-      `correctly rejected, or a branch-protection block) — NOT retried this run: ${message}`;
+      `correctly rejected, or a branch-protection block) — retried in-run ONLY for GitHub's ` +
+      `"Base branch was modified" (bounded, stint #951); any other failure is NOT retried this ` +
+      `run: ${message}`;
     logTrainGateLine(repo, pr, "merge-attempt-failed", detail);
     return { outcome: "merge-attempt-failed", detail };
   }
@@ -1932,8 +2030,12 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     headRefOid: prJson.headRefOid,
   });
   commentOnPr(repo, pr, receipt);
-  logTrainGateLine(repo, pr, "merged", `merged at ${prJson.headRefOid}`);
-  return { outcome: "merged", detail: `merged at ${prJson.headRefOid}` };
+  // stint #951 end-state telemetry: a merge that needed the base-move retry says so
+  // in the gate receipt ("merged on attempt 2/3") — the sweep's receipt line is the
+  // surface the fleet reads, so the retry is observable without opening job logs.
+  const attemptNote = mergeAttempts > 1 ? ` on attempt ${mergeAttempts} (merge-retry-after-base-move)` : "";
+  logTrainGateLine(repo, pr, "merged", `merged at ${prJson.headRefOid}${attemptNote}`);
+  return { outcome: "merged", detail: `merged at ${prJson.headRefOid}${attemptNote}` };
 }
 
 /**
