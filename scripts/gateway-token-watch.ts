@@ -61,6 +61,9 @@ const EXPECTED_ACTIVE = new Set([
   // minted 2026-08-14 for cfo-monthly-brief.yml (ops#90); registered in
   // credentials.manifest.yaml at mint but this allowlist was missed → ops#96
   "ops-pipeline-cfo-brief",
+  // minted 2026-09-16 read-only for the surface-canary sweep (stint #461, #284d);
+  // this allowlist was missed at mint → straggler issue ops#502
+  "surface-canary",
 ]);
 
 // Gate issue titles are PER-CYCLE (ops-pipeline#34): built via gateTitle(gateCycleKey(...))
