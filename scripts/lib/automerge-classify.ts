@@ -43,6 +43,7 @@ const BUGSQUASHER_LABEL = "bugsquasher";
 // ops#409 taught only the QUEUEING step (gateQueues) this label; both eligibility legs below still demanded `bugsquasher`,
 // so no seat-authored code-fix PR had ever merged autonomously (15:19Z 9/13 sweep: 5 refusals "missing 'bugsquasher'").
 const FLEET_INTERNAL_LABEL = "fleet-internal";
+export const FLEET_INTERNAL_LABEL_VALUE = FLEET_INTERNAL_LABEL;
 // Stint #689 fleet-internal class legs (label vocabulary mirrors label-authority.ts's
 // HOLD_LABEL and the blue-card flow's `needs-human` — declared locally so this module
 // stays dependency-free; the values are the fleet's one vocabulary, Kevin 2026-09-02).
@@ -449,6 +450,13 @@ const TEST_ONLY_LINE_CAP = 400; // 9/13: a real test file is not 40 lines
 // repo's safe_path_globs (theme/portal excluded; price-sync's extensions/** excluded).
 const CODE_FIX_LINE_CAP = 1500; // 2026-09-13 (Kevin 'go', door pens): 800 → 1500. Seat-authored PRs carry their tests + receipts in-diff (cp#269 +1291, ops#412 +1126, cp#275 +856 all refused at 800); the second-model review is the reviewer, not the line count. Counts ADDITIONS only (see evalCodeFix) — a 1,600-line dead-code deletion is not a big change
 
+// Row 928 (Kevin approved 2026-09-26): crew code-fix window — a TIGHTER cap (additions only)
+// for fleet-internal code-fix PRs landed by the seat fleet without human box. The fleet-internal
+// class already has NO cap (POSITIVE_INFINITY), so this is the deliberately-narrower crew-code-fix
+// lane: 200 additions (proposed; Kevin may change it on box). Read side: evalCodeFix below detects
+// the fleet-internal label and applies this cap instead of CODE_FIX_LINE_CAP.
+const CREW_CODE_FIX_LINE_CAP = 200;
+
 // brain#239 doc 4 leg B (2026-09-10): vault-doc — the fleet's highest-volume, lowest-risk
 // PR. Text-only (decisions, architecture, seats, coldstarts, scratchpad exports) with a
 // BROAD allowlist and a narrow, fail-closed denylist. Any denylist hit (scripts/, .github/,
@@ -761,8 +769,10 @@ function evalVaultDoc(files: GateFile[], totalChangedLines: number): CandidateEv
  * needs the live statusCheckRollup, which classification doesn't see — the runner
  * evaluates it as its own gate leg after class resolution.
  */
-function evalCodeFix(files: GateFile[], totalChangedLines: number, safePathGlobs: string[] | undefined, additions?: number): CandidateEval {
+function evalCodeFix(files: GateFile[], totalChangedLines: number, safePathGlobs: string[] | undefined, additions?: number, labels?: string[]): CandidateEval {
   const effectiveLines = additions !== undefined ? additions : totalChangedLines;
+  const isCrewCodeFix = labels !== undefined && labels.includes(FLEET_INTERNAL_LABEL);
+  const cap = isCrewCodeFix ? CREW_CODE_FIX_LINE_CAP : CODE_FIX_LINE_CAP;
   const shapeReasons: string[] = [];
 
   const compiled = (safePathGlobs ?? []).map(compileSafePathGlob).filter((re): re is RegExp => re !== null);
@@ -786,7 +796,7 @@ function evalCodeFix(files: GateFile[], totalChangedLines: number, safePathGlobs
   }
 
   const shapeOk = shapeReasons.length === 0;
-  return { prClass: "code-fix", shapeOk, lineCapOk: effectiveLines <= CODE_FIX_LINE_CAP, cap: CODE_FIX_LINE_CAP, shapeReasons };
+  return { prClass: "code-fix", shapeOk, lineCapOk: effectiveLines <= cap, cap, shapeReasons };
 }
 
 /**
@@ -946,7 +956,7 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
   // trim to nothing still gets the inert-reason diagnostic (opt-in-but-broken),
   // and the runner's [config] note covers the enabled-with-zero-globs case.
   if (safePathGlobs && safePathGlobs.length > 0) {
-    candidates.push(evalCodeFix(files, totalChangedLines, safePathGlobs, additions));
+    candidates.push(evalCodeFix(files, totalChangedLines, safePathGlobs, additions, labels));
   }
   // Fleet-internal LAST of all (stint #689): the widest class only ever picks up what
   // every narrower, longer-proven class refused, and it joins the candidate set ONLY
@@ -1013,7 +1023,15 @@ export function gateDecisionForClass(input: GateInputV2): GateResult {
   }
 
   if (input.author !== BUGSQUASHER_AUTHOR) {
-    reasons.push(`author '${input.author}' !== '${BUGSQUASHER_AUTHOR}'`);
+    // Row 928 (Kevin approved 2026-09-26): crew code-fix window — the fleet-internal
+    // label, applied only by the runner to its own seat-authored PRs, is the crew
+    // identity signal. A fleet-internal code-fix PR with any author merges under the
+    // crew gate (the label proves provenance, not the login). All other classes and
+    // non-fleet-internal code-fix PRs still require the human author.
+    const isCrewCodeFix = input.prClass === "code-fix" && input.labels.includes(FLEET_INTERNAL_LABEL);
+    if (!isCrewCodeFix) {
+      reasons.push(`author '${input.author}' !== '${BUGSQUASHER_AUTHOR}'`);
+    }
   }
   if (!hasEligibleLabel(input.labels)) {
     reasons.push(`missing an eligibility label (${ELIGIBLE_LABELS.map((l) => `'${l}'`).join(" or ")}; has: ${input.labels.length ? input.labels.join(", ") : "none"})`);

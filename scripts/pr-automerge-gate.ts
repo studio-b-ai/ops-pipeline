@@ -968,6 +968,20 @@ async function evaluate(
     return;
   }
 
+  // ── Row 928 (Kevin approved 2026-09-26): stacked PR check for crew code-fix ──
+  // A crew code-fix PR whose base is not the default branch (main) is a stacked PR —
+  // the crew gate refuses it: a stacked PR's merge re-writes the parent's tree
+  // silently (#460 class) and the independent review cannot see the stacked diff.
+  // Standard (non-fleet-internal) code-fix PRs are human PRs — stacking is theirs to manage.
+  if (prClass === "code-fix" && labels.includes(FLEET_INTERNAL_LABEL) && prJson.baseRefName !== "main") {
+    const detail = `crew code-fix: baseRefName is '${prJson.baseRefName}', not 'main' — stacked PRs are NOT auto-merged (row 928)`;
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}. No review call.`);
+    console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "stacked", reasons: [detail] }));
+    await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "stacked", reasons: [detail], additions: prJson.additions, deletions: prJson.deletions });
+    postFlagCard(repo, pr, "stacked", prJson.headRefOid, [detail]);
+    return;
+  }
+
   // ── code-fix already handed to the train (ops#190 B1): once `candidate` is
   // on, the squasher's work here is DONE — the human queued authority owns the
   // merge decision. Short-circuit BEFORE the remaining legs (and before the paid
