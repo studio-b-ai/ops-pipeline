@@ -15,6 +15,13 @@
  *   NEGATIVE: box + DIRTY mergeStateStatus (brain#160 this run) ⇒ "refused", no merge.
  *   NEGATIVE: box + red rollup / UNSTABLE (client-asthetik#372 this run) ⇒
  *             "refused", no merge.
+ *   NEGATIVE (row #372 follow-up, added this pass): NO box label at all, otherwise
+ *             identical to the POSITIVE fixture (green rollup + CLEAN) ⇒ the
+ *             authority leg itself refuses — "merged" only ever fires downstream of
+ *             an authorized `box`; an absent label must never fall through to a
+ *             merge just because the readiness floor is green. Zero merge calls,
+ *             zero Anthropic spend (the review leg is gone either way — this control
+ *             is about authority, not about resurrecting the vote).
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -127,6 +134,15 @@ describe("evaluateTrainReady — box opens the review leg (stint #372)", () => {
     const res = await evaluateTrainReady(REPO, PR, { door: null });
     expect(res.outcome).toBe("refused");
     expect(merges()).toHaveLength(0);
+    expect(anthropicClientSpy).not.toHaveBeenCalled();
+  });
+
+  it("NEGATIVE (authority floor): NO box label at all — otherwise identical to the POSITIVE fixture (green rollup + CLEAN) — still refuses; a green floor never substitutes for authority", async () => {
+    dispatch(prJson({ labels: [{ name: "needs-human" }] })); // box removed, everything else unchanged
+    const res = await evaluateTrainReady(REPO, PR, { door: null });
+    expect(res.outcome).toBe("refused");
+    expect(merges()).toHaveLength(0);
+    expect(comments()).toHaveLength(0); // no-ready-label is a fail-closed non-event, not a receipt-worthy transition
     expect(anthropicClientSpy).not.toHaveBeenCalled();
   });
 });
