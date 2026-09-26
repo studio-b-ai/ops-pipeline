@@ -1125,6 +1125,63 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
     });
     expect(result.prClass).toBe("code-fix");
   });
+
+  // ───── Crew code-fix (stint #928) ─────
+
+  // Crew PRs: fleet-internal + NOT bugsquasher → 200-line cap.
+  // Kevin PRs: bugsquasher (with or without fleet-internal) → 1500-line cap unchanged.
+
+  it("crew code-fix: refuses at 201 additions with fleet-internal label (crew cap 200) — falls through to fleet-internal", () => {
+    const result = classifyPrDiffClass({ ...GOOD, additions: 201, labels: ["fleet-internal"] });
+    expect(result.prClass).toBe("fleet-internal");
+    expect(result.failureLeg).toBeNull();
+  });
+
+  it("crew code-fix: resolves at exactly 200 additions with fleet-internal label", () => {
+    const result = classifyPrDiffClass({ ...GOOD, additions: 200, labels: ["fleet-internal"] });
+    expect(result.prClass).toBe("code-fix");
+    expect(result.failureLeg).toBeNull();
+  });
+
+  it("crew code-fix: fleet-internal + bugsquasher together = Kevin cap (1500), not crew cap (200)", () => {
+    const result = classifyPrDiffClass({ ...GOOD, additions: 250, labels: ["fleet-internal", "bugsquasher"] });
+    expect(result.prClass).toBe("code-fix");
+    expect(result.failureLeg).toBeNull();
+  });
+
+  it("crew code-fix: Kevin PR alone (bugsquasher) = Kevin cap (1500), not crew cap", () => {
+    const result = classifyPrDiffClass({ ...GOOD, additions: 500, labels: ["bugsquasher"] });
+    expect(result.prClass).toBe("code-fix");
+    expect(result.failureLeg).toBeNull();
+  });
+
+  it("crew code-fix: over 200 but under 1500 with fleet-internal falls through to fleet-internal class when denylist-clean", () => {
+    const result = classifyPrDiffClass({ ...GOOD, additions: 250, labels: ["fleet-internal"] });
+    expect(result.prClass).toBe("fleet-internal");
+    expect(result.failureLeg).toBeNull();
+  });
+
+  it("crew code-fix: denylist path (< 200 lines) is refused — crew flag doesn't lower the denylist", () => {
+    const result = classifyPrDiffClass({
+      files: files(["src/package.json"]),
+      totalChangedLines: 10,
+      safePathGlobs: ["**"],
+      labels: ["fleet-internal"],
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("denylist"))).toBe(true);
+  });
+
+  it("crew code-fix: denylist path (> 200 lines) is refused by both code-fix and fleet-internal", () => {
+    const result = classifyPrDiffClass({
+      files: files(["migrations/005_add_column.sql"]),
+      totalChangedLines: 50,
+      safePathGlobs: ["**"],
+      labels: ["fleet-internal"],
+      additions: 300,
+    });
+    expect(result.prClass).toBeNull();
+  });
 });
 
 describe("classifyPrDiffClass — fleet-internal class (stint #689 — the second machine class)", () => {
