@@ -246,8 +246,10 @@ function tryApply(apply: () => void, dryRun: boolean): "applied" | "would-apply"
 // ───────────────────────────── probe dispatch (stint #944 sweep leg) ─────────────────────────────
 
 /**
- * Dispatches the caller repo's own `needs-human-diagnostic-probe.yml` workflow via
- * `workflow_dispatch` for the given issue. This is the sweep leg that catches machinery-labeled
+ * Dispatches the caller repo's own `needs-human-probe.yml` workflow via
+ * `workflow_dispatch` for the given issue (the caller's thin workflow carries `on.workflow_dispatch`;
+ * the reusable half `needs-human-probe.yml@main` in ops-pipeline is `workflow_call` and therefore
+ * not itself dispatchable — the caller file name is the dispatch target). This is the sweep leg that catches machinery-labeled
  * issues: the probe's `issues: labeled` trigger only fires on USER-token label events (bot/machinery
  * labels are suppressed by Actions recursion prevention), so an issue labeled by a bot parks
  * `no-probe` forever unless the router dispatches the probe explicitly.
@@ -260,7 +262,7 @@ function tryApply(apply: () => void, dryRun: boolean): "applied" | "would-apply"
 function dispatchProbe(repo: string, issueNumber: number): boolean {
   try {
     gh([
-      "workflow", "run", "needs-human-diagnostic-probe.yml",
+      "workflow", "run", "needs-human-probe.yml",
       "--repo", repo,
       "-f", `issue_number=${issueNumber}`,
     ]);

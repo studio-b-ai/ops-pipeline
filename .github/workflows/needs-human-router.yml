@@ -16,7 +16,7 @@ name: Needs-human router (reusable)
 #
 # ops-pipeline#944 (stint #944, 2026-09-26): `actions: write` enables the sweep leg —
 # when a `no-probe` issue was labeled by machinery (bot token, not user token), the
-# router dispatches the caller repo's `needs-human-diagnostic-probe.yml` via
+# router dispatches the caller repo's `needs-human-probe.yml` via
 # `workflow_dispatch`. The caller must ALSO declare `actions: write` (permissions
 # intersection); a caller without it gets a logged dispatch failure and the issue
 # stays `no-probe` unchanged.
