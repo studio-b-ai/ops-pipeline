@@ -16,6 +16,10 @@ import {
   evaluateLabelAuthority,
   normalizeActorLogin,
   fetchAuthorityTimeline,
+  isSelfBox,
+  isNonInteractiveActor,
+  formatSelfBoxReceipt,
+  SELF_BOX_WINDOW_MINUTES,
   AUTHORITY_TIMELINE_PAGE_SIZE,
   AUTHORITY_TIMELINE_MAX_PAGES,
   type AuthorityInput,
@@ -664,6 +668,57 @@ describe("evaluateLabelAuthority — the queued/hold pair (ops-pipeline#260 leg 
     expect(fire.TRAIN_READY_LABEL).toBe(TRAIN_READY_LABEL);
     expect(fire.TRAIN_HOLD_LABEL).toBe(TRAIN_HOLD_LABEL);
     expect(fire.TRAIN_IN_FLIGHT_LABEL).toBe("underway");
+  });
+});
+
+// ───────────────────────────── self-box (fire 952, 2026-09-26) ─────────────────────────────
+
+describe("self-box detection (fire 952)", () => {
+  const CREATED = "2026-09-26T17:16:00Z";
+
+  it("detects a PR author boxing their own PR within the window (chassis#919 known-bad)", () => {
+    // box landed +1s after creation by the author
+    expect(isSelfBox({ prCreatedAt: CREATED, prAuthor: "kbibelhausen", authorizingActor: "kbibelhausen", labelCreatedAt: "2026-09-26T17:17:03Z" })).toBe(true);
+  });
+
+  it("detects a self-box exactly AT the window boundary (inclusive)", () => {
+    const atWindow = new Date(Date.parse(CREATED) + SELF_BOX_WINDOW_MINUTES * 60_000).toISOString();
+    expect(isSelfBox({ prCreatedAt: CREATED, prAuthor: "kbibelhausen", authorizingActor: "kbibelhausen", labelCreatedAt: atWindow })).toBe(true);
+  });
+
+  it("does NOT flag an author boxing their own PR AFTER the window (a human returning later)", () => {
+    const later = new Date(Date.parse(CREATED) + (SELF_BOX_WINDOW_MINUTES + 1) * 60_000).toISOString();
+    expect(isSelfBox({ prCreatedAt: CREATED, prAuthor: "kbibelhausen", authorizingActor: "kbibelhausen", labelCreatedAt: later })).toBe(false);
+  });
+
+  it("does NOT flag a DIFFERENT human boxing (Kevin boxes someone else's PR)", () => {
+    expect(isSelfBox({ prCreatedAt: CREATED, prAuthor: "some-rando", authorizingActor: "kbibelhausen", labelCreatedAt: "2026-09-26T17:17:03Z" })).toBe(false);
+  });
+
+  it("returns false on unparseable timestamps (never a false alarm on bad clock data)", () => {
+    expect(isSelfBox({ prCreatedAt: "not-a-date", prAuthor: "kbibelhausen", authorizingActor: "kbibelhausen", labelCreatedAt: "also-not-a-date" })).toBe(false);
+  });
+
+  it("isNonInteractiveActor flags bots and the fleet bot, never a human", () => {
+    expect(isNonInteractiveActor("github-actions[bot]")).toBe(true);
+    expect(isNonInteractiveActor("studiob-fleet-bot")).toBe(true);
+    expect(isNonInteractiveActor("studiob-fleet-bot[bot]")).toBe(true);
+    expect(isNonInteractiveActor("kbibelhausen")).toBe(false);
+  });
+
+  it("formatSelfBoxReceipt names the rule and the actor (write-only receipt)", () => {
+    const body = formatSelfBoxReceipt({
+      prAuthor: "kbibelhausen",
+      actorLogin: "kbibelhausen",
+      windowMinutes: SELF_BOX_WINDOW_MINUTES,
+      label: "box",
+      headRefOid: "abc123def456",
+      reason: "self-box-within-window",
+    });
+    expect(body).toContain("self-box");
+    expect(body).toContain("fire 952");
+    expect(body).toContain("kbibelhausen");
+    expect(body).toContain("write-only");
   });
 });
 
