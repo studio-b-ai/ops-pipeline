@@ -215,6 +215,37 @@ describe("committed data file", () => {
     expect(radio).toEqual(["Post-Deploy Smoke", "Slack Alert on Failure", "Slack Recovery Notice", "tripwire"]);
   });
 
+  // ───── crew stint #861, 2026-09-23: amplify's one by-design PR-event skip ─────
+  // Born from a live defect, not a hypothetical: the 2026-09-22 23:24Z sweep
+  // (run 35796899573) refused amplify#69 — Kevin's `box`, mergeStateStatus
+  // CLEAN — at the ci-rollup floor with ciClean=false because amplify had no
+  // sanction row while its rollup carries "Slack Notification" (SKIPPED) on
+  // every PR. Structurally unable to run on a pull_request event: amplify
+  // origin/main ci.yml's notify-failure job is `if: failure() &&
+  // github.ref == 'refs/heads/main'` (Rule #466). Guards the regression in
+  // BOTH directions per Rule #322.
+  it("sanctions amplify's by-design PR-event notification skip (stint #861)", () => {
+    const resolved = loadSanctionedSkips("studio-b-ai/amplify");
+    expect(resolved.has("Slack Notification")).toBe(true);
+  });
+
+  it("NEGATIVE CONTROL: amplify's sanction set never grows past the one notify job — no real gate is sanctioned", () => {
+    const resolved = loadSanctionedSkips("studio-b-ai/amplify");
+    expect([...resolved]).toEqual(["Slack Notification"]);
+    // amplify's real gates stay unsanctioned — naming them explicitly so a
+    // future widening of this entry fails loudly here rather than in a live sweep.
+    for (const gate of [
+      "Build + Test (amplify-engine)",
+      "Build + Test (amplify-workers)",
+      "Deprecated-API lint",
+      "Cross-workspace dep build coverage",
+      "Lint script unit tests",
+      "gitleaks / Secret scan (gitleaks, Rule 363)",
+    ]) {
+      expect(resolved.has(gate)).toBe(false);
+    }
+  });
+
   it("NEGATIVE CONTROL: lightsout stays unsanctioned — a repo with zero CI must keep failing closed", () => {
     // ops#405 flipped lightsout on too, but its refusal is CORRECT and is NOT
     // this change's business: it has no .github/workflows at all (GitHub API
