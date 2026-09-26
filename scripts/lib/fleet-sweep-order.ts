@@ -61,11 +61,18 @@ export interface OrderOptions {
   /** Global cap on entries returned this cycle. The workflow's MAX_FANOUT. */
   maxFanout: number;
   /**
-   * Per-repo cap applied INSIDE each group (train, bugsquasher) before the
+   * Per-repo cap applied INSIDE the bugsquasher group before the
    * global cap. Applied independently to each group so one repo with a
    * bugsquasher backlog cannot starve a train entry from another repo.
    */
   perRepoCap: number;
+  /**
+   * Per-repo cap applied INSIDE the fleet-internal group (separate from bugsquasher).
+   * Zero = no cap — fleet-internal PRs are runner-classified as non-live-surface
+   * (#97) and can safely flow faster. ops#836: a shared cap starved power-unit's
+   * fleet-internal lane (181 labeled PRs sharing 5 slots with bugsquasher).
+   */
+  fleetInternalPerRepoCap: number;
   /**
    * Integer, typically GitHub's `run_number`. Used only to rotate the
    * bugsquasher group's start position — a stable enumeration order without
@@ -76,10 +83,15 @@ export interface OrderOptions {
   runOffset: number;
 }
 
+function isFleetInternal(entry: FleetSweepEntry): boolean {
+  return entry.enabled_classes.split(",").includes("fleet-internal");
+}
+
 /**
  * Returns entries ordered for this cycle's fanout: every queued (train)
  * entry first (no per-repo cap — Kevin's door word is never silently
- * dropped), then bugsquasher entries per-repo rotated then capped.
+ * dropped), then bugsquasher entries per-repo rotated then capped,
+ * then fleet-internal entries with their own separate per-repo cap.
  * Total bounded at `maxFanout`.
  *
  * Pure — no I/O, no mutation of the input array. Order-stability inside a
@@ -88,14 +100,17 @@ export interface OrderOptions {
  */
 export function orderFleetSweepEntries(entries: FleetSweepEntry[], opts: OrderOptions): FleetSweepEntry[] {
   const trainEntries = entries.filter((e) => e.train_ready);
-  const bugsquasherEntries = entries.filter((e) => !e.train_ready);
+  const nonTrain = entries.filter((e) => !e.train_ready);
+  const bugsquasherEntries = nonTrain.filter((e) => !isFleetInternal(e));
+  const fleetInternalEntries = nonTrain.filter((e) => isFleetInternal(e));
 
   // Train group: NO per-repo cap — Kevin's door-word label is never
   // silently dropped behind a per-repo limit (the global fanout still
   // bounds it, and the gate's own per-input validations still hold).
   const rotatedBugsq = rotateAndCapBugsquasher(bugsquasherEntries, opts);
+  const rotatedFi = rotateAndCapFleetInternal(fleetInternalEntries, opts);
 
-  return [...trainEntries, ...rotatedBugsq].slice(0, opts.maxFanout);
+  return [...trainEntries, ...rotatedBugsq, ...rotatedFi].slice(0, opts.maxFanout);
 }
 
 /**
@@ -118,6 +133,29 @@ function rotateAndCapBugsquasher<T extends { repo: string }>(items: T[], opts: O
     const cap = Math.max(perRepoCap, 0);
     if (cap === 0) continue;
     for (let i = 0; i < rotated.length && i < cap; i++) result.push(rotated[i]);
+  }
+  return result;
+}
+
+/**
+ * Per-repo rotate-then-cap for the fleet-internal group: same rotation
+ * as bugsquasher but with a separate per-repo cap (`fleetInternalPerRepoCap`).
+ * Zero cap = no limit (all entries through, unbounded per repo).
+ */
+function rotateAndCapFleetInternal<T extends { repo: string }>(items: T[], opts: OrderOptions): T[] {
+  const { fleetInternalPerRepoCap, runOffset } = opts;
+  const byRepo = new Map<string, T[]>();
+  for (const item of items) {
+    const arr = byRepo.get(item.repo) ?? [];
+    arr.push(item);
+    byRepo.set(item.repo, arr);
+  }
+  const result: T[] = [];
+  for (const arr of byRepo.values()) {
+    const cap = Math.max(fleetInternalPerRepoCap, 0);
+    const rotated = rotateArray(arr, runOffset * (cap || 1));
+    if (cap === 0) { for (const item of rotated) result.push(item); }
+    else { for (let i = 0; i < rotated.length && i < cap; i++) result.push(rotated[i]); }
   }
   return result;
 }
@@ -153,9 +191,10 @@ async function readAllStdin(): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const [, , rawMax, rawCap, rawOffset] = process.argv;
+  const [, , rawMax, rawCap, rawFiCap, rawOffset] = process.argv;
   const maxFanout = parseNonNegativeInt("max-fanout", rawMax);
   const perRepoCap = parseNonNegativeInt("per-repo-cap", rawCap);
+  const fleetInternalPerRepoCap = parseNonNegativeInt("fleet-internal-per-repo-cap", rawFiCap);
   const runOffset = parseNonNegativeInt("run-offset", rawOffset);
 
   const input = (await readAllStdin()).trim();
@@ -165,7 +204,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
-  const ordered = orderFleetSweepEntries(entries as FleetSweepEntry[], { maxFanout, perRepoCap, runOffset });
+  const ordered = orderFleetSweepEntries(entries as FleetSweepEntry[], { maxFanout, perRepoCap, fleetInternalPerRepoCap, runOffset });
   process.stdout.write(JSON.stringify(ordered));
 }
 
