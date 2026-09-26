@@ -1159,6 +1159,57 @@ async function evaluate(
     return;
   }
 
+  // Stint #928 (Kevin-approved row 926, 2026-09-26): crew-authored code-fix PRs —
+  // identified by `fleet-internal` + NOT `bugsquasher` — NEVER auto-merge directly
+  // even in non-train repos. The same candidate+box flow a train repo uses is
+  // replicated here: candidate tells the train sweep the gate cleared it, box queues
+  // it on the fleet-bot's authority (GATE_AUTHORITY_CLASSES includes
+  // `["fleet-internal", "candidate"]`). Kevin's one human key opens the merge.
+  const isCrewCodeFix =
+    prClass === "code-fix" && labels.includes(FLEET_INTERNAL_LABEL) && !labels.includes(BUGSQUASHER_LABEL);
+  if (isCrewCodeFix) {
+    const headNow = gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"]).trim();
+    if (headNow !== prJson.headRefOid) {
+      console.log(
+        `[wait] pr-automerge-gate ${repo}#${pr}: head moved during crew code-fix gate run (reviewed ${prJson.headRefOid}, ` +
+          `now ${headNow}) — no labels written; the next scheduled run re-evaluates.`,
+      );
+      console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "head-moved", reasons: [`reviewed ${prJson.headRefOid}, now ${headNow}`] }));
+      return;
+    }
+    try {
+      addLabel(repo, pr, TRAIN_CANDIDATE_LABEL);
+      addLabel(repo, pr, QUEUED_LABEL);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(
+        `[no-op] pr-automerge-gate ${repo}#${pr}: crew code-fix passed every leg but label apply FAILED. ` +
+          `Not retried this run (Rules #109/#161). Underlying error: ${message}`,
+      );
+      return;
+    }
+    commentOnPr(
+      repo,
+      pr,
+      [
+        `**squasher auto-merge gate — CREW CODE-FIX CANDIDATE** (class: \`code-fix\`; stint #928)`,
+        "",
+        `Every gate leg passed (shape, crew line cap 200, safe_path_globs, built-in denylist, ` +
+          `named checks, independent review 2-of-3 CLEAN) — crew-authored PRs never auto-merge ` +
+          `directly. Applied \`${TRAIN_CANDIDATE_LABEL}\` and \`${QUEUED_LABEL}\`; Kevin's \`` +
+          `${QUEUED_LABEL}\` key merges it (Rule #279, stint #928).`,
+        "",
+        `Evaluated sha: \`${prJson.headRefOid}\`.`,
+      ].join("\n"),
+    );
+    console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "candidate" }));
+    console.log(
+      `[candidate] pr-automerge-gate ${repo}#${pr}: crew code-fix all legs passed — routed to ` +
+        `\`${QUEUED_LABEL}\` authority (stint #928).`,
+    );
+    return;
+  }
+
   // ── code-fix in a STANDARD repo: apply the B2 trigger label BEFORE the merge.
   // The post-merge 5xx tripwire's workflow triggers on `automerge:code-fix` (doc
   // §4.2 — a cheap FILTER only; the tripwire re-derives its own verdict), so a

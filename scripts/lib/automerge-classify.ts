@@ -449,6 +449,16 @@ const TEST_ONLY_LINE_CAP = 400; // 9/13: a real test file is not 40 lines
 // repo's safe_path_globs (theme/portal excluded; price-sync's extensions/** excluded).
 const CODE_FIX_LINE_CAP = 1500; // 2026-09-13 (Kevin 'go', door pens): 800 → 1500. Seat-authored PRs carry their tests + receipts in-diff (cp#269 +1291, ops#412 +1126, cp#275 +856 all refused at 800); the second-model review is the reviewer, not the line count. Counts ADDITIONS only (see evalCodeFix) — a 1,600-line dead-code deletion is not a big change
 
+// Stint #928 (2026-09-26, Kevin "approved" row 926): crew-authored code-fix PRs —
+// identified by the runner's `fleet-internal` label without `bugsquasher` — pass the
+// same guardrails (CI green, review 2-of-3 CLEAN, safe_path_globs, denylist, named
+// checks) at a tighter 200-line cap so the second-model reviewer reads a small,
+// self-contained diff. Kevin-authored code-fix PRs (`bugsquasher`) keep the 1500-line
+// cap unchanged. Over-200 crew diffs fall through to the fleet-internal class
+// (denylist-only, no named-checks), not to "wait" — the fleet-internal class was
+// already handling them before this cap existed.
+const CREW_CODE_FIX_LINE_CAP = 200;
+
 // brain#239 doc 4 leg B (2026-09-10): vault-doc — the fleet's highest-volume, lowest-risk
 // PR. Text-only (decisions, architecture, seats, coldstarts, scratchpad exports) with a
 // BROAD allowlist and a narrow, fail-closed denylist. Any denylist hit (scripts/, .github/,
@@ -761,8 +771,9 @@ function evalVaultDoc(files: GateFile[], totalChangedLines: number): CandidateEv
  * needs the live statusCheckRollup, which classification doesn't see — the runner
  * evaluates it as its own gate leg after class resolution.
  */
-function evalCodeFix(files: GateFile[], totalChangedLines: number, safePathGlobs: string[] | undefined, additions?: number): CandidateEval {
+function evalCodeFix(files: GateFile[], totalChangedLines: number, safePathGlobs: string[] | undefined, additions?: number, isCrew?: boolean): CandidateEval {
   const effectiveLines = additions !== undefined ? additions : totalChangedLines;
+  const lineCap = isCrew ? CREW_CODE_FIX_LINE_CAP : CODE_FIX_LINE_CAP;
   const shapeReasons: string[] = [];
 
   const compiled = (safePathGlobs ?? []).map(compileSafePathGlob).filter((re): re is RegExp => re !== null);
@@ -786,7 +797,7 @@ function evalCodeFix(files: GateFile[], totalChangedLines: number, safePathGlobs
   }
 
   const shapeOk = shapeReasons.length === 0;
-  return { prClass: "code-fix", shapeOk, lineCapOk: effectiveLines <= CODE_FIX_LINE_CAP, cap: CODE_FIX_LINE_CAP, shapeReasons };
+  return { prClass: "code-fix", shapeOk, lineCapOk: effectiveLines <= lineCap, cap: lineCap, shapeReasons };
 }
 
 /**
@@ -901,6 +912,8 @@ export interface ClassifyPrDiffClassResult {
 export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPrDiffClassResult {
   const { files, totalChangedLines, sensitivePathPatterns, additions, safePathGlobs, labels } = input;
 
+  const isCrew = labels !== undefined && labels.includes(FLEET_INTERNAL_LABEL) && !labels.includes(BUGSQUASHER_LABEL);
+
   if (files.length === 0) {
     return { prClass: null, failureLeg: "class-match", reasons: ["no changed files"] };
   }
@@ -946,7 +959,7 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
   // trim to nothing still gets the inert-reason diagnostic (opt-in-but-broken),
   // and the runner's [config] note covers the enabled-with-zero-globs case.
   if (safePathGlobs && safePathGlobs.length > 0) {
-    candidates.push(evalCodeFix(files, totalChangedLines, safePathGlobs, additions));
+    candidates.push(evalCodeFix(files, totalChangedLines, safePathGlobs, additions, isCrew));
   }
   // Fleet-internal LAST of all (stint #689): the widest class only ever picks up what
   // every narrower, longer-proven class refused, and it joins the candidate set ONLY
