@@ -546,8 +546,8 @@ function addLabel(repo: string, pr: number, label: string): void {
  * it promised a `reviewed` label would let the next sweep merge. Kevin applied
  * `reviewed`; the 15:24Z sweep (run 34861917273) refused at class-match again, which
  * cannot see the label. #412: prose is a claim about scope — so each leg now names
- * the door that actually opens IT (`queued` for class/cap/checks; `reviewed` only
- * where it substitutes for the model's vote).
+ * the one key that opens it (`box`, sha-pinned, the 2026-09-15 "Box is the one key"
+ * ruling — `reviewed` is retired as a key and no card offers it again).
  *
  * NEVER THROWS. A card is an advisory surface; a comment/label failure must not turn
  * a clean refusal into a gate crash (the pre-#313 site had the same contract).
@@ -556,9 +556,10 @@ function postFlagCard(repo: string, pr: number, leg: GateReceiptLeg, headSha: st
   if (!isCardLeg(leg)) return;
   try {
     const card = buildFlagCard({ leg: leg as CardLeg, headSha, reasons });
-    // Search for this card's marker AND (review leg only) the pre-#313 markerless-leg
-    // form, so already-carded PRs are not re-carded on the next sweep.
-    const markers = [card.marker, card.legacyMarker].filter((m): m is string => typeof m === "string");
+    // Search the SAME marker vocabulary the sticky-flag probe uses (flagCardMarkersFor —
+    // one spelling, two call sites, stint #724), so already-carded PRs are not re-carded
+    // and the park probe can never go blind to a card this poster wrote.
+    const markers = flagCardMarkersFor(leg as CardLeg, headSha);
     const jq = `[.comments[].body | select(${markers.map((m) => `contains("${m}")`).join(" or ")})] | length`;
     const prior = gh(["pr", "view", String(pr), "--repo", repo, "--json", "comments", "--jq", jq]).trim();
     if (prior !== "0") return;
