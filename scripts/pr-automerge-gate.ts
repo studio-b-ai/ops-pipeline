@@ -134,6 +134,7 @@ import {
   codeFixLabelFlap,
   isSelfBox,
   isNonInteractiveActor,
+  isGateAuthorizedActor,
   formatSelfBoxReceipt,
   SELF_BOX_WINDOW_MINUTES,
   type FlapVerdict,
@@ -1444,16 +1445,21 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
 
     // ── Self-box check (fire 952, 2026-09-26): the box is the ONE human key (#279);
     //    a PR author's own box within minutes of creation, or a non-interactive
-    //    actor, is stripped and alarmed before any authority evaluation runs. ──
+    //    actor, is stripped and alarmed before any authority evaluation runs. The
+    //    gate's OWN qualified bot box (studiob-fleet-bot on a `candidate` +
+    //    `bugsquasher`/`fleet-internal` PR) is the legitimate unattended class
+    //    (stint #928) — exempted via isGateAuthorizedActor. ──
     const selfBoxLabeler = timelineFetch.timeline
       .filter((item) => item.type === "LABELED" && item.label === QUEUED_LABEL)
       .at(-1); // last LABELED event for `box` in the timeline window
     if (selfBoxLabeler && selfBoxLabeler.actorLogin && selfBoxLabeler.createdAt) {
       const author = prJson.author.login;
       const actor = selfBoxLabeler.actorLogin;
+      const gateAuthorized = isGateAuthorizedActor(actor, labels);
       const selfBox =
-        (isSelfBox({ prCreatedAt: prJson.createdAt, prAuthor: author, authorizingActor: actor, labelCreatedAt: selfBoxLabeler.createdAt }))
-        || isNonInteractiveActor(actor);
+        !gateAuthorized &&
+        (isSelfBox({ prCreatedAt: prJson.createdAt, prAuthor: author, authorizingActor: actor, labelCreatedAt: selfBoxLabeler.createdAt }) ||
+          isNonInteractiveActor(actor));
       if (selfBox) {
         const reason = isNonInteractiveActor(actor) ? "non-interactive-actor" : "self-box-within-window";
         console.log(
@@ -1738,6 +1744,40 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
 
   const timelineFetch: { timeline: AuthorityTimelineItem[]; truncated: boolean } = fetchAuthorityTimeline(repo, pr);
   const authorityLogins = resolveAuthorityLogins(opts.callerLogins);
+
+  // ── Self-box check (fire 952) — the train door honors the SAME `box` key, so it
+  //    gets the same guard: strip + alarm a self-box before any authority runs. ──
+  const trainSelfBoxLabeler = timelineFetch.timeline
+    .filter((item) => item.type === "LABELED" && item.label === QUEUED_LABEL)
+    .at(-1);
+  if (trainSelfBoxLabeler && trainSelfBoxLabeler.actorLogin && trainSelfBoxLabeler.createdAt) {
+    const sbAuthor = prJson.author.login;
+    const sbActor = trainSelfBoxLabeler.actorLogin;
+    const sbGateAuthorized = isGateAuthorizedActor(sbActor, currentLabels);
+    const sbSelfBox =
+      !sbGateAuthorized &&
+      (isSelfBox({ prCreatedAt: prJson.createdAt, prAuthor: sbAuthor, authorizingActor: sbActor, labelCreatedAt: trainSelfBoxLabeler.createdAt }) ||
+        isNonInteractiveActor(sbActor));
+    if (sbSelfBox) {
+      const sbReason = isNonInteractiveActor(sbActor) ? "non-interactive-actor" : "self-box-within-window";
+      removeStaleReadyLabel(repo, pr, QUEUED_LABEL);
+      postAuthorityReceipt(
+        repo,
+        pr,
+        formatSelfBoxReceipt({
+          prAuthor: sbAuthor,
+          actorLogin: sbActor,
+          windowMinutes: SELF_BOX_WINDOW_MINUTES,
+          label: QUEUED_LABEL,
+          headRefOid: prJson.headRefOid,
+          reason: sbReason,
+        }),
+      );
+      logTrainGateLine(repo, pr, "refused", `self-box: ${sbActor} (${sbReason}) — box stripped + alarmed`);
+      return { outcome: "refused", detail: `self-box: ${sbActor} (${sbReason})` };
+    }
+  }
+
   const verdict = evaluateLabelAuthority({
     currentLabels,
     timeline: timelineFetch.timeline,
