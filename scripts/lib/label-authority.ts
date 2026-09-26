@@ -63,6 +63,17 @@ export const TRAIN_READY_LABEL = "box";
 export const TRAIN_HOLD_LABEL = "hold";
 
 /**
+ * fire 952 (2026-09-26): the ONE human key must never be turnable by the PR's own
+ * author on the same lap the PR was born — a crew running under the owner's identity
+ * boxed chassis#919 one second after creating it, and the gate honored it as Kevin's
+ * word. A `box` whose authorizing LabeledEvent actor equals the PR author AND landed
+ * within this many minutes of the PR's creation is a self-box: stripped + alarmed,
+ * never honored. The window is a proposal (Kevin may change it); the predicate is the
+ * contract.
+ */
+export const SELF_BOX_WINDOW_MINUTES = 10;
+
+/**
  * ops-pipeline#260 leg 4 — the squasher-class pair. Kevin's `box` on a PR the gate REFUSED
  * (line cap, sensitive path, review finding, named check) is his word on the decision line: the
  * sweep merges it, sha-pinned to the head he labeled, through the SAME predicate below (roster
@@ -635,7 +646,84 @@ export function hasAuthoritySnapshotDrifted(before: AuthoritySnapshot, after: Au
   return false;
 }
 
-// ───────────────────────────── I/O glue (gh CLI) ─────────────────────────────
+// ───────────────────── self-box detection (fire 952, 2026-09-26) ─────────────────────
+//
+// A crew ran under the owner's GitHub identity and boxed its own PR (chassis#919, +1s
+// after creation). The gate honored it. The box is the ONE human key (Rule #279); a
+// PR author's own box within minutes of creation is a machine's finger, never a human's.
+//
+// Two predicates, both pure (no I/O — the caller provides the facts):
+//   - `isSelfBox`: actor equals author AND the label landed within SELF_BOX_WINDOW_MINUTES
+//     of PR creation.
+//   - `isNonInteractiveBox`: actor is the fleet bot or ends in [bot], checked anywhere on
+//     the timeline (the narrow gate exception for bugsquasher is only on the `box` label
+//     itself — a bot's self-box has no exception).
+//
+// A self-box that is BOTH detected AND refused by the normal authority check
+// (unauthorized-actor, bot-actor, stale-label) is never redundant with it — the normal
+// check sees only the EVENT (who labeled, stale/commit), not the RELATIONSHIP (was this the
+// PR author labeling their own PR seconds after creating it). A `hold` label wins before
+// this is ever consulted; an authorized box (rbibelhausen on someone else's PR) passes both.
+
+/**
+ * True when the timeline's authorizing LabeledEvent actor equals the PR author AND the
+ * label landed within `SELF_BOX_WINDOW_MINUTES` of the PR's createdAt (UTC). The label
+ * createdAt is GraphQL-attributed, not a comment-parseable string — the same server
+ * provenance `evaluateLabelAuthority` already relies on.
+ */
+export function isSelfBox(input: {
+  prCreatedAt: string;
+  prAuthor: string;
+  authorizingActor: string;
+  labelCreatedAt: string;
+}): boolean {
+  try {
+    if (input.authorizingActor !== input.prAuthor) return false;
+    const prCreated = new Date(input.prCreatedAt).getTime();
+    const labelCreated = new Date(input.labelCreatedAt).getTime();
+    if (isNaN(prCreated) || isNaN(labelCreated)) return false;
+    const minutes = (labelCreated - prCreated) / 60_000;
+    return minutes <= SELF_BOX_WINDOW_MINUTES;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when the actor is a non-interactive identity: ends in "[bot]" (including the
+ * fleet App's normalized spelling) OR equals the fleet gate bot. Checked at the gate
+ * entry, never inside the predicate itself — this is about the RELATIONSHIP between
+ * labeler and author, not the event provenance.
+ */
+export function isNonInteractiveActor(actorLogin: string): boolean {
+  return actorLogin.endsWith("[bot]") || actorLogin === "studiob-fleet-bot";
+}
+
+/**
+ * The receipt body for a stripped self-box. Pure (no I/O) — the caller posts it
+ * via `postAuthorityReceipt`.
+ */
+export function formatSelfBoxReceipt(input: {
+  prAuthor: string;
+  actorLogin: string;
+  windowMinutes: number;
+  label: string;
+  headRefOid: string;
+  reason: string;
+}): string {
+  const { prAuthor, actorLogin, windowMinutes, label, headRefOid, reason } = input;
+  return [
+    `**\`${label}\` removed — self-box** (label-authority v2, fire 952; Rule #279: the ONE human key)`,
+    "",
+    reason === "self-box-within-window"
+      ? `The \`${label}\` label was applied by **${actorLogin}**, the PR's own author, within ${windowMinutes} minutes of creation — a machine's finger, never a human's word.`
+      : `The \`${label}\` label was applied by **${actorLogin}**, a non-interactive (bot/runner) identity — a machine's finger, never a human's word.`,
+    "",
+    `Evaluated sha: \`${headRefOid.slice(0, 7)}\`.`,
+    "",
+    "This comment is a write-only receipt — no automation reads it back. A human may re-apply `box` after reviewing.",
+  ].join("\n");
+}
 //
 // Not directly unit-tested — matches this repo's established convention (the
 // existing `fetchPr`/`fetchDiffBySha`/`mergePr`/`commentOnPr` in
