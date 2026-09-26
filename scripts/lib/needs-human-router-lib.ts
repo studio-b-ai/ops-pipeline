@@ -31,6 +31,19 @@ export const ROUTE_RECEIPT_MARKER = "<!-- needs-human-router:v1 -->";
  * and is re-evaluated every run; only the RECEIPT COMMENT itself is deduped by this marker). */
 export const HOLD_RECEIPT_MARKER = "<!-- needs-human-router:hold:v1 -->";
 
+/**
+ * ops-pipeline#944 (stint #944, 2026-09-26): machinery-labeled needs-human issues never get a
+ * findings comment because the probe's `issues: labeled` trigger only fires on USER-token label
+ * events — when a bot/machinery adds the `needs-human` label, the event is suppressed by Actions
+ * recursion prevention and the issue parks `no-probe` forever. The router's sweep leg (added to
+ * the `no-probe` disposition handler) dispatches the probe via `workflow_dispatch` and posts
+ * this marker to dedup — if the probe fails (e.g. WIF 401), no findings comment appears and the
+ * router will NOT re-dispatch on subsequent runs (the marker is durable; the WIF fix is op#575).
+ * POSTED BY THE ROUTER, not the probe — the marker lives at the router layer so the probe's own
+ * PROBE_MARKER is still the probe's own dedup gate, unchanged.
+ */
+export const DISPATCH_MARKER = "<!-- needs-human-probe-dispatched:v1 -->";
+
 export function hasRouteReceipt(commentBodies: string[]): boolean {
   return commentBodies.some((b) => b.includes(ROUTE_RECEIPT_MARKER));
 }
