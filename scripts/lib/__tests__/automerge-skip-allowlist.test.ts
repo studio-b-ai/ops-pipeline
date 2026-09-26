@@ -173,7 +173,7 @@ describe("committed data file", () => {
     }
   });
 
-  // ───── studio-b#112, 2026-09-13: radio's three by-design PR-event skips ─────
+  // ───── studio-b#112, 2026-09-13 + mechanic#914, 2026-09-24: radio's four by-design PR-event skips ─────
   // Born from a live defect, not a hypothetical: the 19:17Z sweep refused
   // radio#1008 at leg=ci-rollup with ciClean=false while GitHub's own
   // mergeStateStatus said CLEAN. Cause: ops#405 flipped radio onto the release
@@ -182,7 +182,7 @@ describe("committed data file", () => {
   // ci.yml `if:` conditions pin them to refs/heads/main push) — made radio's
   // CI leg permanently inert. Guards the regression in BOTH directions per
   // Rule #322.
-  it("sanctions radio's four by-design PR-event notification skips (studio-b#112 + stint 914 tripwire)", () => {
+it("sanctions radio's four by-design PR-event notification skips (studio-b#112 + stint 914 tripwire)", () => {
     const resolved = loadSanctionedSkips("studio-b-ai/radio");
     expect(resolved.has("Post-Deploy Smoke")).toBe(true);
     expect(resolved.has("Slack Alert on Failure")).toBe(true);

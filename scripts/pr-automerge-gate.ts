@@ -857,6 +857,37 @@ async function evaluate(
       console.log(`[info] pr-automerge-gate ${repo}#${pr}: DIRTY and update-branch refused (real conflict) — ${(e as Error).message.split("\n")[0]}`);
     }
   }
+  // ── Legs "held" / "box" (ops-pipeline#260 leg 4, 2026-09-24 reorder #471): Kevin's
+  // word on a decision line. EVALUATED BEFORE the CI rollup leg so a by-design-skipped
+  // check does not silently refuse a boxed PR (radio#1442-1446 — radio's tripwire check
+  // is the post-merge canary; it skips on every open PR, and an unsanctioned skip made
+  // ciClean=false, which ran the CI rollup leg's short-circuit return BEFORE the box
+  // override below was ever reached, refusing Kevin's key at 23:27Z with
+  // mergeStateStatus=CLEAN).
+  //
+  // `hold` parks the PR — nothing else runs, and its open decision line(s) resolve as
+  // held so the block stops asking. `box`, when it is HIS sha-pinned, GraphQL-
+  // attributed label (the same predicate the restart train uses: roster human, not a
+  // bot, no commit after the label), delegates to evaluateQueuedOverride, which runs
+  // its own CI rollup + mergeability check (the "floor" his key never lowers) and then
+  // overrides the DECISION-class legs (class-match / line-cap / named-checks / review)
+  // to merge sha-pinned. A stale `box` (a push after his word) is stripped with a
+  // receipt and the PR falls through to the normal legs, which re-refuse and re-ask on
+  // the NEW head. (2026-09-15: `queued` and `train:ready` are retired outright —
+  // TRAIN_READY_ALIASES is empty; `box` is the only spelling the door reads.)
+  if (labels.includes(HOLD_LABEL)) {
+    const detail = `${HOLD_LABEL} is present — parked by Kevin's word; nothing merges while it stays`;
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}.`);
+    console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "held", reasons: [detail] }));
+    await resolveGateRefusals(repo, pr, { resolution: "held" });
+    return;
+  }
+  if ([QUEUED_LABEL, ...TRAIN_READY_ALIASES].some((l) => labels.includes(l))) {
+    const outcome = await evaluateQueuedOverride(repo, pr, prJson, labels);
+    if (outcome !== "fall-through") return;
+    // fall-through: the ready label was present but not authorizing — the normal legs decide.
+  }
+
   const totalChangedLines = prJson.additions + prJson.deletions;
   // 2026-09-09 Kevin 'widen': the code-fix cap counts additions only (deletions of dead code are not risk).
   const codeFixLines = prJson.additions;
@@ -883,7 +914,7 @@ async function evaluate(
     return;
   }
 
-  // ── Leg "other" (cheap, no diff fetch, no API spend): authoritative file-list
+  // ── Leg "truncation" (cheap, no diff fetch, no API spend): authoritative file-list
   // completeness. `gh pr view --json files` pages the underlying GraphQL `files`
   // connection at its default size (100, unpaginated) — a PR touching MORE files
   // than that silently returns only the first page, with nothing in the CLI output
@@ -901,30 +932,6 @@ async function evaluate(
     // "the gate threw" so squasher-health monitoring can tell the two apart.
     console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "truncation", reasons: [detail] }));
     return;
-  }
-
-  // ── Legs "held" / "box" (ops-pipeline#260 leg 4): Kevin's word on a decision line. ──
-  // The machinery legs above (OPEN, not draft, mergeStateStatus CLEAN, CI rollup clean,
-  // complete file list) are the floor his word never lowers. Below them, `hold` parks
-  // the PR — nothing else runs, and its open decision line(s) resolve as held so the
-  // block stops asking. `box`, when it is HIS sha-pinned, GraphQL-attributed label
-  // (the same predicate the restart train uses: roster human, not a bot, no commit
-  // after the label), overrides the DECISION-class legs (class-match / line-cap /
-  // named-checks / review) and merges sha-pinned. A stale `box` (a push after his
-  // word) is stripped with a receipt and the PR falls through to the normal legs,
-  // which re-refuse and re-ask on the NEW head. (2026-09-15: `queued` and `train:ready` are
-  // retired outright — TRAIN_READY_ALIASES is empty; `box` is the only spelling the door reads.)
-  if (labels.includes(HOLD_LABEL)) {
-    const detail = `${HOLD_LABEL} is present — parked by Kevin's word; nothing merges while it stays`;
-    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}.`);
-    console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "held", reasons: [detail] }));
-    await resolveGateRefusals(repo, pr, { resolution: "held" });
-    return;
-  }
-  if ([QUEUED_LABEL, ...TRAIN_READY_ALIASES].some((l) => labels.includes(l))) {
-    const outcome = await evaluateQueuedOverride(repo, pr, prJson, labels);
-    if (outcome !== "fall-through") return;
-    // fall-through: the ready label was present but not authorizing — the normal legs decide.
   }
 
   // ── Diff fetch + per-file classification (unchanged mechanics) — BEFORE any API spend ──
