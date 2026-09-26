@@ -75,6 +75,9 @@ export type GateReceiptLeg =
   // whose non-terminal state then deltas the gate's own revalidate. A decision leg,
   // not a wait: the loop cannot clear itself, so a human owns the outcome.
   | "flap-guard"
+  // Row 928 (Kevin approved 2026-09-26): crew code-fix stacked PR check. A fleet-internal
+  // code-fix PR whose baseRefName is not "main" is a stacked PR — refused, human only.
+  | "stacked"
   | "other";
 
 export interface GateReceiptInput {

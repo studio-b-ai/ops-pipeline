@@ -6,6 +6,7 @@ import {
   withoutLabelWokenReruns,
   compileSafePathGlob,
   evaluateMergeReadiness,
+  FLEET_INTERNAL_LABEL_VALUE,
   gateDecision,
   gateDecisionForClass,
   isMergeTreeCheckClean,
@@ -824,6 +825,42 @@ describe("gateDecisionForClass", () => {
     expect(v2.decision).toBe(v1.decision);
     expect(v2.reasons).toEqual(v1.reasons);
   });
+
+  // ───── Crew code-fix author acceptance (row 928, Kevin approved 2026-09-26) ─────
+  // The fleet-internal label, applied only by the runner to its own seat-authored
+  // PRs, is the crew identity signal — a fleet-internal code-fix PR merges under
+  // the crew gate regardless of author login (the label proves provenance).
+
+  it("crew code-fix: accepts any author when fleet-internal + code-fix (label proves crew identity)", () => {
+    const result = gateDecisionForClass(
+      baseInputV2({ prClass: "code-fix", author: "mechanic-bot", labels: [FLEET_INTERNAL_LABEL_VALUE] }),
+    );
+    expect(result.decision).toBe("merge");
+  });
+
+  it("crew code-fix: author check STILL fires for non-fleet-internal code-fix (standard human-gate)", () => {
+    const result = gateDecisionForClass(
+      baseInputV2({ prClass: "code-fix", author: "someone-else", labels: ["bugsquasher"] }),
+    );
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("author"))).toBe(true);
+  });
+
+  it("crew code-fix: author check STILL fires for fleet-internal non-code-fix classes (docs-comment, ci-infra, etc.)", () => {
+    // fleet-internal + ci-infra class — the crew door is code-fix ONLY (row 928).
+    const result = gateDecisionForClass(
+      baseInputV2({ prClass: "ci-infra", author: "mechanic-bot", labels: [FLEET_INTERNAL_LABEL_VALUE] }),
+    );
+    expect(result.decision).toBe("wait");
+    expect(result.reasons.some((r) => r.includes("author"))).toBe(true);
+  });
+
+  it("crew code-fix: fleet-internal label is required even for kbibelhausen when no bugsquasher", () => {
+    const result = gateDecisionForClass(
+      baseInputV2({ prClass: "code-fix", labels: ["fleet-internal"] }),
+    );
+    expect(result.decision).toBe("merge");
+  });
 });
 
 describe("evaluateMergeReadiness (ci-rollup leg — Rule #471 both-directions control)", () => {
@@ -1124,6 +1161,72 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
       safePathGlobs: ["src/**"],
     });
     expect(result.prClass).toBe("code-fix");
+  });
+});
+
+describe("classifyPrDiffClass — crew code-fix (row 928, Kevin approved 2026-09-26)", () => {
+  function files(paths: string[], fileClass: GateFile["fileClass"] = "code"): GateFile[] {
+    return paths.map((path) => ({ path, fileClass }));
+  }
+  const FI = ["fleet-internal"];
+
+  // ───── Known-good: fleet-internal + code-fix resolves with crew 200-line cap ─────
+
+  it("resolves code-fix at 200 additions with fleet-internal label (crew cap boundary)", () => {
+    const result = classifyPrDiffClass({
+      files: files(["src/lib/order-notes.ts"]),
+      totalChangedLines: 200,
+      additions: 200,
+      safePathGlobs: ["src/**"],
+      labels: FI,
+    });
+    expect(result.prClass).toBe("code-fix");
+  });
+
+  it("refuses at 201 additions with fleet-internal label (crew cap exceeded — falls through to fleet-internal)", () => {
+    // Code-fix resolves with CREW_CODE_FIX_LINE_CAP=200. 201 additions > 200,
+    // so code-fix lineCapOk=false. Fleet-internal (last candidate, no cap) wins.
+    const result = classifyPrDiffClass({
+      files: files(["src/lib/order-notes.ts"]),
+      totalChangedLines: 201,
+      additions: 201,
+      safePathGlobs: ["src/**"],
+      labels: FI,
+    });
+    expect(result.prClass).toBe("fleet-internal");
+  });
+
+  it("resolves code-fix at 500 additions WITHOUT fleet-internal (standard 1500 cap applies)", () => {
+    const result = classifyPrDiffClass({
+      files: files(["src/lib/order-notes.ts"]),
+      totalChangedLines: 500,
+      safePathGlobs: ["src/**"],
+    });
+    expect(result.prClass).toBe("code-fix");
+  });
+
+  it("fleet-internal label uses 200-line crew cap for code-fix — 1400 additions over crew cap, falls through to fleet-internal", () => {
+    const result = classifyPrDiffClass({
+      files: files(["src/lib/order-notes.ts"]),
+      totalChangedLines: 1400,
+      safePathGlobs: ["src/**"],
+      labels: FI,
+    });
+    // 1400 > 200 (crew cap) but 1400 < 1500 (standard cap). The code-fix candidate
+    // uses CREW_CODE_FIX_LINE_CAP when fleet-internal is present, so lineCapOk=false.
+    // Fleet-internal (last candidate, no cap) catches the fall-through.
+    expect(result.prClass).toBe("fleet-internal");
+  });
+
+  it("fleet-internal denylist still blocks crew code-fix", () => {
+    const result = classifyPrDiffClass({
+      files: files(["src/migrations/0042_add_col.ts"]),
+      totalChangedLines: 5,
+      safePathGlobs: ["**"],
+      labels: FI,
+    });
+    expect(result.prClass).toBeNull();
+    expect(result.reasons.some((r) => r.includes("denylist") && r.includes("migration"))).toBe(true);
   });
 });
 
