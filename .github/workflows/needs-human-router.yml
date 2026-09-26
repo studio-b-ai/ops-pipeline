@@ -30,6 +30,11 @@ on:
         required: false
         type: boolean
         default: false
+      close_unrouted:
+        description: "stint #690: close issues still unrouted 7d after their first-pass card. OFF by default — first closing pass MUST be a dry_run dispatch so the planned-close list is reviewed on the row first"
+        required: false
+        type: boolean
+        default: false
     secrets:
       # ops-pipeline#317 / #320: the seat-inbox door's bearer (webhook-router
       # SEAT_INBOX_TOKEN — a SECOND STORE of the same value in webhook-router's Railway
@@ -100,4 +105,4 @@ jobs:
           # squasher-automerge/gate-enroll pattern.
           WEBHOOK_ROUTER_URL: ${{ vars.WEBHOOK_ROUTER_URL }}
           SEAT_INBOX_TOKEN: ${{ secrets.SEAT_INBOX_TOKEN }}
-        run: npx tsx needs-human-router.ts --repo "${{ inputs.repo }}" ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: npx tsx needs-human-router.ts --repo "${{ inputs.repo }}" ${{ inputs.dry_run && '--dry-run' || '' }} ${{ inputs.close_unrouted && '--close-unrouted' || '' }}
