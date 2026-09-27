@@ -530,6 +530,53 @@ function applyDisposition(ctx: {
       commentIssue(ownRepo, issue.number, crossRepoRouteReceipt(disposition.target, twinCreated.number, twinCreated.url));
       removeLabel(ownRepo, issue.number, LABEL);
       console.log(`${head}  SWEEP-ROUTE -> receipt posted + '${LABEL}' label removed [APPLIED]`);
+
+      // Step (d): the twin's `needs-human` label was applied by the fleet App
+      // installation token — machinery, not a user token — so GitHub's Actions
+      // recursion prevention suppresses the `issues: labeled` event that would
+      // have fired the probe workflow. Without a findings comment, the target
+      // repo's router sees `no-probe` and parks the issue forever (stint 944).
+      // This synthetic probe comment carries the PROBE_MARKER + machine trailer
+      // so the target repo's router finds and routes it on its next hourly run.
+      if (probeComment) {
+        const forwarded = [
+          PROBE_MARKER,
+          "🔎 **Read-only diagnostic probe** — auto-dispatched by the cross-repo sweep (ops-pipeline#88) from a diagnosis on the origin issue.",
+          "",
+          `This diagnosis was forwarded from [\`${shortRepoName(ownRepo)}#${issue.number}\`](${issueUrl(ownRepo, issue.number)}). Per Rule #167, verify against the live system before executing any prescription.`,
+          "",
+          "---",
+          "",
+          extractCulpritHypothesis(probeComment.body),
+          "",
+          "## Evidence (quoted from context)",
+          "_(See the origin issue for the full evidence — diagnosis forwarded.)_",
+          "",
+          "## Fix-layer recommendation",
+          "_(See the origin issue for the full recommendation — diagnosis forwarded.)_",
+          "",
+          "## NEEDS-KEVIN",
+          "no — diagnosis forwarded from the origin probe, which did not flag a Kevin gate.",
+          "",
+          "## Confidence + what would falsify this",
+          "_(Diagnosis forwarded — see the origin issue for the original confidence assessment.)_",
+          "",
+          "ROUTING: same-repo",
+          "NEEDS-KEVIN: no",
+        ].join("\n");
+        try {
+          commentIssue(disposition.target, twinCreated.number, forwarded);
+        } catch (err) {
+          // If this fails, the twin has the needs-human label but no probe
+          // comment — the target repo's router will log `no-probe` until the
+          // next cross-repo sweep run completes this step or the probe
+          // workflow fires via a manual re-label or workflow_dispatch.
+          console.log(
+            `${head}  ⚠️  couldn't post forwarded diagnosis on twin ${shortRepoName(disposition.target)}#${twinCreated.number}: ${describeError(err)} — retried next sweep`,
+          );
+        }
+      }
+
       return;
     }
 
