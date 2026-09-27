@@ -1175,7 +1175,59 @@ async function evaluate(
     return;
   }
 
-  // ── code-fix repo-class partition (ops#190 B1, doc §4.1 move 5): in a TRAIN-class
+  // ── stint #928 (2026-09-27): crew-authored code-fix and fleet-internal PRs that
+  // passed every leg (CI green, 2-of-3 review CLEAN, no sensitive path, size cap)
+  // land on Kevin's box instead of merging directly. Apply `candidate` + `box`; the
+  // next sweep merges through evaluateQueuedOverride. Planted controls both ways
+  // (negative: author-not-kbibelhausen with NO bugsquasher/fleet-internal label =
+  // refused at eligibility leg; positive: a crew-authored code-fix with green CI +
+  // CLEAN review lands box on a planted control PR — stanza-16 of the stint body).
+  const crewAuthor = finalCheck.crewAuthor;
+  if (crewAuthor && (prClass === "code-fix" || prClass === "fleet-internal")) {
+    const headNow = gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"]).trim();
+    if (headNow !== prJson.headRefOid) {
+      console.log(
+        `[wait] pr-automerge-gate ${repo}#${pr}: head moved during the gate run (reviewed ${prJson.headRefOid}, ` +
+          `now ${headNow}) — no '${TRAIN_CANDIDATE_LABEL}'/'${QUEUED_LABEL}' written; the next scheduled run re-evaluates.`,
+      );
+      console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "head-moved", reasons: [`reviewed ${prJson.headRefOid}, now ${headNow}`] }));
+      return;
+    }
+    try {
+      addLabel(repo, pr, TRAIN_CANDIDATE_LABEL);
+      addLabel(repo, pr, QUEUED_LABEL);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(
+        `[no-op] pr-automerge-gate ${repo}#${pr}: crew ${prClass} passed every leg but applying ` +
+          `'${TRAIN_CANDIDATE_LABEL}'/'${QUEUED_LABEL}' FAILED — most likely the label does not exist in this repo ` +
+          `yet. Not retried this run (Rules #109/#161). Underlying error: ${message}`,
+      );
+      return;
+    }
+    commentOnPr(
+      repo,
+      pr,
+      [
+        `**squasher auto-merge gate — CREW \`${prClass}\` → Kevin's box** (stint #928)`,
+        "",
+        `Every gate leg passed (CI green, 2-of-3 independent review CLEAN, no sensitive path, ` +
+          `additions cap, safe-path-globs, built-in denylist, named checks) — crew-authored ` +
+          `PRs land on Kevin's box instead of direct merge. Applied \`${TRAIN_CANDIDATE_LABEL}\` and ` +
+          `\`${QUEUED_LABEL}\` (the one human key, Rule #279); the next sweep merges on Kevin's word. ` +
+          `\`${HOLD_LABEL}\` still parks it.`,
+        "",
+        `Evaluated sha: \`${prJson.headRefOid}\`.`,
+        `Author: \`${author}\`.`,
+      ].join("\n"),
+    );
+    console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "candidate" }));
+    console.log(
+      `[crew-box] pr-automerge-gate ${repo}#${pr}: crew-authored ${prClass} by ${author} — all legs passed, ` +
+        `labeled \`${TRAIN_CANDIDATE_LABEL}\` + \`${QUEUED_LABEL}\` (lands on Kevin's box; next sweep merges).`,
+    );
+    return;
+  }
   // repo the squasher NEVER merges — every merge to main rides the human
   // `queued` authority (rung A1). A code-fix that passed EVERY leg (review
   // included) becomes a train CANDIDATE: label + comment, then done. Verdict
