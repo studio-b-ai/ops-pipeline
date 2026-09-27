@@ -527,8 +527,80 @@ function fetchDiffBySha(repo: string, baseRefName: string, headRefOid: string): 
   ]);
 }
 
+/**
+ * Stint #951 (2026-09-27): GitHub's `Base branch was modified. Review and try the
+ * merge again.` (mergePullRequest GraphQL mutation / REST 405) is a DIAGNOSED
+ * transient, not the TOCTOU head-move the callers' catch blocks were written for —
+ * live evidence: squasher-fleet-sweep run 36258616307 refused chassis#917 with that
+ * exact error while the head pin (`--match-head-commit c94e310…`) never moved; the
+ * same sha merged 67 min later on the next hourly sweep. chassis main lands seat
+ * receipts every minute, so the base advances between the sweep's evaluation and its
+ * merge call constantly — and the old "NOT retried this run" contract (Rules
+ * #109/#161, written for UNDIAGNOSED merge failures) cost every boxed chassis PR a
+ * full sweep hour per collision.
+ *
+ * The fix retries ONLY this one diagnosed error string, in-run, bounded: sleep for
+ * GitHub's mergeability recompute (a REST GET on the pull is GitHub's documented
+ * trigger for it), re-read the head sha, and re-fire the SAME sha-pinned merge. A
+ * head that MOVED between attempts is a real TOCTOU — abort immediately (that is
+ * exactly what #109/#161 and the `--match-head-commit` pin exist for). Any other
+ * error string (branch protection, out-of-date base rules, perms) propagates
+ * unretried, preserving the old contract for everything undiagnosed.
+ */
+
+/** Total merge attempts (first + retries) before deferring to the next sweep. */
+const BASE_MODIFIED_MAX_ATTEMPTS = 3;
+/** Settle time for GitHub's server-side mergeability recompute between attempts. */
+const BASE_MODIFIED_RETRY_SLEEP_SECONDS = "15";
+
+function isBaseBranchModified(message: string): boolean {
+  return /base branch was modified/i.test(message);
+}
+
+/** Light head-sha re-read; the REST pull GET doubles as GitHub's own documented
+ *  trigger for the background mergeability recompute the retry needs to out-wait. */
+function fetchHeadSha(repo: string, pr: number): string {
+  return gh(["api", `repos/${repo}/pulls/${pr}`, "--jq", ".head.sha"]).trim();
+}
+
 function mergePr(repo: string, pr: number, headRefOid: string): void {
-  gh(["pr", "merge", String(pr), "--repo", repo, "--squash", "--match-head-commit", headRefOid]);
+  const args = ["pr", "merge", String(pr), "--repo", repo, "--squash", "--match-head-commit", headRefOid];
+  for (let attempt = 1; attempt <= BASE_MODIFIED_MAX_ATTEMPTS; attempt++) {
+    try {
+      gh(args);
+      if (attempt > 1) {
+        console.log(
+          `[info] pr-automerge-gate ${repo}#${pr}: "Base branch was modified" retry succeeded ` +
+            `(merged on attempt ${attempt}/${BASE_MODIFIED_MAX_ATTEMPTS}, head pin ${headRefOid} held throughout — stint #951)`,
+        );
+      }
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!isBaseBranchModified(message)) throw err; // undiagnosed failure class — #109/#161 contract stands
+      if (attempt === BASE_MODIFIED_MAX_ATTEMPTS) {
+        throw new Error(
+          `merge failed with "Base branch was modified" on all ${BASE_MODIFIED_MAX_ATTEMPTS} attempts this run ` +
+            `(head pin ${headRefOid} verified unchanged on every re-read — the base keeps outrunning the recompute) — ` +
+            `deferring to the next sweep. Last error: ${message}`,
+        );
+      }
+      execFileSync("sleep", [BASE_MODIFIED_RETRY_SLEEP_SECONDS]);
+      const headNow = fetchHeadSha(repo, pr);
+      if (headNow !== headRefOid) {
+        throw new Error(
+          `merge failed with "Base branch was modified" (attempt ${attempt}/${BASE_MODIFIED_MAX_ATTEMPTS}), ` +
+            `but the head ALSO moved ${headRefOid} → ${headNow} between attempts — a real TOCTOU the sha pin exists ` +
+            `to reject, NOT retried further this run (Rules #109/#161)`,
+        );
+      }
+      console.log(
+        `[info] pr-automerge-gate ${repo}#${pr}: "Base branch was modified" on attempt ${attempt}/${BASE_MODIFIED_MAX_ATTEMPTS} ` +
+          `(head unchanged at ${headRefOid} — a stale-base recompute, not a TOCTOU) — retrying in-run after ` +
+          `${BASE_MODIFIED_RETRY_SLEEP_SECONDS}s settle (stint #951)`,
+      );
+    }
+  }
 }
 
 function commentOnPr(repo: string, pr: number, body: string): void {
@@ -1319,9 +1391,11 @@ async function evaluate(
     console.log(
       `[no-op] pr-automerge-gate ${repo}#${pr}: all legs passed but the merge call failed — ` +
         `most likely the head moved between evaluation and merge (TOCTOU race, --match-head-commit ` +
-        `correctly rejected it) or a branch-protection rule blocked it. This is NOT retried in this ` +
-        `run (Rules #109/#161) — the next scheduled/triggered run re-evaluates the current head. ` +
-        `Underlying error: ${message}`,
+        `correctly rejected it) or a branch-protection rule blocked it. Undiagnosed classes are NOT ` +
+        `retried in this run (Rules #109/#161) — the next scheduled/triggered run re-evaluates the ` +
+        `current head. (The one diagnosed exception, "Base branch was modified" stale-base recompute, ` +
+        `was already retried in-run by mergePr — stint #951 — so reaching this catch means it was ` +
+        `exhausted or never applied.) Underlying error: ${message}`,
     );
     // No [gate-receipt] line here: the gate itself QUALIFIED (every leg passed) — this
     // is an operational merge-attempt failure, not a gate miss, and the original
@@ -1594,7 +1668,7 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
       mergePr(repo, pr, prJson.headRefOid);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      const detail = `queued: every leg passed but the merge call failed (TOCTOU race the SHA pin rejected, or a branch-protection block) — NOT retried this run: ${message}`;
+      const detail = `queued: every leg passed but the merge call failed (TOCTOU race the SHA pin rejected, or a branch-protection block) — undiagnosed classes NOT retried this run (the diagnosed "Base branch was modified" stale-base recompute was already retried in-run by mergePr, stint #951, so this catch means exhausted or never applicable): ${message}`;
       console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}`);
       console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "box", reasons: [detail] }));
       return "abort-cycle";
@@ -1672,8 +1746,11 @@ function logTrainGateLine(repo: string, pr: number, outcome: TrainReadyOutcome, 
  *     Telemetry line only.
  *   - "merge-attempt-failed": every leg passed but the SHA-pinned `mergePr` call itself
  *     threw (head moved between revalidate and merge, or a branch-protection rule
- *     blocked it) — NOT retried in this run (Rules #109/#161), matching `evaluate()`'s
- *     own merge-attempt-failure handling exactly.
+ *     blocked it) — undiagnosed classes NOT retried in this run (Rules #109/#161),
+ *     matching `evaluate()`'s own merge-attempt-failure handling exactly; the one
+ *     diagnosed exception ("Base branch was modified" stale-base recompute, stint
+ *     #951) is retried in-run inside `mergePr`, so this outcome means that retry was
+ *     exhausted or the error was never that class.
  *   - "merged": all legs passed, revalidate found no drift, `mergePr` succeeded. A
  *     write-only receipt is posted via the existing `commentOnPr`.
  */
@@ -2006,14 +2083,18 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   // stint #372: under the box ruling there is no receipt to re-check.)
 
   // ── All legs pass — attempt the SHA-pinned merge (same TOCTOU contract as
-  // `evaluate()`'s own merge call: --match-head-commit, no same-cycle retry). ──
+  // `evaluate()`'s own merge call: --match-head-commit; undiagnosed classes get no
+  // same-cycle retry, the diagnosed "Base branch was modified" stale-base recompute
+  // is retried in-run by mergePr — stint #951). ──
   try {
     mergePr(repo, pr, prJson.headRefOid);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const detail =
       `all legs passed but the merge call failed (most likely a TOCTOU race the SHA pin ` +
-      `correctly rejected, or a branch-protection block) — NOT retried this run: ${message}`;
+      `correctly rejected, or a branch-protection block) — undiagnosed classes NOT retried this run ` +
+      `(the "Base branch was modified" retry already happened inside mergePr — stint #951 — so this ` +
+      `catch means it was exhausted or never applied): ${message}`;
     logTrainGateLine(repo, pr, "merge-attempt-failed", detail);
     return { outcome: "merge-attempt-failed", detail };
   }
