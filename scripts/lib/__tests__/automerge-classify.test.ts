@@ -804,11 +804,11 @@ describe("gateDecisionForClass", () => {
   // ───── Positives ─────
 
   it("merges for ci-infra with all universal legs green", () => {
-    expect(gateDecisionForClass(baseInputV2())).toEqual({ decision: "merge", reasons: [] });
+    expect(gateDecisionForClass(baseInputV2())).toEqual({ decision: "merge", reasons: [], crewAuthor: false });
   });
 
   it("merges for test-only with all universal legs green", () => {
-    expect(gateDecisionForClass(baseInputV2({ prClass: "test-only" }))).toEqual({ decision: "merge", reasons: [] });
+    expect(gateDecisionForClass(baseInputV2({ prClass: "test-only" }))).toEqual({ decision: "merge", reasons: [], crewAuthor: false });
   });
 
   it("merges for docs-comment with all universal legs green, IDENTICAL to the original gateDecision's result for the equivalent input (equivalence regression check)", () => {
@@ -823,6 +823,28 @@ describe("gateDecisionForClass", () => {
     });
     expect(v2.decision).toBe(v1.decision);
     expect(v2.reasons).toEqual(v1.reasons);
+  });
+
+  // ───── stint #928 crew-author controls (both ways) ─────
+
+  it("known-GOOD: crew-author code-fix returns crewAuthor=true (stint #928)", () => {
+    const result = gateDecisionForClass(baseInputV2({ author: "crew-member", prClass: "code-fix" }));
+    expect(result.decision).toBe("merge");
+    expect(result.crewAuthor).toBe(true);
+  });
+
+  it("known-BAD: crew-author docs-comment still refused (NOT in CREW_AUTHORIZED_CLASSES)", () => {
+    const result = gateDecisionForClass(baseInputV2({ author: "crew-member", prClass: "docs-comment" }));
+    expect(result.decision).toBe("wait");
+    expect(result.crewAuthor).toBe(false);
+    expect(result.reasons.some((r) => r.includes("author"))).toBe(true);
+  });
+
+  it("known-BAD: crew-author ci-infra still refused (NOT in CREW_AUTHORIZED_CLASSES)", () => {
+    const result = gateDecisionForClass(baseInputV2({ author: "crew-member" }));
+    expect(result.decision).toBe("wait");
+    expect(result.crewAuthor).toBe(false);
+    expect(result.reasons.some((r) => r.includes("author"))).toBe(true);
   });
 });
 
@@ -1269,10 +1291,28 @@ describe("gateDecisionForClass — fleet-internal class label legs (stint #689)"
     expect(result.reasons.some((r) => r.includes("'hold' is present"))).toBe(true);
   });
 
-  it("waits when the author is not kbibelhausen (the universal author leg still binds this class)", () => {
-    const result = gateDecisionForClass(fiInput({ author: "someone-else" }));
+  it("known-GOOD: crew-author code-fix returns crewAuthor=true (stint #928)", () => {
+    const result = gateDecisionForClass(fiInput({ author: "crew-member", prClass: "code-fix" }));
+    expect(result.decision).toBe("merge");
+    expect(result.crewAuthor).toBe(true);
+  });
+
+  it("known-BAD: crew-author ci-infra still refused (NOT in CREW_AUTHORIZED_CLASSES — stint #928 scoping)", () => {
+    const result = gateDecisionForClass(fiInput({ author: "crew-member", prClass: "ci-infra" }));
     expect(result.decision).toBe("wait");
+    expect(result.crewAuthor).toBe(false);
     expect(result.reasons.some((r) => r.includes("author"))).toBe(true);
+  });
+
+  it("known-GOOD: crew-author fleet-internal returns crewAuthor=true (stint #928)", () => {
+    const result = gateDecisionForClass(fiInput({ author: "crew-member" }));
+    expect(result.decision).toBe("merge");
+    expect(result.crewAuthor).toBe(true);
+  });
+
+  it("known-BAD: crew-author fleet-internal with hold still waits (box parked — stint #928 crew does not override hold)", () => {
+    const result = gateDecisionForClass(fiInput({ author: "crew-member", labels: ["fleet-internal", "hold"] }));
+    expect(result.decision).toBe("wait");
   });
 
   it("waits when the review verdict is FLAG (the 2-of-3 Sonnet leg still binds this class)", () => {
@@ -1290,7 +1330,7 @@ describe("gateDecisionForClass — fleet-internal class label legs (stint #689)"
   // ───── Positive + scoping controls ─────
 
   it("known-GOOD: merges with every leg green (label present, no needs-human/hold, CI clean, review CLEAN)", () => {
-    expect(gateDecisionForClass(fiInput())).toEqual({ decision: "merge", reasons: [] });
+    expect(gateDecisionForClass(fiInput())).toEqual({ decision: "merge", reasons: [], crewAuthor: false });
   });
 
   it("scoping control: needs-human does NOT block the OTHER classes (byte-identical — the blue-card flow relies on re-evaluation)", () => {
@@ -1301,7 +1341,7 @@ describe("gateDecisionForClass — fleet-internal class label legs (stint #689)"
       ciClean: true,
       reviewVerdict: "CLEAN",
     });
-    expect(result).toEqual({ decision: "merge", reasons: [] });
+    expect(result).toEqual({ decision: "merge", reasons: [], crewAuthor: false });
   });
 });
 

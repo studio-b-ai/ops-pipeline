@@ -34,9 +34,20 @@ export interface GateInput {
 export interface GateResult {
   decision: GateVerdict;
   reasons: string[];
+  /** stint #928: true when a crew author (non-kbibelhausen) authored a class the
+   *  crew is authorized to merge through — code-fix and fleet-internal. The gate
+   *  passes the PR through normal legs (review, named-checks, etc.) but the caller
+   *  applies `box` instead of merging directly (crew PRs land on Kevin's box). */
+  crewAuthor: boolean;
 }
 
 const BUGSQUASHER_AUTHOR = "kbibelhausen";
+/** stint #928 (2026-09-27): crew-authored code-fix and fleet-internal PRs that pass
+ *  every gate leg (CI green, 2-of-3 review CLEAN, no sensitive path, size cap) are
+ *  delegated `box` instead of merged directly — crew land on Kevin's box. Classes
+ *  NOT in this set still require kbibelhausen authorship (docs-comment, ci-infra,
+ *  test-only, vault-doc). */
+const CREW_AUTHORIZED_CLASSES: readonly PrDiffClass[] = ["code-fix", "fleet-internal"];
 const BUGSQUASHER_LABEL = "bugsquasher";
 // 2026-09-13 (Kevin "door fix", Principal sitting): `fleet-internal` is a first-class eligibility label — the seats' own PRs
 // (runner-labeled at box, lib/fleet-internal-label.sh: green, in-registry, no live path) ride the same door as bugsquasher's.
@@ -358,7 +369,7 @@ export function gateDecision(input: GateInput): GateResult {
     reasons.push(`independent review verdict '${input.reviewVerdict}' !== 'CLEAN'`);
   }
 
-  return { decision: reasons.length === 0 ? "merge" : "wait", reasons };
+  return { decision: reasons.length === 0 ? "merge" : "wait", reasons, crewAuthor: false };
 }
 
 // ───────────────────────────── CI-rollup classification ─────────────────────────────
@@ -1012,7 +1023,11 @@ export function gateDecisionForClass(input: GateInputV2): GateResult {
     reasons.push(`prClass '${input.prClass}' is not a recognized diff class (valid: ${ALL_PR_DIFF_CLASSES.join(", ")})`);
   }
 
-  if (input.author !== BUGSQUASHER_AUTHOR) {
+  // stint #928: crew-authored code-fix and fleet-internal PRs are authorized —
+  // they pass the same legs and land on Kevin's box instead of direct merge.
+  const prClassValid = ALL_PR_DIFF_CLASSES.includes(input.prClass);
+  const crewAuthor = input.author !== BUGSQUASHER_AUTHOR && prClassValid && CREW_AUTHORIZED_CLASSES.includes(input.prClass);
+  if (input.author !== BUGSQUASHER_AUTHOR && !crewAuthor) {
     reasons.push(`author '${input.author}' !== '${BUGSQUASHER_AUTHOR}'`);
   }
   if (!hasEligibleLabel(input.labels)) {
@@ -1050,7 +1065,7 @@ export function gateDecisionForClass(input: GateInputV2): GateResult {
     }
   }
 
-  return { decision: reasons.length === 0 ? "merge" : "wait", reasons };
+  return { decision: reasons.length === 0 ? "merge" : "wait", reasons, crewAuthor };
 }
 
 // ───────────────────────────── CI-rollup classification ─────────────────────────────
