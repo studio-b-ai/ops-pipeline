@@ -117,7 +117,8 @@
       "repo": "studio-b-ai/client-asthetik",
       "enabled_classes": "docs-comment",
       "sensitive_path_patterns": "^\\.github/actions/",
-      "train": true
+      "train": true,
+      "sanctioned_skips": "qualify / ui-tests-local ${{ inputs.ui_tests_local_path }} (advisory),qualify / ui-test-suite @acumatica,qualify / sandbox publish dry-run,qualify / Notify on qualifier failure,Auto-qualifier (shadow)"
     },
     {
       "repo": "studio-b-ai/toto",
