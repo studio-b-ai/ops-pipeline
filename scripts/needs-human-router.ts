@@ -317,9 +317,30 @@ async function logMainOutcome(
       // human's explicit action.
       console.log(`${head}  skip-already-routed`);
       return;
-    case "no-probe":
-      console.log(`${head}  no-probe (no findings comment yet — nothing to route on)`);
+    case "no-probe": {
+      // ops-pipeline#944 (stint #690 follow-up): machinery-labeled needs-human
+      // issues never get a findings comment because GitHub's Actions recursion
+      // suppression blocks `issues: labeled` triggers when the label is applied
+      // by a GITHUB_TOKEN workflow (Machinery).  Without this dispatch the
+      // router parks them no-probe forever — every hourly run prints the same
+      // "nothing to route on" line.  The probe workflow's own concurrency group
+      // + marker dedup make double-dispatch harmless; the dispatch is
+      // best-effort (a repo that lacks a probe caller fails into the catch and
+      // stays parked — that's a deployment gap, not a runtime bug).
+      console.log(`${head}  no-probe — dispatching probe via workflow_dispatch (machinery-labeled, stint #944)`);
+      if (!dryRun) {
+        try {
+          gh(["workflow", "run", "needs-human-probe.yml", "--repo", repo, "-f", `issue_number=${issue.number}`]);
+          console.log(`${head}  probe dispatch sent`);
+        } catch (e) {
+          console.log(`${head}  probe dispatch FAILED (repo may lack a caller): ${e instanceof Error ? e.message : String(e)}`);
+        }
+      } else {
+        console.log(`${head}  [PREVIEW — would dispatch probe]`);
+      }
+      actionedThisRun.add(issue.number);
       return;
+    }
     case "close-rejected": {
       const result = tryApply(() => closeIssue(repo, issue.number, closeRejectedReceipt()), dryRun);
       logResult(head, "close-rejected (authorized 👎, pre-routing)", result);
