@@ -14,12 +14,16 @@ name: Needs-human diagnostic probe (reusable)
 # firing is proven there (#464).
 #
 # Trigger note (the ops-pipeline#23 lesson applied at DESIGN time, not learned
-# again): callers trigger on `issues: labeled`. That event fires when the label
-# is applied by the squasher CCR session or any human — both act with USER
-# tokens, not GITHUB_TOKEN, so GitHub's Actions recursion prevention does NOT
-# suppress it. This probe's own comment IS posted with GITHUB_TOKEN, so it can
-# never re-trigger anything. The self-triggering shape that made the auto-merge
-# gate structurally inert cannot occur here by construction.
+# again): callers trigger on `issues: labeled` AND `pull_request: labeled`.
+# `issues: labeled` fires when the label is applied by the squasher CCR session
+# or any human — both act with USER tokens, not GITHUB_TOKEN, so GitHub's Actions
+# recursion prevention does NOT suppress it. `pull_request: labeled` fires when
+# the PR automerge gate (squasher-automerge, Fleet App token) applies
+# `needs-human` to a PR — this is a separate event type (not `issues: labeled`)
+# so the caller must explicitly list it. This probe's own comment IS posted with
+# GITHUB_TOKEN, so it can never re-trigger anything. The self-triggering shape
+# that made the auto-merge gate structurally inert cannot occur here by
+# construction.
 
 on:
   workflow_call:
