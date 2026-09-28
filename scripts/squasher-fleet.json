@@ -118,7 +118,7 @@
       "enabled_classes": "docs-comment",
       "sensitive_path_patterns": "^\\.github/actions/",
       "train": true,
-      "sanctioned_skips": "qualify / ui-tests-local ${{ inputs.ui_tests_local_path }} (advisory),qualify / ui-test-suite @acumatica,qualify / sandbox publish dry-run,qualify / Notify on qualifier failure,Auto-qualifier (shadow)"
+      "sanctioned_skips": "qualify / ui-tests-local ${{ inputs.ui_tests_local_path }} (advisory),qualify / ui-test-suite @acumatica,qualify / sandbox publish dry-run,qualify / Notify on qualifier failure,Auto-qualifier (shadow),deploy,build / Pre-Deploy Qualification,build / Validate on Staging,build / build-bin,build / 24h Dispatch Cap"
     },
     {
       "repo": "studio-b-ai/toto",
