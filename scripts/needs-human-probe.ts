@@ -76,7 +76,19 @@ async function main(): Promise<void> {
   if (!Number.isInteger(issueNumber) || issueNumber <= 0) {
     throw new Error(`PROBE_ISSUE must be a positive integer, got: ${process.env.PROBE_ISSUE}`);
   }
+  await runProbe(repo, issueNumber);
+}
 
+/**
+ * Fire a read-only diagnostic probe on an escalated issue. Posts ONE findings
+ * comment (deduped by PROBE_MARKER). Callers: the needs-human-probe CLI (via main())
+ * and the needs-human-router (when a labeled issue was parked no-probe by machinery).
+ *
+ * Requires Anthropic credentials in the environment (ANTHROPIC_API_KEY or federation
+ * vars — see lib/anthropic-credentials.ts). GH_TOKEN must be set for gh CLI calls.
+ */
+export async function runProbe(repo: string, issueNumber: number): Promise<void> {
+  requireAnthropicCredentials();
   const issue = fetchIssue(repo, issueNumber);
 
   // Gate 1 — only escalated issues. The caller workflow filters on the label too,
