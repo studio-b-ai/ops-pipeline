@@ -317,9 +317,26 @@ async function logMainOutcome(
       // human's explicit action.
       console.log(`${head}  skip-already-routed`);
       return;
-    case "no-probe":
-      console.log(`${head}  no-probe (no findings comment yet — nothing to route on)`);
+    case "no-probe": {
+      // ops-pipeline#575 (stint #944): Machinery labels issues with GITHUB_TOKEN,
+      // suppressing the `issues: labeled` event (GitHub Actions recursion prevention)
+      // → the per-repo probe caller never fires → the issue parks no-probe forever.
+      // The router fires the probe directly for any no-probe issue. The probe's
+      // own marker dedup (alreadyProbed()) prevents double-commenting on re-fire;
+      // the reusable workflow's concurrency group prevents double-run.
+      // gh workflow run dispatch does NOT consume the ACTION_CAP mutation budget.
+      console.log(`${head}  no-probe (no findings comment yet — firing probe)`);
+      try {
+        gh([
+          "workflow", "run", "needs-human-probe.yml", "--repo", repo,
+          "-f", `issue_number=${issue.number}`,
+        ]);
+        console.log(`${head}  probe dispatched`);
+      } catch (e) {
+        console.error(`${head}  probe dispatch FAILED: ${e instanceof Error ? e.message : String(e)}`);
+      }
       return;
+    }
     case "close-rejected": {
       const result = tryApply(() => closeIssue(repo, issue.number, closeRejectedReceipt()), dryRun);
       logResult(head, "close-rejected (authorized 👎, pre-routing)", result);
