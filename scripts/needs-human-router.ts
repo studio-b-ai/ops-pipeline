@@ -61,6 +61,7 @@ import {
   laneLabelDescription,
   LANE_LABEL_COLOR,
 } from "./lib/needs-human-router-lib.js";
+import { execFileSync } from "node:child_process";
 
 const LABEL = "needs-human";
 const ORG = "studio-b-ai";
@@ -318,7 +319,25 @@ async function logMainOutcome(
       console.log(`${head}  skip-already-routed`);
       return;
     case "no-probe":
-      console.log(`${head}  no-probe (no findings comment yet — nothing to route on)`);
+      // stint #944: the `issues: labeled` event is suppressed when machinery (e.g. the
+      // automerge gate's `github.token`-based gh api label add) applies the `needs-human`
+      // label, so the probe caller never fires. The router now runs the probe inline
+      // rather than parking the issue no-probe forever (stint 690 follow-up, op#575 tail).
+      console.log(`${head}  no-probe (no findings comment yet — triggering probe inline)`);
+      if (!dryRun) {
+        try {
+          execFileSync("npx", ["tsx", "needs-human-probe.ts"], {
+            env: { ...process.env, PROBE_REPO: repo, PROBE_ISSUE: String(issue.number) },
+            stdio: "inherit",
+            timeout: 120_000,
+          });
+          console.log(`${head}  probe completed — re-evaluating next run`);
+        } catch (e) {
+          console.log(`${head}  probe FAILED: ${(e as Error).message.split("\n")[0]}`);
+        }
+      } else {
+        console.log(`${head}  [PREVIEW — would trigger probe]`);
+      }
       return;
     case "close-rejected": {
       const result = tryApply(() => closeIssue(repo, issue.number, closeRejectedReceipt()), dryRun);

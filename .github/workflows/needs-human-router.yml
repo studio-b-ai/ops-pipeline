@@ -40,10 +40,17 @@ on:
       # `vars.` in ops-pipeline (the public hostname, not a secret); see the run step.
       SEAT_INBOX_TOKEN:
         required: false
+      # stint #944: the router now runs the probe inline when it finds a `needs-human`
+      # issue with no findings comment (machinery-labeled issues where the `labeled` event
+      # was suppressed). Optional — a caller carrying the WIF federation vars (in its own
+      # `vars.`) federates keyless; a caller without them must pass this legacy key.
+      ANTHROPIC_API_KEY:
+        required: false
 
 permissions:
   contents: read
   issues: write
+  id-token: write   # WIF — the caller job must grant this too
 
 # One router run at a time per repo: an hourly cron racing a slow prior run (or a
 # manual workflow_dispatch) must not double-process the same issues.
@@ -69,6 +76,15 @@ jobs:
       - name: Install deps
         working-directory: scripts
         run: npm ci || npm install
+
+      - name: "Anthropic federated token (keyless — only when the caller carries federation vars)"
+        if: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID != '' }}
+        uses: ./.github/actions/anthropic-federated-token
+        with:
+          rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
 
       - name: Run needs-human router
         working-directory: scripts
@@ -100,4 +116,5 @@ jobs:
           # squasher-automerge/gate-enroll pattern.
           WEBHOOK_ROUTER_URL: ${{ vars.WEBHOOK_ROUTER_URL }}
           SEAT_INBOX_TOKEN: ${{ secrets.SEAT_INBOX_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: npx tsx needs-human-router.ts --repo "${{ inputs.repo }}" ${{ inputs.dry_run && '--dry-run' || '' }}
