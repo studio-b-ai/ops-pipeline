@@ -17,6 +17,16 @@ name: Needs-human router (reusable)
 # Chip B (5 repos) adds the per-repo hourly cron callers + the 2 probe callers
 # (webhook-router, asthetik-trade-theme) that this workflow depends on for coverage —
 # NOT part of this PR.
+#
+# stint #944 (mechanic crew, 2026-09-29): the router now also fires the probe inline
+# when an escalated issue has no findings comment ("no-probe" disposition). This
+# covers the gap where machinery (the sweep worker) labels issues with an App
+# installation token — GitHub may not fire the `issues: labeled` workflow trigger for
+# non-user-token label events, so the probe workflow never runs and the router used to
+# park such issues as "no-probe" forever. The router now calls runProbe() directly
+# from needs-human-probe.ts. Anthropic federation was added to this workflow to
+# support that inline probe call; the ANTHROPIC_API_KEY secret input covers callers
+# that haven't migrated to federation yet.
 
 on:
   workflow_call:
@@ -40,10 +50,20 @@ on:
       # `vars.` in ops-pipeline (the public hostname, not a secret); see the run step.
       SEAT_INBOX_TOKEN:
         required: false
+      # stint #944: the router now fires the probe inline when machinery-labeled
+      # issues were parked no-probe. Optional so callers still route without it;
+      # the probe leg logs a failure and retries next run. Callers that federate
+      # (OIDC) don't need this — the federation step below exchanges the identity
+      # token. The probe workflow already supports both modes.
+      ANTHROPIC_API_KEY:
+        required: false
 
 permissions:
   contents: read
   issues: write
+  id-token: write   # WIF — stint #944: router now fires the probe inline when an issue
+                    # was labeled by machinery (no user-token label event triggers the
+                    # probe workflow). The probe needs Anthropic federation.
 
 # One router run at a time per repo: an hourly cron racing a slow prior run (or a
 # manual workflow_dispatch) must not double-process the same issues.
@@ -69,6 +89,14 @@ jobs:
       - name: Install deps
         working-directory: scripts
         run: npm ci || npm install
+
+      - name: "Anthropic federated token (stint #944 — router fires probe inline on no-probe issues)"
+        uses: ./.github/actions/anthropic-federated-token
+        with:
+          rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
 
       - name: Run needs-human router
         working-directory: scripts
@@ -100,4 +128,8 @@ jobs:
           # squasher-automerge/gate-enroll pattern.
           WEBHOOK_ROUTER_URL: ${{ vars.WEBHOOK_ROUTER_URL }}
           SEAT_INBOX_TOKEN: ${{ secrets.SEAT_INBOX_TOKEN }}
+          # stint #944 — router fires probe inline on no-probe issues.
+          # Optional (the federation step above covers OIDC callers); pass
+          # the API key for callers that haven't migrated to federation yet.
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: npx tsx needs-human-router.ts --repo "${{ inputs.repo }}" ${{ inputs.dry_run && '--dry-run' || '' }}
