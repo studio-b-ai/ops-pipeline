@@ -1,0 +1,87 @@
+name: One-Key Labels
+
+# stint #679 — "The one key must exist wherever a PR can exist. A repo without the
+# label is a repo where the owner merges by hand." GitHub labels are repo-scoped: the
+# 2026-09-15 box-in-all-repos provisioning covered only the repos that existed that
+# night, so surface-canary (born 9/16, stint #461) had no `box` when PR #1 needed it
+# and Kevin hand-merged (9/18 02:56:50Z). The squasher-fleet-sweep's org-wide
+# `label:box` leg reaches unregistered repos, but a search leg cannot see a label the
+# repo never defined. This is the durable sensor + actuator: weekly tick (and
+# on-demand dispatch) enumerates every non-archived org repo missing `box`/`hold`
+# and creates them with the canonical specs read live from ops-pipeline.
+#
+# Kill condition: any active org repo missing a one-key label after the tick → the
+# worker exits 1 and the run goes red. Negative control by design: archived repos
+# are skipped AND reported as skipped (a silent skip would read as coverage).
+#
+# Token: the fleet App mint is required (repo-hygiene.yml's pattern, copied verbatim)
+# — org-wide repo enumeration + cross-repo label creation are structurally beyond
+# the ambient GITHUB_TOKEN; label ops ride the App installation's issues:write.
+
+on:
+  schedule:
+    - cron: "17 10 * * 1" # weekly, Monday 10:17 UTC (off the :00/:30 peaks — Rule #298 jitter; GH Actions cron is UTC-only — Rule #94)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real reads throughout (org enumeration + per-repo label reads) — zero label mutations, preview only"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: one-key-labels
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: "One-key label coverage (fleet App token)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted UNCONDITIONALLY — including on a dry run: Rule #376, a dry run that
+      # reads nothing proves nothing, and every read here needs real org-wide access.
+      - name: Mint fleet installation token
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: Fail loud if the fleet token did not mint
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token — check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
+          exit 1
+
+      # Cron = the tick: --post (the actuator is the point of the sensor; ensureLabel
+      # is idempotent --force, so a no-gap tick is a verified no-op). Dispatch
+      # defaults dry for safe manual probing.
+      - name: Run one-key labels worker
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+        # Cron = the tick: --post (the actuator is the point of the sensor; ensureLabel
+        # is idempotent --force, so a no-gap tick is a verified no-op). Dispatch
+        # defaults dry for safe manual probing. NB: never write this as
+        # `(dry) && '' || '--post'` — the empty string is falsy and the || fires.
+        run: npx tsx one-key-labels.ts ${{ (github.event_name == 'schedule' || inputs.dry_run == false) && '--post' || '' }}
+
+      # Rule #356: terminal status is a SEPARATE step with if: always() — a
+      # timeout-minutes kill executes nothing further inside the run step.
+      - name: Terminal status
+        if: always()
+        run: echo "one-key-labels outcome=${{ job.status }} (cron tick mutates; dispatch dry_run=${{ inputs.dry_run || 'n/a' }})"
