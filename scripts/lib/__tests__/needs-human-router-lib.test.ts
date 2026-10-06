@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   FLEET_APP_MARKER_AUTHOR,
+  FIRST_PASS_MARKER,
   hasAnyRouterReceipt,
   hasAuthorizedDisapproval,
+  hasFirstPassMarker,
   hasHoldReceipt,
   hasRouteReceipt,
   HOLD_RECEIPT_MARKER,
@@ -12,6 +16,7 @@ import {
   routeDisposition,
   summarizeDispositions,
   TRUSTED_MARKER_AUTHOR,
+  unroutedClockDisposition,
   type RouterDecisionInput,
   laneLabelFor,
   REPO_LANE_MANAGER,
@@ -264,5 +269,80 @@ describe("laneLabelFor (2026-09-06 — every route carries the seat's lane label
   it("control: every mapped seat is a canonical rail slug", () => {
     const seats = new Set(Object.values(REPO_LANE_MANAGER));
     for (const s of seats) expect(["mechanic", "engineer", "dispatcher", "controller", "publicity", "desk", "roundhouse", "general-counsel", "pricing"]).toContain(s);
+  });
+});
+
+
+describe("unroutedClockDisposition (stint #690 — the 7-day unrouted clock)", () => {
+  const NOW = new Date("2026-09-19T10:00:00Z");
+  const DAYS = 86_400_000;
+
+  it("routed retires the clock unconditionally — a lingering label after a partial-failure route is NOT an unrouted item", () => {
+    expect(unroutedClockDisposition({ hasRouteReceipt: true, firstPassAt: null, now: NOW })).toEqual({ kind: "routed" });
+    expect(
+      unroutedClockDisposition({ hasRouteReceipt: true, firstPassAt: new Date(NOW.getTime() - 30 * DAYS), now: NOW }),
+    ).toEqual({ kind: "routed" });
+  });
+
+  it("no first-pass card = first sight: stamp the card, and the due date is exactly now + 7d (clock starts at the first routing pass, never the filing date)", () => {
+    const d = unroutedClockDisposition({ hasRouteReceipt: false, firstPassAt: null, now: NOW });
+    expect(d.kind).toBe("stamp-card");
+    if (d.kind === "stamp-card") expect(d.dueAt.getTime() - NOW.getTime()).toBe(7 * DAYS);
+  });
+
+  it("card aged < 7d: waiting, with the remaining window reported", () => {
+    const firstPassAt = new Date(NOW.getTime() - 3 * DAYS);
+    const d = unroutedClockDisposition({ hasRouteReceipt: false, firstPassAt, now: NOW });
+    expect(d).toEqual({ kind: "waiting", remainingMs: 4 * DAYS });
+  });
+
+  it("card aged > 7d: close-unrouted (the pre-existing >7d backlog is safe BECAUSE its clock starts at first sight, not filing)", () => {
+    const firstPassAt = new Date(NOW.getTime() - 8 * DAYS);
+    const d = unroutedClockDisposition({ hasRouteReceipt: false, firstPassAt, now: NOW });
+    expect(d.kind).toBe("close-unrouted");
+    if (d.kind === "close-unrouted") expect(d.ageMs).toBe(8 * DAYS);
+  });
+
+  it("boundary: exactly 7 days old closes — the item has had its full window (>=, not >)", () => {
+    const firstPassAt = new Date(NOW.getTime() - 7 * DAYS);
+    expect(unroutedClockDisposition({ hasRouteReceipt: false, firstPassAt, now: NOW }).kind).toBe("close-unrouted");
+    expect(unroutedClockDisposition({ hasRouteReceipt: false, firstPassAt: new Date(NOW.getTime() - 7 * DAYS + 1000), now: NOW }).kind).toBe("waiting");
+  });
+
+  it("a custom window is honored (the caller/test pins the clock, Rule #256)", () => {
+    const firstPassAt = new Date(NOW.getTime() - 2 * DAYS);
+    expect(unroutedClockDisposition({ hasRouteReceipt: false, firstPassAt, now: NOW, windowMs: DAYS }).kind).toBe("close-unrouted");
+    expect(unroutedClockDisposition({ hasRouteReceipt: false, firstPassAt: null, now: NOW, windowMs: DAYS })).toEqual({
+      kind: "stamp-card",
+      dueAt: new Date(NOW.getTime() + DAYS),
+    });
+  });
+});
+
+describe("FIRST_PASS_MARKER / hasFirstPassMarker", () => {
+  it("known-GOOD: finds the marker; known-BAD: absent on an untouched thread (Rule #322 both directions)", () => {
+    expect(hasFirstPassMarker([`some text ${FIRST_PASS_MARKER}`])).toBe(true);
+    expect(hasFirstPassMarker(["no card here", ROUTE_RECEIPT_MARKER])).toBe(false);
+    expect(hasFirstPassMarker([])).toBe(false);
+  });
+});
+
+describe("stint #690 script+workflow wiring (grep-verifiable contract)", () => {
+  it("the reusable workflow exposes close_unrouted and the script consumes --close-unrouted", () => {
+    const wf = readFileSync(join(__dirname, "../../../.github/workflows/needs-human-router.yml"), "utf8");
+    expect(wf).toContain("close_unrouted:");
+    expect(wf).toContain("--close-unrouted");
+    const script = readFileSync(join(__dirname, "../../../scripts/needs-human-router.ts"), "utf8");
+    expect(script).toContain('"--close-unrouted"');
+    expect(script).toContain("runUnroutedClock");
+  });
+
+  it("the first closing pass is dry-run-gated: close_unrouted defaults false everywhere it is declared", () => {
+    const wf = readFileSync(join(__dirname, "../../../.github/workflows/needs-human-router.yml"), "utf8");
+    const caller = readFileSync(join(__dirname, "../../../.github/workflows/needs-human-router-caller.yml"), "utf8");
+    for (const src of [wf, caller]) {
+      const block = src.split("close_unrouted:")[1] ?? "";
+      expect(block.slice(0, 400)).toContain("default: false");
+    }
   });
 });
