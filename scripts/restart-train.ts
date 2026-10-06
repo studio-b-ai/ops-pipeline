@@ -851,6 +851,17 @@ async function maybePage(
   const clearance = windowState(nowIso, ticket.repoClass, anchor.anchorIso);
   if (!clearance.clear) {
     console.log(`[restart-train] --page: queue head ${ticket.repo}#${ticket.number} window not clear yet — ${clearance.reason}`);
+    // 2026-09-15 stint #361 L2D-12: the window law (spacing, business hours, blackout) prevents
+    // merging and CLICK DUE, but it must NOT prevent carding action_required — the human needs
+    // the clickable approval URLs while waiting for the window (client-asthetik#372, 45h outside
+    // business hours with gitleaks approval silent because the CI rollup was never fetched).
+    try {
+      const prJson = await fetchQueueHeadRollup(ticket.repo, ticket.number);
+      await cardActionRequiredFor(ticket, prJson.headRefOid, prJson.statusCheckRollup,
+        `window not clear — ${clearance.reason}`, post);
+    } catch (e) {
+      console.log(`[restart-train] --page: window-blocked card probe failed for ${ticket.repo}#${ticket.number}: ${e instanceof Error ? e.message : String(e)}`);
+    }
     return;
   }
 
