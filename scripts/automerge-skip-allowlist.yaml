@@ -133,6 +133,29 @@ repos:
     - "Slack Recovery Notice"
     - "tripwire"
 
+  # RULING 2026-09-24 (stint #861): amplify#69 (boxed 9/16) was enumerated every
+  # sweep via the org-wide box leg but refused at ci-rollup on every evaluation —
+  # live receipt 2026-09-24T02:43Z: `[train-gate-receipt] repo=studio-b-ai/amplify
+  # pr=69 outcome=refused detail="not merge-ready (state=OPEN isDraft=false
+  # ciClean=false mergeStateStatus=CLEAN)"`. Same class as the radio#1008 ruling
+  # above: the PR's only non-SUCCESS rollup entry is the ci.yml `notify-failure`
+  # job named "Slack Notification", which skips by design on every pull_request
+  # event. Verified from amplify's origin/main (Rule #466):
+  #   Slack Notification   .github/workflows/ci.yml l.43
+  #                        if: failure() && github.ref == 'refs/heads/main'
+  # A failure-conditional notify job — the WHAT QUALIFIES class in this file's
+  # header; it can never report SUCCESS on a PR head, so leaving it unsanctioned
+  # makes amplify's CI leg permanently inert. Rule #223 probe against the REAL
+  # live rollup (fetched as the gate fetches it): isRollupClean(amplify#69,
+  # empty set) = false; isRollupClean(amplify#69, {"Slack Notification"}) = true.
+  # amplify is NOT in scripts/squasher-fleet.json — it reaches the gate through
+  # the sweep's org-wide box leg, whose entries still read this allowlist; that
+  # is sufficient for Kevin's `box` key (sweep header: "the CI-rollup floor
+  # still applies"). Full registry enrollment (squasher code classes) is a
+  # separate director decision, not this stint.
+  studio-b-ai/amplify:
+    - "Slack Notification"
+
 # RULING 2026-09-02 (amends the ops#235 ruling above; incident: the restart
 # train's 22:18Z first after-hours tick refused studio-b-ai/client-asthetik#359
 # citing these same 5 by-design PR-event skips — "Auto-qualifier (shadow)" is
