@@ -82,6 +82,12 @@ describe("isTransientGhFailure", () => {
     ["unicorn-page phrase (the 2026-08-17 incident shape)", ghError("gh: Sorry, but GitHub couldn't respond to your request in time.")],
     ["ECONNRESET in message", new Error("request to https://api.github.com failed, reason: read ECONNRESET")],
     ["ETIMEDOUT on stderr", ghError("connect ETIMEDOUT 140.82.112.6:443")],
+    // gh surfaces Go's json.Unmarshal error verbatim when `gh api --paginate --jq`
+    // receives an empty or truncated response body (the shape run 37459109376 hit
+    // on bolt-wms#2125's comments fetch — a brief API hiccup, not a per-request
+    // 5xx, so none of the earlier patterns match). Case-sensitive lowercase to
+    // keep it distinct from JS JSON.parse's "Unexpected …" messages below.
+    ["gh --jq on empty/truncated response body (run 37459109376)", ghError("unexpected end of JSON input")],
   ])("transient: %s", (_name, err) => {
     expect(isTransientGhFailure(err)).toBe(true);
   });

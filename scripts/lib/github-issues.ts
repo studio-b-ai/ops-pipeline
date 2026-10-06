@@ -46,12 +46,19 @@ export function gh(args: string[]): string {
  *    relays verbatim when the API returns the HTML unicorn page (the 2026-08-17 incident's
  *    exact stderr shape).
  *  - ECONNRESET / ETIMEDOUT — socket-level transport failures.
+ *  - "unexpected end of JSON input" — Go's json.Unmarshal error, surfaced verbatim by
+ *    gh when `gh api --paginate --jq …` receives an empty or truncated response body
+ *    (the shape run 37459109376 hit on bolt-wms#2125's comments fetch; same transient
+ *    class as the 5xx shapes semantically — the per-request response just got cut off
+ *    on the wire). Case-sensitive lowercase, so it won't false-match JS JSON.parse's
+ *    "Unexpected …" messages (which are our own-side parse bugs, not API hiccups).
  */
 const TRANSIENT_GH_PATTERNS: RegExp[] = [
   /HTTP 5\d\d/,
   /couldn't respond to your request in time/i,
   /ECONNRESET/,
   /ETIMEDOUT/,
+  /unexpected end of JSON input/,
 ];
 
 export function isTransientGhFailure(err: unknown): boolean {
