@@ -93,6 +93,25 @@ repos:
   studio-b-ai/acuops-pipeline:
     - "Auto-Approve & Merge"
 
+  # RULING 2026-09-22 (stint #861, mechanic crew): amplify was absent from
+  # scripts/squasher-fleet.json, so its box PRs rode the sweep's org-wide leg —
+  # and this file sanctioned NOTHING for the repo (absent = empty set), so the
+  # train gate refused amplify#69 permanently. Live receipt, 2026-09-22 05:36Z
+  # sweep: `[train-gate-receipt] repo=studio-b-ai/amplify pr=69 outcome=refused
+  # detail="not merge-ready (state=OPEN isDraft=false ciClean=false
+  # mergeStateStatus=CLEAN)"` — GitHub called the PR CLEAN while our ci-rollup
+  # leg called it dirty (the radio#1008 class, 9/13). Probing the REAL rollup
+  # (Rule #223) returned exactly one non-SUCCESS entry: this check, SKIPPED.
+  # Verified structurally unable to run on a pull_request event, read from
+  # amplify's origin/main .github/workflows/ci.yml (Rule #466):
+  #   Slack Notification  l.43  if: failure() && github.ref == 'refs/heads/main'
+  # A failure-conditional main-only notify job — the WHAT-QUALIFIES class.
+  # amplify's load-bearing checks (Build + Test (amplify-engine), Build + Test
+  # (amplify-workers), Cross-workspace dep build coverage, Deprecated-API lint,
+  # Lint script unit tests, gitleaks) stay fully required.
+  studio-b-ai/amplify:
+    - "Slack Notification"
+
   # RULING 2026-09-13 (studio-b#112, the release-door stint): radio was flipped
   # onto the release leg by ops#405 but never given a sanction set, so its
   # `loadSanctionedSkips` set was EMPTY while its rollup carries three SKIPPED

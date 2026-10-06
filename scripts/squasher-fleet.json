@@ -83,6 +83,14 @@
       "train": false
     },
     {
+      "repo": "studio-b-ai/amplify",
+      "enabled_classes": "docs-comment",
+      "sensitive_path_patterns": "",
+      "safe_path_globs": "",
+      "required_checks": "",
+      "train": false
+    },
+    {
       "repo": "studio-b-ai/power-unit",
       "enabled_classes": "docs-comment,vault-doc,code-fix,fleet-internal",
       "sensitive_path_patterns": "(^|/)(LANES|QUEUE|SHIPPED)\\.md,(^|/)scripts/lanes-row-edit\\.py,(^|/)scripts/git-hooks/,(^|/)scripts/brain-push/,(^|/)scripts/stint\\.py,(^|/)scripts/propagate\\.py,(^|/)scripts/reconcile-shared-main\\.sh,(^|/)\\.gitleaksignore$,(^|/)scripts/run-tests\\.sh,(^|/)scripts/board\\.py,(^|/)scripts/board-stale-tree-guard\\.py,(^|/)scripts/bless-pointer-guard\\.py,(^|/)scripts/ask-age-guard\\.py,(^|/)scripts/vault-objdb-commit\\.sh,(^|/)scripts/rules-build\\.py,(^|/)scripts/vault-auto-sync\\.sh,(^|/)scripts/sync-mirror\\.sh,(^|/)scripts/refresh-claude-config-mirror\\.sh,(^|/)scripts/decisions-apply\\.py,(^|/)scripts/runner_roster\\.py,(^|/)scripts/roster-assert\\.py,(^|/)scripts/coldstart-rotate\\.py",
