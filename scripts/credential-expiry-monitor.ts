@@ -65,6 +65,7 @@ import {
   probeEntraUserPassword,
   probe1PasswordSA,
   probeShipEngineApiKey,
+  probeWayfairOAuthClientSecret,
   getCertExpiry,
   type EntraProbeCreds,
 } from "./lib/credential-probes.js";
@@ -95,7 +96,8 @@ type CredType =
   | "entra-user-password"
   | "cloudflare-api-token"
   | "tls-cert"
-  | "shipengine-api-key";
+  | "shipengine-api-key"
+  | "wayfair-oauth-client-secret";
 
 interface ManifestItem {
   name: string;
@@ -104,6 +106,7 @@ interface ManifestItem {
   app_id?: string;
   app_secret_key_id?: string; // entra: pin the SPECIFIC monitored secret by its (non-secret) keyId
   user_id?: string; // entra-user-password: the monitored USER's Entra object id (non-secret)
+  client_id?: string; // wayfair-oauth-client-secret: the Wayfair supplier client_id (non-secret — paired with the op_ref secret)
   host?: string;
   recorded_expiry?: string | null;
   owner?: string;
@@ -202,6 +205,12 @@ async function runProbe(item: ManifestItem): Promise<ProbeResult> {
       return getCertExpiry(item.host);
     case "shipengine-api-key":
       return probeShipEngineApiKey(opRead(reqRef(item)));
+    case "wayfair-oauth-client-secret": {
+      if (!item.client_id) {
+        return { alive: true, expiry: null, source: "probe", error: "wayfair item missing client_id in manifest" };
+      }
+      return probeWayfairOAuthClientSecret(item.client_id, opRead(reqRef(item)));
+    }
     default:
       return { alive: true, expiry: null, source: "probe", error: `unknown credential type: ${(item as ManifestItem).type}` };
   }
