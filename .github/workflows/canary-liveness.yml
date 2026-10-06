@@ -1,0 +1,102 @@
+name: Canary Liveness
+
+# CRON-LIVENESS leg for the surface canary sweep (stint #465 "Watch the watcher" —
+# Rule #448: a monitor's check cadence must beat the SLA it measures against, not
+# merely match it — the canary sweep's own 5-minute cadence needs a check tighter
+# than 30 minutes, hence 15 here). Full design lives in
+# scripts/canary-liveness-worker.ts's and scripts/lib/canary-liveness-lib.ts's
+# header comments; this workflow only mints the fleet App token (same pattern as
+# heritage-train-liveness.yml) and runs the worker with it.
+#
+# Why this exists: Kevin 9/16 — "all of this should be automated. get us there."
+# The surface canary program watches public surfaces for degradation; it has no leg
+# watching whether the scheduler ITSELF is still ticking. This worker opens ONE
+# auto-reconciled GitHub issue (label canary-liveness, Rule #165) when
+# surface-canary.yml's cron has gone silent while SURFACE_CANARY_ENABLED is true,
+# and closes it (with a comment) the next time the sweep ticks again —
+# transition-only (Rule #292), never a per-run comment while the issue stays open.
+#
+# Fleet App token required: this worker reads Actions run data across repos via the
+# fleet App installation token (the ambient GITHUB_TOKEN structurally cannot read
+# runs on another repo), plus reads the SURFACE_CANARY_ENABLED variable via the
+# workflow's `vars` context, and posts/closes its own issue on
+# studio-b-ai/ops-pipeline.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *" # every 15 minutes — GH Actions cron is UTC-only (Rule #94); 15 < the 30-min SLA it watches (Rule #448)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true (default) = safe no-mutate tick: real reads throughout, zero issue open/close. false = LIVE for this dispatch — scheduled runs always run live."
+        required: false
+        type: boolean
+        default: true
+      force_stale_minutes:
+        description: "Rule #471 planted-control: fabricates the last-completed-run age as this many minutes, to prove the stale->open-issue path fires end to end. Overrides ONLY the last-run age (SURFACE_CANARY_ENABLED stays a real read) — omit for a normal run."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canary-liveness
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: "Canary liveness — surface-canary cron-silence watchdog (fleet App token)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: "Install deps"
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted unconditionally — including on a dry run (Rule #376: a dry run that reads
+      # nothing proves nothing, and every read this worker does needs real cross-repo
+      # access the ambient GITHUB_TOKEN structurally cannot provide).
+      - name: "Mint fleet installation token"
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: "Fail loud if the fleet token did not mint"
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token — check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
+          exit 1
+
+      # Untrusted workflow_dispatch string input (force_stale_minutes) travels through env
+      # (real OS-level env var, never text-substituted into the run: script text).
+      - name: "Run canary-liveness worker"
+        id: run_worker
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          SURFACE_CANARY_ENABLED_VALUE: ${{ vars.SURFACE_CANARY_ENABLED }}
+          DRY_RUN_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+          FORCE_STALE_MINUTES_INPUT: ${{ inputs.force_stale_minutes }}
+        run: |
+          args=()
+          if [ -n "$DRY_RUN_FLAG" ]; then args+=("--dry-run"); fi
+          if [ -n "$FORCE_STALE_MINUTES_INPUT" ]; then args+=(--force-stale-minutes "$FORCE_STALE_MINUTES_INPUT"); fi
+          npx tsx canary-liveness-worker.ts "${args[@]}"
+
+      # Rule #356: a timeout kill reports "cancelled" SILENTLY unless a SEPARATE if: always()
+      # step names the terminal status explicitly.
+      - name: "Report terminal status"
+        if: always()
+        run: |
+          echo "canary-liveness workflow terminal status: ${{ job.status }} (run_worker outcome: ${{ steps.run_worker.outcome }})"
