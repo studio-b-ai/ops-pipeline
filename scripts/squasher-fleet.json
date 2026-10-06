@@ -27,6 +27,14 @@
       "train": true
     },
     {
+      "repo": "studio-b-ai/amplify",
+      "enabled_classes": "docs-comment,ci-infra,test-only",
+      "sensitive_path_patterns": "^\\.github/actions/",
+      "safe_path_globs": "",
+      "required_checks": "Build + Test (amplify-engine),Build + Test (amplify-workers)",
+      "train": false
+    },
+    {
       "repo": "studio-b-ai/asthetik-trade-theme",
       "enabled_classes": "docs-comment,test-only,code-fix",
       "sensitive_path_patterns": "",
