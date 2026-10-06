@@ -1,0 +1,98 @@
+name: Scheduled Sensor
+
+# stint #693 (mechanic, 2026-09-18) — the sensor stint #680's end state named and its close
+# never delivered: #680 (radio's needs-human router) burned 153 consecutive hourly failures
+# over SIX DAYS before a human noticed, because nothing in the fleet watched for "a scheduled
+# workflow failing N consecutive runs" at a cadence that beats an hourly cron (dead-cron-worker
+# is weekly with a week-scaled K — Rule #448: the monitor's cadence must beat its SLA).
+#
+# Two legs, one board (design in scripts/scheduled-sensor-worker.ts's header):
+#   A. cron-fail — every org repo's schedule-bearing workflows: 3 newest completed scheduled
+#      runs all failing → file a board row (receipts/stints.jsonl on power-unit main).
+#   B. rename — every reusable-workflow caller's `with: repo:` resolved through
+#      `gh api repos/` → 404 or a full_name mismatch (the Search API does not follow renames)
+#      files a row naming the live name.
+#
+# Dedup is Rule #358 by construction: a finding whose sensor_key already has an open board
+# row is not re-filed; the row closed + the failure recurring files fresh (re-escalation
+# after recovery). Flags-only: the ONLY write is the board-row append via the minted
+# studiob-fleet-bot token (contents:write on power-unit — live-verified 2026-09-18).
+#
+# Cadence: every 3 hours at :17 — off the :41 needs-human router and the :53/:56 sibling
+# crons, and 3 consecutive failures of an hourly cron (3h of fire) are caught within ~6h.
+
+on:
+  schedule:
+    - cron: "17 */3 * * *" # GH Actions cron is UTC-only (Rule #94)
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real reads throughout (Rule #376), zero board mutations, prints findings + would-be rows"
+        required: false
+        type: boolean
+        default: false
+      repo:
+        description: "Scope to one org repo (testing / the Rule #464 plant ladder)"
+        required: false
+        type: string
+        default: ""
+      ref:
+        description: "Read workflow files at this ref instead of the default branch (plant branch)"
+        required: false
+        type: string
+        default: ""
+
+# Job-level permissions cover ONLY this job's own checkout via the ambient GITHUB_TOKEN.
+# Every org-wide read and the board-row append ride the MINTED fleet installation token
+# (GH_TOKEN below) — if the mint ever failed silently the worker's gh calls fail loud
+# rather than quietly act under the wrong identity.
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-sensor
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: "Scheduled-workflow sensor (fleet App token)"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      # Minted UNCONDITIONALLY — including on a dry run: Rule #376, a dry run that reads
+      # nothing proves nothing, and every read this worker does (org enumeration, workflow
+      # files, scheduled runs, the board read) needs real org-wide access the ambient
+      # GITHUB_TOKEN structurally cannot provide.
+      - name: Mint fleet installation token
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: Fail loud if the fleet token did not mint
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token — check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and the studiob-fleet-bot App's org installation." >&2
+          exit 1
+
+      - name: Run scheduled-sensor worker
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+        run: |
+          ARGS=""
+          if [ "${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) || false }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          if [ -n "${{ inputs.repo }}" ]; then ARGS="$ARGS --repo ${{ inputs.repo }}"; fi
+          if [ -n "${{ inputs.ref }}" ]; then ARGS="$ARGS --ref ${{ inputs.ref }}"; fi
+          npx tsx scheduled-sensor-worker.ts $ARGS
