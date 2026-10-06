@@ -20,6 +20,7 @@
     "gate:pr-automerge": "tsx pr-automerge-gate.ts",
     "gate:railway-status": "tsx railway-status-gate.ts",
     "monitor:railway-ledger": "tsx railway-incident-ledger.ts",
+    "count:mail": "tsx hubspot-mail-count.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run"
   },
