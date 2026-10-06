@@ -31,11 +31,17 @@ export interface Args {
    *  §4.1 move 4 — each named check must be strictly SUCCESS on the head commit).
    *  Empty = the named-checks leg fails closed, so code-fix can never merge. */
   requiredChecks: string[];
-  /** Path-dependency map for required_checks: each entry is "<check name>=<glob>".
-   *  A check whose glob matches NO changed file is excluded from the named-checks
-   *  leg (it could never have triggered for these paths).  Empty = all
-   *  required_checks always apply. */
+/** Path-dependency map for required_checks: each entry is "<check name>=<glob>".
+ *  A check whose glob matches NO changed file is excluded from the named-checks
+ *  leg (it could never have triggered for these paths).  Empty = all
+ *  required_checks always apply. */
   requiredChecksPathDeps: string[];
+  /** Fleet-registry sanctioned skip-by-design check names — a SKIPPED conclusion
+   *  on one of these names counts as clean in the CI-rollup leg (unioned with the
+   *  committed YAML allowlist at each call site). Applies to both squasher and
+   *  train paths (the mutual-exclusion check does NOT cover this flag). Default
+   *  empty = no additional sanctioned skips. */
+  sanctionedSkips: string[];
   /** ops#190 rung A2: when true the runner evaluates the A-side `box`
    *  label-authority gate (`evaluateTrainReady`) instead of the B-side squasher
    *  diff-classification gate. The two gates are structurally separate (doc §3.1 vs
@@ -68,6 +74,8 @@ export function parseArgs(argv: string[]): Args {
   const requiredChecks: string[] = [];
   let requiredCheckPathDepFlagSeen = false;
   const requiredChecksPathDeps: string[] = [];
+  // Fleet-registry sanctioned skips — independent from squasher/train mutual exclusion
+  const sanctionedSkips: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo") repo = argv[++i];
     else if (argv[i] === "--pr") pr = Number(argv[++i]);
@@ -103,6 +111,9 @@ export function parseArgs(argv: string[]): Args {
       // certainly not what the caller meant) — cleaner to just ignore it.
       const trimmed = argv[++i]?.trim();
       if (trimmed) sensitivePathPatterns.push(trimmed);
+    } else if (argv[i] === "--sanctioned-skip") {
+      const trimmed = argv[++i]?.trim();
+      if (trimmed) sanctionedSkips.push(trimmed);
     }
   }
   if (!repo) throw new Error("--repo <org/repo> is required");
@@ -145,5 +156,5 @@ export function parseArgs(argv: string[]): Args {
     enabledClasses = requested as PrDiffClass[];
   }
 
-  return { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps, trainReady };
+  return { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps, sanctionedSkips, trainReady };
 }
