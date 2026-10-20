@@ -47,6 +47,11 @@ export type GateReceiptVerdict = "qualified" | "missed" | "candidate";
  * - `named-checks` (code-fix only, ops#190 B1) the caller's required_checks list is
  *                  empty (leg inert, fail-closed) or a named check is missing /
  *                  in-flight / not strictly SUCCESS on the head commit.
+ * - `stale-base`   (stint #928, Kevin 9/27) a CREW PR's base is more than a day behind
+ *                  main, or behind by a commit touching a file the PR touches. The gate
+ *                  requested an update-branch (or could not — conflict / unreadable) and
+ *                  refuses THIS cycle; the next sweep re-evaluates the new head after CI
+ *                  re-runs. A wait, never a decision ask: `box` does not open this leg.
  * - `review`       the independent review returned anything other than exactly CLEAN
  *                  (including any API error — fail-closed).
  * - `held`         (ops-pipeline#260 leg 4) Kevin's `hold` label is present — parked
@@ -64,6 +69,7 @@ export type GateReceiptLeg =
   | "line-cap"
   | "eligibility"
   | "named-checks"
+  | "stale-base"
   | "review"
   | "held"
   | "box"

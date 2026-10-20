@@ -6,14 +6,18 @@ import {
   withoutLabelWokenReruns,
   compileSafePathGlob,
   evaluateMergeReadiness,
+  evaluateStaleBase,
   gateDecision,
   gateDecisionForClass,
+  isCrewPr,
   isMergeTreeCheckClean,
   isRollupClean,
   reconcileFileClasses,
   repoClassFor,
   requiredChecksSatisfied,
+  STALE_BASE_MAX_LAG_MS,
   type GateFile,
+  type StaleBaseFacts,
   type GateInput,
   type GateInputV2,
   type ParsedDiffFile,
@@ -620,7 +624,7 @@ describe("classifyPrDiffClass", () => {
 
   it("rejects a ci-infra-shaped diff with a package.json change (dependency change)", () => {
     const result = classifyPrDiffClass({
-      files: files([".github/workflows/ci.yml", "package.json"]),
+      files: files([".github/CODEOWNERS", "package.json"]),
       totalChangedLines: 5,
     });
     expect(result.prClass).toBeNull();
@@ -1721,5 +1725,172 @@ describe("classifyPrDiffClass — vault-doc class (brain#239 doc 4 leg B, 2026-0
     });
     expect(result.prClass).toBeNull();
     expect(result.reasons.some((r) => r.includes("vault-doc") && r.includes("outside vault allowlist"))).toBe(true);
+  });
+});
+
+// ───────────────────────────── stale-base re-run (stint #928, Kevin 9/27) ─────────────────────────────
+//
+// Pure-predicate half. Every test imports and calls the REAL exports (Rule #223); the gate-level
+// half (update-branch actually requested, no merge, no review spend) lives in
+// crew-stale-base-rerun.test.ts, which drives the real `evaluate` / `evaluateTrainReady`.
+
+describe("evaluateStaleBase — the stale-base predicate (Kevin 9/27)", () => {
+  const TIP = "2026-10-20T12:00:00Z";
+  const hoursBefore = (h: number) => new Date(Date.parse(TIP) - h * 3_600_000).toISOString();
+  // A FRESH baseline: behind by 3 commits but only 2h and none of them touch the PR's file.
+  const FRESH: StaleBaseFacts = {
+    behindBy: 3,
+    mergeBaseDate: hoursBefore(2),
+    baseTipDate: TIP,
+    baseChangedPaths: ["src/unrelated.ts", "README.md"],
+    baseChangedPathsTruncated: false,
+    prPaths: ["src/fix.ts"],
+  };
+
+  it("(a) FRESH base passes: behind by a few commits, <1 day, no shared file", () => {
+    expect(evaluateStaleBase(FRESH)).toEqual({ stale: false, reasons: [] });
+  });
+
+  it("(a) FRESH base passes: not behind at all, however old the fork point is (an idle main is not staleness)", () => {
+    const v = evaluateStaleBase({ ...FRESH, behindBy: 0, mergeBaseDate: hoursBefore(24 * 30), baseChangedPaths: ["src/fix.ts"] });
+    expect(v.stale).toBe(false);
+  });
+
+  it("(b) base older than one day is STALE — 25h", () => {
+    const v = evaluateStaleBase({ ...FRESH, mergeBaseDate: hoursBefore(25) });
+    expect(v.stale).toBe(true);
+    expect(v.reasons).toHaveLength(1);
+    expect(v.reasons[0]).toContain("25h older than the base tip");
+    expect(v.reasons[0]).toContain("behind by 3 commit(s)");
+  });
+
+  it("(b) the 4-day-old base that crashed the Linear publisher (toto#131) is STALE", () => {
+    const v = evaluateStaleBase({ ...FRESH, mergeBaseDate: hoursBefore(96) });
+    expect(v.stale).toBe(true);
+    expect(v.reasons[0]).toContain("96h");
+  });
+
+  it("(b) the boundary: exactly 24h is fresh ('more than one day'), 24h + 1s is stale", () => {
+    expect(STALE_BASE_MAX_LAG_MS).toBe(24 * 3_600_000);
+    const exactly = evaluateStaleBase({ ...FRESH, mergeBaseDate: new Date(Date.parse(TIP) - STALE_BASE_MAX_LAG_MS).toISOString() });
+    expect(exactly.stale).toBe(false);
+    const over = evaluateStaleBase({ ...FRESH, mergeBaseDate: new Date(Date.parse(TIP) - STALE_BASE_MAX_LAG_MS - 1000).toISOString() });
+    expect(over.stale).toBe(true);
+  });
+
+  it("(c) behind by a commit touching a file the PR touches is STALE even when the base is only minutes old", () => {
+    const v = evaluateStaleBase({ ...FRESH, mergeBaseDate: hoursBefore(0.1), baseChangedPaths: ["src/other.ts", "src/fix.ts"] });
+    expect(v.stale).toBe(true);
+    expect(v.reasons).toHaveLength(1);
+    expect(v.reasons[0]).toContain("src/fix.ts");
+  });
+
+  it("(c) a rename on the base side counts under BOTH names (the caller passes previous_filename too)", () => {
+    const v = evaluateStaleBase({ ...FRESH, mergeBaseDate: hoursBefore(1), baseChangedPaths: ["src/renamed.ts", "src/fix.ts"] });
+    expect(v.stale).toBe(true);
+  });
+
+  it("(c) control: a similarly-named but different file is NOT an overlap (exact path match)", () => {
+    const v = evaluateStaleBase({ ...FRESH, baseChangedPaths: ["src/fix.test.ts", "src/fix.ts.bak", "xsrc/fix.ts"] });
+    expect(v.stale).toBe(false);
+  });
+
+  it("both causes at once: every failing check lands in the receipt", () => {
+    const v = evaluateStaleBase({ ...FRESH, mergeBaseDate: hoursBefore(72), baseChangedPaths: ["src/fix.ts"] });
+    expect(v.stale).toBe(true);
+    expect(v.reasons).toHaveLength(2);
+  });
+
+  // ───── fail-closed: an instrument that cannot answer must never read FRESH (Rule #322) ─────
+
+  it("fail-closed: unparseable merge-base date is STALE", () => {
+    expect(evaluateStaleBase({ ...FRESH, mergeBaseDate: "not-a-date" }).stale).toBe(true);
+    expect(evaluateStaleBase({ ...FRESH, mergeBaseDate: undefined }).stale).toBe(true);
+    expect(evaluateStaleBase({ ...FRESH, mergeBaseDate: null }).stale).toBe(true);
+  });
+
+  it("fail-closed: unparseable base-tip date is STALE", () => {
+    expect(evaluateStaleBase({ ...FRESH, baseTipDate: "" }).stale).toBe(true);
+  });
+
+  it("fail-closed: a possibly-truncated base-side file list is STALE (cannot prove no overlap)", () => {
+    const v = evaluateStaleBase({ ...FRESH, baseChangedPathsTruncated: true, baseChangedPaths: [] });
+    expect(v.stale).toBe(true);
+    expect(v.reasons[0]).toContain("truncated");
+  });
+
+  it("fail-closed: unreadable behind-by (NaN / negative / fractional / missing) is STALE", () => {
+    for (const bad of [Number.NaN, -1, 1.5, undefined as unknown as number, "3" as unknown as number]) {
+      expect(evaluateStaleBase({ ...FRESH, behindBy: bad }).stale, `behindBy=${String(bad)}`).toBe(true);
+    }
+  });
+});
+
+describe("isCrewPr — the one crew predicate (classifier cap + stale-base leg)", () => {
+  it("fleet-internal without bugsquasher is crew", () => {
+    expect(isCrewPr(["fleet-internal"])).toBe(true);
+    expect(isCrewPr(["fleet-internal", "candidate", "box"])).toBe(true);
+  });
+  it("bugsquasher wins: fleet-internal + bugsquasher is Kevin's lane, not crew", () => {
+    expect(isCrewPr(["fleet-internal", "bugsquasher"])).toBe(false);
+  });
+  it("no fleet-internal label, or no labels at all, is never crew", () => {
+    expect(isCrewPr(["bugsquasher"])).toBe(false);
+    expect(isCrewPr(["box"])).toBe(false);
+    expect(isCrewPr([])).toBe(false);
+    expect(isCrewPr(undefined)).toBe(false);
+  });
+});
+
+describe("stale-base × classification — a fresh base never rescues what the other legs refuse (stint #928)", () => {
+  function files(paths: string[]): GateFile[] {
+    return paths.map((path) => ({ path, fileClass: "code" as const }));
+  }
+  // The crew PR is FRESH by every measure here; the point is that freshness is not an eligibility input.
+  const FRESH: StaleBaseFacts = { behindBy: 0, mergeBaseDate: "2026-10-20T12:00:00Z", baseTipDate: "2026-10-20T12:00:00Z", baseChangedPaths: [], baseChangedPathsTruncated: false, prPaths: [] };
+
+  it("(d) a sensitive path is refused regardless of base freshness (caller sensitive_path_patterns)", () => {
+    expect(evaluateStaleBase(FRESH).stale).toBe(false); // the base is fresh ...
+    const result = classifyPrDiffClass({
+      files: files(["config/settings.json"]),
+      totalChangedLines: 5,
+      additions: 5,
+      safePathGlobs: ["**"],
+      sensitivePathPatterns: ["settings\\.json$"],
+      labels: ["fleet-internal"],
+    });
+    expect(result.prClass).toBeNull(); // ... and the PR is still refused
+    expect(result.failureLeg).toBe("class-match");
+    expect(result.reasons.some((r) => r.includes("sensitive path"))).toBe(true);
+  });
+
+  it("(d) the built-in denylist (auth, migrations, pricing, .github policy files, manifests) refuses a crew PR regardless of base freshness", () => {
+    for (const path of ["src/auth/login.ts", "db/migrations/001.sql", "src/pricing/tier.ts", ".github/CODEOWNERS", "package.json"]) {
+      const result = classifyPrDiffClass({ files: files([path]), totalChangedLines: 5, additions: 5, safePathGlobs: ["**"], labels: ["fleet-internal"] });
+      expect(result.prClass, path).toBeNull();
+      expect(result.reasons.some((r) => r.includes("denylist")), path).toBe(true);
+    }
+  });
+
+  it("(e) over the 200-line crew cap is no longer code-fix: 200 resolves it, 201 does not", () => {
+    const at = classifyPrDiffClass({ files: files(["src/fix.ts"]), totalChangedLines: 200, additions: 200, safePathGlobs: ["src/**"], labels: ["fleet-internal"] });
+    expect(at.prClass).toBe("code-fix");
+    const over = classifyPrDiffClass({ files: files(["src/fix.ts"]), totalChangedLines: 201, additions: 201, safePathGlobs: ["src/**"], labels: ["fleet-internal"] });
+    expect(over.prClass).not.toBe("code-fix");
+  });
+
+  it("(e) over the cap, a repo that has not enabled the fleet-internal class refuses outright — the cap routes, the enabled-classes set refuses", () => {
+    // The classifier alone resolves an over-cap crew PR to the pre-existing fleet-internal class (no
+    // line cap by design — stint #689). Refusal for a repo that has not enabled it is the gate's
+    // --enabled-classes leg; that half is asserted end-to-end in crew-stale-base-rerun.test.ts.
+    const over = classifyPrDiffClass({ files: files(["src/fix.ts"]), totalChangedLines: 201, additions: 201, safePathGlobs: ["src/**"], labels: ["fleet-internal"] });
+    expect(over.prClass).toBe("fleet-internal");
+  });
+
+  it("(e) control: Kevin's lane keeps the 1500 cap (bugsquasher, with or without fleet-internal) — #580 did not move it", () => {
+    for (const labels of [["bugsquasher"], ["bugsquasher", "fleet-internal"]]) {
+      const result = classifyPrDiffClass({ files: files(["src/fix.ts"]), totalChangedLines: 900, additions: 900, safePathGlobs: ["src/**"], labels });
+      expect(result.prClass, labels.join("+")).toBe("code-fix");
+    }
   });
 });

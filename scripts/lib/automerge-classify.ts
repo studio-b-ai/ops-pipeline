@@ -459,6 +459,89 @@ const CODE_FIX_LINE_CAP = 1500; // 2026-09-13 (Kevin 'go', door pens): 800 → 1
 // already handling them before this cap existed.
 const CREW_CODE_FIX_LINE_CAP = 200;
 
+/**
+ * True for a CREW-authored PR: the runner's `fleet-internal` label without `bugsquasher`
+ * (stint #928). The ONE definition both the classifier (200-line crew cap) and the gate's
+ * stale-base re-run leg key on, so the two can never drift apart. Kevin-authored
+ * (`bugsquasher`) PRs are never crew, whether or not they also carry `fleet-internal`.
+ */
+export function isCrewPr(labels: readonly string[] | undefined): boolean {
+  return labels !== undefined && labels.includes(FLEET_INTERNAL_LABEL) && !labels.includes(BUGSQUASHER_LABEL);
+}
+
+// ───────────────────────────── stale-base re-run (stint #928, Kevin 9/27) ─────────────────────────────
+//
+// The cause on record: toto#131 was written against a 4-day-old main, merged on a box, and
+// crashed the Linear publisher every tick. GitHub cannot catch this for us — the fleet's
+// repos are unprotected or `required_status_checks.strict: false` (verified 10/20: toto,
+// power-unit, claude-config-plane unprotected; radio and ops-pipeline strict=false), so
+// `mergeStateStatus` stays CLEAN however far behind a PR's base is. This is the gate's
+// own leg, and it holds "box or no box": a stale crew PR is rebased onto main and CI is
+// re-run on the merged head BEFORE it is eligible; a PR that fails the re-run stays
+// refused (red CI on the new head, or a conflicting update-branch) and is returned to
+// its crew — never merged.
+
+/** "Base more than one day behind main" (Kevin 9/27). Strictly greater than: exactly 24h is fresh. */
+export const STALE_BASE_MAX_LAG_MS = 24 * 60 * 60 * 1000;
+
+export interface StaleBaseFacts {
+  /** Commits on the base branch the PR head does not contain (GitHub compare `ahead_by` for `<prHead>...<base>`). */
+  behindBy: number;
+  /** Committer date (ISO 8601) of the merge-base commit — the PR's fork point. */
+  mergeBaseDate: string | null | undefined;
+  /** Committer date (ISO 8601) of the base branch tip. */
+  baseTipDate: string | null | undefined;
+  /** Every path the base branch changed since the merge-base (renames contribute BOTH names). */
+  baseChangedPaths: readonly string[];
+  /** True when the base-side file list may be incomplete (GitHub caps compare `files` at 300). */
+  baseChangedPathsTruncated: boolean;
+  /** The PR's own changed paths. */
+  prPaths: readonly string[];
+}
+
+export interface StaleBaseVerdict {
+  stale: boolean;
+  reasons: string[];
+}
+
+/**
+ * Pure stale-base predicate. A PR is stale when it is behind its base branch by at least
+ * one commit AND either (a) the merge-base is more than STALE_BASE_MAX_LAG_MS older than the
+ * base tip, or (b) the commits it is behind touch a file the PR touches. A PR that is not
+ * behind at all is fresh no matter how old its fork point is (an idle main is not staleness).
+ * Fail-closed throughout: an unreadable behind-by, unparseable dates, or a possibly-truncated
+ * base-side file list is STALE — an instrument that cannot answer must never read as fresh
+ * (Rule #322). Reasons are collected from every failing check so the receipt is complete.
+ */
+export function evaluateStaleBase(f: StaleBaseFacts): StaleBaseVerdict {
+  if (!Number.isInteger(f.behindBy) || f.behindBy < 0) {
+    return { stale: true, reasons: [`behind-by unreadable (${String(f.behindBy)}) — fail-closed`] };
+  }
+  if (f.behindBy === 0) return { stale: false, reasons: [] };
+
+  const reasons: string[] = [];
+  const mergeBase = Date.parse(f.mergeBaseDate ?? "");
+  const baseTip = Date.parse(f.baseTipDate ?? "");
+  if (Number.isNaN(mergeBase) || Number.isNaN(baseTip)) {
+    reasons.push(`base age unknown (merge-base date '${f.mergeBaseDate ?? ""}' / base-tip date '${f.baseTipDate ?? ""}' unreadable) — fail-closed`);
+  } else if (baseTip - mergeBase > STALE_BASE_MAX_LAG_MS) {
+    const hours = Math.round(((baseTip - mergeBase) / 3_600_000) * 10) / 10;
+    reasons.push(`merge-base is ${hours}h older than the base tip (> ${STALE_BASE_MAX_LAG_MS / 3_600_000}h), behind by ${f.behindBy} commit(s)`);
+  }
+
+  if (f.baseChangedPathsTruncated) {
+    reasons.push("base-side changed-file list may be truncated — cannot prove the behind-commits avoid this PR's files — fail-closed");
+  } else {
+    const prPaths = new Set(f.prPaths);
+    const overlap = [...new Set(f.baseChangedPaths.filter((p) => prPaths.has(p)))];
+    if (overlap.length > 0) {
+      reasons.push(`behind by commit(s) touching file(s) this PR also touches: ${overlap.join(", ")}`);
+    }
+  }
+
+  return { stale: reasons.length > 0, reasons };
+}
+
 // brain#239 doc 4 leg B (2026-09-10): vault-doc — the fleet's highest-volume, lowest-risk
 // PR. Text-only (decisions, architecture, seats, coldstarts, scratchpad exports) with a
 // BROAD allowlist and a narrow, fail-closed denylist. Any denylist hit (scripts/, .github/,
@@ -912,7 +995,7 @@ export interface ClassifyPrDiffClassResult {
 export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPrDiffClassResult {
   const { files, totalChangedLines, sensitivePathPatterns, additions, safePathGlobs, labels } = input;
 
-  const isCrew = labels !== undefined && labels.includes(FLEET_INTERNAL_LABEL) && !labels.includes(BUGSQUASHER_LABEL);
+  const isCrew = isCrewPr(labels);
 
   if (files.length === 0) {
     return { prClass: null, failureLeg: "class-match", reasons: ["no changed files"] };

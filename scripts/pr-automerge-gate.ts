@@ -70,6 +70,15 @@
  *      merge decision. In standard repos the `automerge:code-fix` label is applied
  *      BEFORE the merge (the B2 post-merge tripwire triggers on it, doc §4.2);
  *      label-apply failure ABORTS the merge.
+ *   8. (CREW PRs — `fleet-internal` without `bugsquasher` — stint #928, Kevin 9/27)
+ *      stale-base re-run, box or no box: a crew PR whose base is more than one day
+ *      behind main, or behind by a commit touching a file the PR touches, is NOT
+ *      merged and NOT labeled — the gate requests `update-branch`, emits
+ *      `leg=stale-base` (`stale-base-rerun-requested`), and the next sweep re-evaluates
+ *      the new head after CI re-runs. Runs after the cheap legs and BEFORE the paid
+ *      review in `evaluate()`, and again at the `box` override and the restart-train
+ *      door (a box does not skip it). An unreadable base is refused, never fresh.
+ *      See the "stale-base re-run leg" section below.
  *
  * Cost discipline: legs 2-5 are cheap (already-fetched PR metadata + a diff parse)
  * and are evaluated BEFORE the paid Anthropic API call. If any of them already fail,
@@ -105,7 +114,9 @@ import {
   classifyPrDiffClass,
   codeFixRevalidateDeltas,
   evaluateMergeReadiness,
+  evaluateStaleBase,
   gateDecisionForClass,
+  isCrewPr,
   isMergeTreeCheckClean,
   isRollupClean,
   parseUnifiedDiff,
@@ -115,6 +126,8 @@ import {
   type GateFile,
   type PrDiffClass,
   type RollupItem,
+  type StaleBaseFacts,
+  type StaleBaseVerdict,
 } from "./lib/automerge-classify.js";
 import { loadSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
 import { parseArgs } from "./lib/automerge-args.js";
@@ -744,6 +757,152 @@ export async function independentReviewVote(diff: string, systemPrompt: string):
   return { verdict: "FLAG", detail: `votes: ${votes} (${cleanCount}/${REVIEW_VOTE_COUNT} CLEAN — ${REVIEW_QUALIFIED_VOTES} needed) — ${detail}` };
 }
 
+// ───────────────────────────── stale-base re-run leg (stint #928, Kevin 9/27) ─────────────────────────────
+//
+// Kevin 9/27, on the crew-code-fix widening: a crew PR whose base is more than a day behind
+// main, or behind by any commit touching a file the PR touches, is rebased onto main and
+// its CI re-run BEFORE it is eligible — box or no box. Cause on record: toto#131 was written
+// against a 4-day-old main, merged on a box, and crashed the Linear publisher every tick.
+// GitHub will not catch this (the fleet's branch protection is absent or strict=false, so
+// mergeStateStatus stays CLEAN however far behind a PR is) — the gate must.
+//
+// Scope: CREW PRs only (`isCrewPr` — `fleet-internal` without `bugsquasher`), at every point
+// the gate can merge one or hand one to a merge: the normal legs (classes code-fix and
+// fleet-internal, after the cheap legs and BEFORE the paid review), the `box` override, and
+// the restart-train `box` path. The `box` paths cannot know the class (the box overrides the
+// decision legs), so they key on the crew label predicate. Tightening only: no class is
+// enabled or widened here, and Kevin-authored (`bugsquasher`) and human PRs are untouched.
+//
+// What a stale PR gets: `PUT /pulls/{n}/update-branch` pinned to the head the gate evaluated
+// (a merge commit, never a force-push — the same call the DIRTY fleet-internal leg already
+// makes), a `[gate-receipt] … leg=stale-base` refusal for THIS cycle, and a PR comment. CI
+// re-runs on the merged head; the PR is re-evaluated from scratch when its fingerprint
+// changes (fleet-sweep-changed.ts keys on headRefOid + checks, so the new head is always
+// re-evaluated). A re-run that fails (red CI on the new head, or an update-branch refused by
+// a conflict) leaves the PR refused — never merged — and the comment names the failure for
+// its crew. A `box` already on the PR is made stale by the update-branch push (the existing
+// stale-label rule) — the box does not skip the re-run; a fresh box lands on the new head.
+
+/** GitHub caps the compare endpoint's `files` at 300 for the whole comparison. */
+const COMPARE_FILES_CAP = 300;
+
+/**
+ * The two reads the pure `evaluateStaleBase` predicate needs, from the API the gate already
+ * uses (`compare`, as in fetchDiffBySha): how many commits the base branch has that the PR
+ * head lacks (`ahead_by` of `<prHead>...<base>`), the fork point's date, the paths the base
+ * changed since the fork, and the base tip's date. `--jq` keeps the (patch-bearing) compare
+ * payload out of node's buffer.
+ */
+export function fetchStaleBaseFacts(repo: string, baseRefName: string, headRefOid: string, prPaths: readonly string[]): StaleBaseFacts {
+  const base = encodeURIComponent(baseRefName);
+  const cmp = JSON.parse(
+    gh([
+      "api",
+      `repos/${repo}/compare/${headRefOid}...${base}?per_page=1`,
+      "--jq",
+      "{ahead_by: .ahead_by, merge_base_date: .merge_base_commit.commit.committer.date, file_count: ((.files // []) | length), files: [(.files // [])[] | .filename, (.previous_filename // empty)]}",
+    ]),
+  ) as { ahead_by: number; merge_base_date: string | null; file_count: number; files: string[] };
+  const baseTipDate = gh(["api", `repos/${repo}/commits/${base}`, "--jq", ".commit.committer.date"]).trim();
+  return {
+    behindBy: cmp.ahead_by,
+    mergeBaseDate: cmp.merge_base_date,
+    baseTipDate,
+    baseChangedPaths: cmp.files,
+    baseChangedPathsTruncated: cmp.file_count >= COMPARE_FILES_CAP,
+    prPaths,
+  };
+}
+
+/** Posts `body` once per (marker): a re-evaluation of the same head never re-comments. NEVER throws (advisory surface). */
+function commentOncePerMarker(repo: string, pr: number, marker: string, body: string): void {
+  try {
+    const prior = gh(["pr", "view", String(pr), "--repo", repo, "--json", "comments", "--jq", `[.comments[].body | select(contains("${marker}"))] | length`]).trim();
+    if (prior !== "0") return;
+    commentOnPr(repo, pr, `${marker}\n${body}`);
+  } catch (e) {
+    console.log(`[warn] pr-automerge-gate ${repo}#${pr}: stale-base comment failed (non-fatal): ${(e as Error).message.split("\n")[0]}`);
+  }
+}
+
+export type StaleBaseGuardResult =
+  | { action: "proceed" }
+  /** Anything but `proceed` means the caller must NOT merge or label this cycle. */
+  | { action: "rerun-requested" | "rerun-failed" | "unverifiable"; reasons: string[] };
+
+/**
+ * The stale-base leg's I/O: read the facts, decide (`evaluateStaleBase`), and on a stale
+ * verdict request the update-branch. NEVER throws and NEVER returns `proceed` unless the
+ * base was positively read and found fresh — a blind probe is `unverifiable` (refuse), not
+ * fresh (Rule #322). `reasons[0]` carries the receipt vocabulary callers print verbatim:
+ * `stale-base-rerun-requested: …` | `stale-base-rerun-failed: …` | `stale-base-unverifiable: …`.
+ */
+export function staleBaseGuard(repo: string, pr: number, prJson: Pick<PrJson, "baseRefName" | "headRefOid" | "files">): StaleBaseGuardResult {
+  const base = prJson.baseRefName;
+  const sha7 = prJson.headRefOid.slice(0, 7);
+  let verdict: StaleBaseVerdict;
+  try {
+    verdict = evaluateStaleBase(fetchStaleBaseFacts(repo, base, prJson.headRefOid, prJson.files.map((f) => f.path)));
+  } catch (err) {
+    const message = (err instanceof Error ? err.message : String(err)).split("\n")[0];
+    return {
+      action: "unverifiable",
+      reasons: [`stale-base-unverifiable: could not read how far behind ${base} this PR is (${message}) — refused this cycle; a probe that cannot answer never reads fresh (Rule #322)`],
+    };
+  }
+  if (!verdict.stale) {
+    console.log(`[info] pr-automerge-gate ${repo}#${pr}: stale-base leg — base is fresh against ${base}; proceeding.`);
+    return { action: "proceed" };
+  }
+
+  const why = verdict.reasons.join("; ");
+  // Captured BEFORE the update-branch call (Rule #382) — same monotonic start the DIRTY leg threads
+  // into the box-patch-id refresh, so a patch-id-bound box survives the merge commit.
+  const updateBranchStart = process.hrtime.bigint();
+  try {
+    gh(["api", "-X", "PUT", `repos/${repo}/pulls/${pr}/update-branch`, "-f", `expected_head_sha=${prJson.headRefOid}`]);
+  } catch (e) {
+    const message = (e as Error).message.split("\n")[0];
+    commentOncePerMarker(
+      repo,
+      pr,
+      `<!-- stale-base-rerun:failed:${sha7} -->`,
+      [
+        `**squasher auto-merge gate — STALE BASE, returned to crew** (stint #928; Kevin 9/27)`,
+        "",
+        `This crew PR's base is stale (${why}) and the gate's update-branch from \`${base}\` was refused (${message}) — e.g. a merge conflict, or the head moved. The gate will not merge it, with or without a \`box\`. Rebase onto \`${base}\`, resolve the conflict, and push; CI must re-run green on the new head before it is eligible.`,
+        "",
+        `Evaluated sha: \`${prJson.headRefOid}\`.`,
+      ].join("\n"),
+    );
+    return {
+      action: "rerun-failed",
+      reasons: [`stale-base-rerun-failed: ${why} — update-branch refused (${message}); returned to its crew, never merged`],
+    };
+  }
+  try {
+    refreshBoxPatchIdAfterUpdateBranch(repo, pr, prJson.headRefOid, updateBranchStart);
+  } catch (refreshErr) {
+    console.log(`[warn] pr-automerge-gate ${repo}#${pr}: box-patch-id refresh-after-update-branch failed (non-fatal): ${(refreshErr as Error).message.split("\n")[0]}`);
+  }
+  commentOncePerMarker(
+    repo,
+    pr,
+    `<!-- stale-base-rerun:requested:${sha7} -->`,
+    [
+      `**squasher auto-merge gate — STALE BASE, re-run requested** (stint #928; Kevin 9/27)`,
+      "",
+      `This crew PR's base is stale: ${why}. The gate asked GitHub to merge \`${base}\` into the branch and will not merge this head — a \`box\` does not skip the re-run. CI re-runs on the merged head; once it is green the PR is re-evaluated from scratch (review included). If the re-run fails, the PR stays refused and is returned to its crew to fix.`,
+      "",
+      `Evaluated sha: \`${prJson.headRefOid}\`.`,
+    ].join("\n"),
+  );
+  return {
+    action: "rerun-requested",
+    reasons: [`stale-base-rerun-requested: ${why} — update-branch requested at ${sha7}; CI re-runs on the merged head and the PR is re-evaluated from scratch (box or no box)`],
+  };
+}
+
 // ───────────────────────────── main ─────────────────────────────
 
 /**
@@ -855,7 +1014,7 @@ function globToRegex(glob: string): RegExp {
   return new RegExp(`^${p}$`);
 }
 
-async function evaluate(
+export async function evaluate(
   repo: string,
   pr: number,
   enabledClasses: PrDiffClass[],
@@ -1114,6 +1273,19 @@ async function evaluate(
     }
   }
 
+  // ── Leg "stale-base" (stint #928, Kevin 9/27; crew PRs only; BEFORE any API spend) ──
+  // A crew PR whose base is >1 day behind main, or behind by a commit touching one of its files,
+  // is rebased (update-branch) and re-run on CI before it is eligible — a stale PR is refused for
+  // THIS cycle and the paid review never fires. See the stale-base section above.
+  if (isCrewPr(labels) && (prClass === "code-fix" || prClass === "fleet-internal")) {
+    const staleBase = staleBaseGuard(repo, pr, prJson);
+    if (staleBase.action !== "proceed") {
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: stale-base leg (review NOT invoked — no spend): ` + staleBase.reasons.join("; "));
+      console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "stale-base", reasons: staleBase.reasons }));
+      return;
+    }
+  }
+
   // ── Paid leg: independent review — every other leg already passes, class-aware prompt ──
   // 2026-09-06 (Kevin, "that works"): a `reviewed` label applied by a merge-authorized
   // HUMAN after the head commit is the human review receipt (the 9/03 vocabulary:
@@ -1237,14 +1409,18 @@ async function evaluate(
     return;
   }
 
-  // Stint #928 (Kevin-approved row 926, 2026-09-26): crew-authored code-fix PRs —
-  // identified by `fleet-internal` + NOT `bugsquasher` — NEVER auto-merge directly
-  // even in non-train repos. The same candidate+box flow a train repo uses is
-  // replicated here: candidate tells the train sweep the gate cleared it, box queues
-  // it on the fleet-bot's authority (GATE_AUTHORITY_CLASSES includes
-  // `["fleet-internal", "candidate"]`). Kevin's one human key opens the merge.
-  const isCrewCodeFix =
-    prClass === "code-fix" && labels.includes(FLEET_INTERNAL_LABEL) && !labels.includes(BUGSQUASHER_LABEL);
+  // Stint #928 (Kevin-approved row 926, 2026-09-26/27): crew-authored code-fix PRs —
+  // identified by `fleet-internal` + NOT `bugsquasher` — do not take the direct-merge
+  // path below. The gate hands them to the same candidate+box door a train repo uses:
+  // it applies `candidate` and `box` ITSELF as the fleet bot (a bot box honored only for
+  // `fleet-internal` + `candidate` — GATE_AUTHORITY_CLASSES), and the NEXT sweep's
+  // `evaluateQueuedOverride` merges the head sha-pinned. No human key is involved: this
+  // IS the unattended merge Kevin approved, every leg having just passed (CI green,
+  // review 2-of-3 CLEAN, no sensitive path, under the 200-line crew cap, base fresh).
+  // `hold` parks it; a head move, a CI regression or a stale base (rebased + CI re-run
+  // first, box or no box) voids it. (This route writes no `automerge:code-fix` B2
+  // tripwire label — see the PR #580 body's open finding.)
+  const isCrewCodeFix = prClass === "code-fix" && isCrewPr(labels);
   if (isCrewCodeFix) {
     const headNow = gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"]).trim();
     if (headNow !== prJson.headRefOid) {
@@ -1273,17 +1449,18 @@ async function evaluate(
         `**squasher auto-merge gate — CREW CODE-FIX CANDIDATE** (class: \`code-fix\`; stint #928)`,
         "",
         `Every gate leg passed (shape, crew line cap 200, safe_path_globs, built-in denylist, ` +
-          `named checks, independent review 2-of-3 CLEAN) — crew-authored PRs never auto-merge ` +
-          `directly. Applied \`${TRAIN_CANDIDATE_LABEL}\` and \`${QUEUED_LABEL}\`; Kevin's \`` +
-          `${QUEUED_LABEL}\` key merges it (Rule #279, stint #928).`,
+          `named checks, stale-base, independent review 2-of-3 CLEAN). Applied \`${TRAIN_CANDIDATE_LABEL}\` and ` +
+          `\`${QUEUED_LABEL}\` (the gate's own fleet-bot key — honored only for \`fleet-internal\` + \`candidate\`); ` +
+          `the next sweep merges this head, sha-pinned, unless the head moves, CI regresses, the base goes stale ` +
+          `(rebased and CI re-run first, box or no box), or a human applies \`${HOLD_LABEL}\` (Rule #279, stint #928).`,
         "",
         `Evaluated sha: \`${prJson.headRefOid}\`.`,
       ].join("\n"),
     );
     console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "candidate" }));
     console.log(
-      `[candidate] pr-automerge-gate ${repo}#${pr}: crew code-fix all legs passed — routed to ` +
-        `\`${QUEUED_LABEL}\` authority (stint #928).`,
+      `[candidate] pr-automerge-gate ${repo}#${pr}: crew code-fix all legs passed — labeled ` +
+        `'${TRAIN_CANDIDATE_LABEL}' + '${QUEUED_LABEL}' (fleet-bot key); the next sweep merges sha-pinned (stint #928).`,
     );
     return;
   }
@@ -1661,6 +1838,20 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
       return "fall-through";
     }
 
+    // ── Stale-base re-run (stint #928, Kevin 9/27 — "box or no box"): a CREW PR's box does NOT skip
+    //    the rebase + CI re-run. The box overrides the decision legs, so it cannot know the class —
+    //    this keys on the crew label predicate. The update-branch push makes this box stale (the
+    //    existing stale-label rule); a fresh box lands on the re-run head. ──
+    if (isCrewPr(labels)) {
+      const staleBase = staleBaseGuard(repo, pr, prJson);
+      if (staleBase.action !== "proceed") {
+        const detail = `queued: ${staleBase.reasons.join("; ")}`;
+        console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail} — aborting this cycle, nothing merged`);
+        console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "stale-base", reasons: staleBase.reasons }));
+        return "abort-cycle";
+      }
+    }
+
     // ── Revalidate (train shape): snapshot drift, then a fresh authority re-evaluation ──
     const before: AuthoritySnapshot = { labels, headRefOid: prJson.headRefOid, state: prJson.state, mergeStateStatus: prJson.mergeStateStatus };
     let revalidatePr = fetchPr(repo, pr);
@@ -2033,6 +2224,18 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     const detail = `not merge-ready (${readiness.detail})`;
     logTrainGateLine(repo, pr, "refused", detail);
     return { outcome: "refused", detail };
+  }
+
+  // ── Stale-base re-run (stint #928, Kevin 9/27 — "box or no box"): the restart-train door honors the
+  // same `box`, so it gets the same crew-only guard. After the readiness floor (no update-branch on
+  // red CI), before the revalidate-then-merge. Human PRs (no `fleet-internal`) never reach this.
+  if (isCrewPr(currentLabels)) {
+    const staleBase = staleBaseGuard(repo, pr, prJson);
+    if (staleBase.action !== "proceed") {
+      const detail = staleBase.reasons.join("; ");
+      logTrainGateLine(repo, pr, "refused", detail);
+      return { outcome: "refused", detail };
+    }
   }
 
   // TODO(A2 or later rung): window law (doc §3.1 step 6) — restart-train repos
