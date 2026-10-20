@@ -57,10 +57,12 @@ export type GateReceiptVerdict = "qualified" | "missed" | "candidate";
  *                  same-cycle; the next sweep re-evaluates.
  * - `behind`       (row 928, strict branch protection) the PR passed its lane's
  *                  pre-checks but its branch is BEHIND base: the gate requested
- *                  update-branch (or was refused by GitHub / fail-closed) and merged
- *                  nothing this cycle. A wait; the next sweep re-evaluates the new head.
- * - `behind-cap`   `behind` hit its cap (3 gate-requested update-branch calls per PR per
- *                  24h) — the base outruns CI; a human owns the update. A decision leg.
+ *                  update-branch, or deferred to the repo's lease holder, or was refused
+ *                  by GitHub / fail-closed, or stood down for a park (`needs-human`) —
+ *                  and merged nothing this cycle. A wait; a BEHIND PR is re-evaluated
+ *                  every sweep (hourly fingerprint bucket) and its new head after CI.
+ * - `behind-cap`   `behind` hit its cap: 3 gate updates on this PR in 24h with no gate
+ *                  merge landing in between; a human owns the update. A decision leg.
  * - `other`        UNFORESEEN ONLY. The gate threw. Investigate.
  */
 export type GateReceiptLeg =

@@ -120,7 +120,7 @@ import {
   type RollupItem,
 } from "./lib/automerge-classify.js";
 import { loadSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
-import { BEHIND_UPDATE_CAP, requestBehindUpdate, type BehindOutcome } from "./lib/behind-update.js";
+import { BEHIND_UPDATE_CAP, MERGED_MARKER, requestBehindUpdate, type BehindOutcome } from "./lib/behind-update.js";
 import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
@@ -185,6 +185,7 @@ const TRAIN_CANDIDATE_LABEL = "candidate";
 const BUGSQUASHER_LABEL = "bugsquasher";
 // 2026-09-13 (Kevin, "both fixes approved"): the runner marks fleet-internal green PRs; the gate queues them like bugsquasher.
 const FLEET_INTERNAL_LABEL = "fleet-internal";
+const NEEDS_HUMAN_LABEL = "needs-human";
 
 // ───────────────────────────── gh helpers ─────────────────────────────
 
@@ -756,7 +757,8 @@ export async function independentReviewVote(diff: string, systemPrompt: string):
  * (a merge commit, expected_head_sha-pinned), capped at 3 per PR per 24h (lib/behind-update.ts) — and NOTHING else happens
  * this cycle: no merge, no label, no paid review. Callers invoke this only past their pre-checks, so a PR the gate would
  * never merge is never touched. Returns the receipt reason; never throws. After a request it runs the same box-patch-id
- * refresh the DIRTY branch runs (inert unless GATE_PATCH_ID_WINS). A cap hit enrolls the existing decision line.
+ * refresh the DIRTY branch runs (inert unless GATE_PATCH_ID_WINS). One update per repo at a time (a held lease defers
+ * with a wait receipt, nothing charged); a cap hit enrolls the existing decision line.
  */
 async function handleBehind(lane: "squasher" | "train", repo: string, pr: number, prClass: PrDiffClass | "unclassified", prJson: PrJson): Promise<string> {
   const start = process.hrtime.bigint();
@@ -772,14 +774,43 @@ async function handleBehind(lane: "squasher" | "train", repo: string, pr: number
     o.kind === "requested"
       ? "update-branch requested"
       : o.kind === "capped"
-        ? `behind-cap: ${o.used} gate-requested update-branch calls on this PR in the last 24h (cap ${BEHIND_UPDATE_CAP}) — refusing another; a human brings the branch current`
-        : o.reason;
+        ? `behind-cap: ${o.used} gate updates on this PR in the last 24h (cap ${BEHIND_UPDATE_CAP}) with no gate merge landing in between — the gate stops; a human brings the branch current`
+        : o.kind === "deferred"
+          ? `waiting: PR #${o.holder} holds this repo's update-branch lease (one gate update per repo at a time) — no call made, no attempt charged`
+          : o.reason;
   console.log(`[wait] pr-automerge-gate ${repo}#${pr}: BEHIND base — ${reason}. No merge, no label this cycle.`);
   const leg: GateReceiptLeg = o.kind === "capped" ? "behind-cap" : "behind";
   if (lane === "squasher") console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg, reasons: [reason] }));
   else logTrainGateLine(repo, pr, "refused", `behind: ${reason}`);
   if (o.kind === "capped") await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg, reasons: [reason], additions: prJson.additions, deletions: prJson.deletions });
   return reason;
+}
+
+/**
+ * The code-fix flap circuit-breaker's READ (bolt-wms#2120), shared by the pre-merge leg and the BEHIND path: a flapping PR is
+ * parked for a human, and the gate's own update-branch merge commit would RESET `codeFixLabelFlap`'s count (it counts adds
+ * since the last commit) — so a BEHIND path that skipped this read would un-park a PR "a human decides this merge" (review
+ * F1). The timeline is this guard's only instrument; an unreadable one means the guard is blind, and a blind guard must not
+ * wave anything through (Rule #322 — an oracle that cannot answer produces no positives).
+ */
+function readFlapVerdict(repo: string, pr: number): FlapVerdict {
+  try {
+    return codeFixLabelFlap(fetchAuthorityTimeline(repo, pr), CODE_FIX_MERGE_LABEL);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      flapping: true,
+      addsSinceHeadMove: null,
+      detail: `the authority timeline could not be read, so the flap guard is blind — refusing the label write rather than risking the loop. Underlying error: ${message}`,
+    };
+  }
+}
+
+/** The flap-guard refusal: loud line, `leg=flap-guard` receipt, decision enrolled. Same text for both call sites. */
+async function refuseFlapGuard(repo: string, pr: number, prClass: PrDiffClass, prJson: PrJson, flap: FlapVerdict & { flapping: true }, lead: string): Promise<void> {
+  console.log(`[no-op] pr-automerge-gate ${repo}#${pr}: ${lead} ${flap.detail}`);
+  console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "flap-guard", reasons: [flap.detail] }));
+  await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "flap-guard", reasons: [flap.detail], additions: prJson.additions, deletions: prJson.deletions });
 }
 
 // ───────────────────────────── main ─────────────────────────────
@@ -1192,6 +1223,22 @@ export async function evaluate(
   // head — a flagged head is PARKED, and the gate must not mint a "new head" that re-rolls the vote, stint #724). Only the
   // paid review and the merge remain, and neither means anything on a head about to be replaced: bring it current instead.
   if (behind) {
+    // Review F1: a head that is PARKED for a human must not be un-parked by the gate's own merge commit. The sticky review FLAG
+    // is checked above; the other standing parks are checked here, read-only, BEFORE any update-branch call: the code-fix flap
+    // guard (its count resets at any commit, including ours) and an open `needs-human` ask. Zero calls on either.
+    if (prClass === "code-fix" && repoClassFor(repo) !== "train") {
+      const flap = readFlapVerdict(repo, pr);
+      if (flap.flapping) {
+        await refuseFlapGuard(repo, pr, prClass, prJson, flap, `BEHIND code-fix is parked at the flap guard — update-branch NOT requested (a new head would reset the flap count and un-park it).`);
+        return;
+      }
+    }
+    if (labels.includes(NEEDS_HUMAN_LABEL)) {
+      const reason = `\`${NEEDS_HUMAN_LABEL}\` is present — a human's ask is open on this PR; the gate does not mint a new head under it (remove the label to release)`;
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: BEHIND base — ${reason}. No update-branch, no merge.`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "behind", reasons: [reason] }));
+      return;
+    }
     await handleBehind("squasher", repo, pr, prClass, prJson);
     return;
   }
@@ -1335,35 +1382,16 @@ export async function evaluate(
     // the loop, so removing it here would light exactly the CI run this guard exists
     // to stop. A stale label on an unmerged PR is the safe residue — a later human
     // merge then fires the B2 tripwire, which is the watched outcome we want anyway.
-    let flap: FlapVerdict;
-    try {
-      flap = codeFixLabelFlap(fetchAuthorityTimeline(repo, pr), CODE_FIX_MERGE_LABEL);
-    } catch (err) {
-      // The timeline is this guard's only instrument; an unreadable one means the
-      // guard is blind, and a blind guard must not wave the label write through
-      // (Rule #322 — an oracle that cannot answer produces no positives).
-      const message = err instanceof Error ? err.message : String(err);
-      flap = {
-        flapping: true,
-        addsSinceHeadMove: null,
-        detail: `the authority timeline could not be read, so the flap guard is blind — refusing the label write rather than risking the loop. Underlying error: ${message}`,
-      };
-    }
+    const flap = readFlapVerdict(repo, pr);
     if (flap.flapping) {
-      console.log(
-        `[no-op] pr-automerge-gate ${repo}#${pr}: code-fix passed every leg but the flap guard REFUSED the ` +
-          `'${CODE_FIX_MERGE_LABEL}' write — merge ABORTED and NOT retried (Rules #109/#161). ${flap.detail}`,
-      );
-      console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "flap-guard", reasons: [flap.detail] }));
-      await enrollGateRefusal({
+      await refuseFlapGuard(
         repo,
         pr,
-        headSha: prJson.headRefOid,
-        leg: "flap-guard",
-        reasons: [flap.detail],
-        additions: prJson.additions,
-        deletions: prJson.deletions,
-      });
+        prClass,
+        prJson,
+        flap,
+        `code-fix passed every leg but the flap guard REFUSED the '${CODE_FIX_MERGE_LABEL}' write — merge ABORTED and NOT retried (Rules #109/#161).`,
+      );
       return;
     }
 
@@ -1486,7 +1514,7 @@ export async function evaluate(
     `Evaluated sha: \`${prJson.headRefOid}\` (merge was SHA-pinned via \`--match-head-commit\`).`,
   ].join("\n");
 
-  commentOnPr(repo, pr, receipt);
+  commentOnPr(repo, pr, `${MERGED_MARKER} -->\n${receipt}`); // marker: the cap sees the base moved by a gate merge (behind-update.ts)
   console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "qualified" }));
   console.log(`[merged] pr-automerge-gate ${repo}#${pr}: all legs passed, squash-merged at ${prJson.headRefOid}.`);
   // ops#260 leg 3: a PR refused at an earlier head and merged now must not leave a
@@ -1738,6 +1766,7 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
       repo,
       pr,
       [
+        `${MERGED_MARKER} -->`, // the cap sees the base moved by a gate merge (behind-update.ts)
         "**`box` — MERGED on Kevin's word** (ops-pipeline#260 leg 4; 2026-09-15 rename — one key)",
         "",
         "| Leg | Result |",
@@ -2171,7 +2200,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     authorizingPosition: revalidateVerdict.authorizingEvent.position,
     headRefOid: prJson.headRefOid,
   });
-  commentOnPr(repo, pr, receipt);
+  commentOnPr(repo, pr, `${MERGED_MARKER} -->\n${receipt}`); // marker: the cap sees the base moved by a gate merge (behind-update.ts)
   logTrainGateLine(repo, pr, "merged", `merged at ${prJson.headRefOid}`);
   return { outcome: "merged", detail: `merged at ${prJson.headRefOid}` };
 }

@@ -8,7 +8,8 @@
  * changed evaluates nothing and SAYS so per PR (the skip is a receipt, #465).
  *
  * Fingerprint = headRefOid · every check's name+conclusion (sorted) · labels (sorted) · mergeStateStatus · isDraft · the
- * gate's own sha (a door change re-evaluates everything once — #381, tightening a guard is forward-only).
+ * gate's own sha (a door change re-evaluates everything once — #381, tightening a guard is forward-only) · for a BEHIND PR
+ * only, an hourly bucket (row 928: a BEHIND verdict can change with nothing on the PR changing, so it is re-looked-at hourly).
  *
  * stdin: JSON array of enumeration entries, each {repo, pr_number, ...}
  * argv:  <state.json path> <gate-sha> [--record]   (--record: write the new fingerprints for the entries we RETURN;
@@ -24,10 +25,19 @@ type Entry = { repo: string; pr_number: string; [k: string]: unknown };
 type Fp = { fp: string; at: string; verdict?: string };
 type State = Record<string, Fp>;
 
-export function fingerprintOf(pr: { headRefOid: string; statusCheckRollup: { name?: string; context?: string; conclusion?: string; state?: string }[]; labels: { name: string }[]; mergeStateStatus: string; isDraft: boolean }, gateSha: string): string {
+/** Row 928: how often a BEHIND PR is looked at again with nothing else changed. */
+export const BEHIND_RECHECK_MS = 60 * 60 * 1000;
+
+export function fingerprintOf(pr: { headRefOid: string; statusCheckRollup: { name?: string; context?: string; conclusion?: string; state?: string }[]; labels: { name: string }[]; mergeStateStatus: string; isDraft: boolean }, gateSha: string, nowMs: number = Date.now()): string {
   const checks = (pr.statusCheckRollup || []).map((c) => `${c.name || c.context || "?"}=${c.conclusion || c.state || "PENDING"}`).sort().join(",");
   const labels = (pr.labels || []).map((l) => l.name).sort().join(",");
-  return [pr.headRefOid, checks, labels, pr.mergeStateStatus, pr.isDraft ? "draft" : "ready", gateSha].join("|");
+  const parts = [pr.headRefOid, checks, labels, pr.mergeStateStatus, pr.isDraft ? "draft" : "ready", gateSha];
+  // A BEHIND PR's verdict can change with NOTHING on the PR changing: the repo's update-branch lease frees up when a sibling
+  // merges, a refused/transient update is worth retrying, and the 24h cap window rolls. None of those move this fingerprint, so
+  // without a clock term a deferred/refused/capped PR would be skipped forever (review F3/F5). Hourly = the sweep cadence.
+  // Every other state stays byte-identical to before.
+  if (pr.mergeStateStatus === "BEHIND") parts.push(`behind@${Math.floor(nowMs / BEHIND_RECHECK_MS)}`);
+  return parts.join("|");
 }
 
 /** Pure: given entries + their live fingerprints + prior state, split into changed / unchanged. */
