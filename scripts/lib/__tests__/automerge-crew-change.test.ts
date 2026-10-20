@@ -23,12 +23,13 @@ import {
   fileContentsFromParsed,
   gateDecisionForClass,
   isCrewPr,
+  isDoorMachineryPath,
   parseUnifiedDiff,
   reconcileFileClasses,
+  reDeriveWatchedClass,
   TRIPWIRE_WATCHED_CLASSES,
 } from "../automerge-classify.js";
 import { parseArgs } from "../automerge-args.js";
-import { isDoorMachineryPath } from "../automerge-classify.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -502,4 +503,61 @@ describe("squasher-fleet.json — crew-change enablement and the door-machinery 
       expect(opsSensitive.some((re) => re.test(p))).toBe(false);
     },
   );
+});
+
+// ───── the post-merge tripwire watches crew-change merges too (the label alone is a claim, not a watch — Rule #464) ─────
+
+
+describe("reDeriveWatchedClass — what the post-merge tripwire will actually watch", () => {
+  const ROLLUP = [{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-10-20T10:05:00Z" }];
+  const base = (ds: D[], over: Partial<Parameters<typeof reDeriveWatchedClass>[0]> = {}) => ({
+    paths: ds.map((d) => d.path),
+    totalChangedLines: ds.reduce((n, d) => n + (d.added ?? ["x"]).length + (d.removed ?? []).length, 0),
+    diffText: ds.map(unified).join(""),
+    safePathGlobs: SAFE,
+    sensitivePaths: [],
+    author: "kbibelhausen",
+    labels: ["fleet-internal", "automerge:code-fix"],
+    statusCheckRollup: ROLLUP,
+    requiredChecks: ["ci"],
+    ...over,
+  });
+  const MIGRATION_PR: D[] = [
+    { path: "src/lib/router.ts", isNew: true },
+    { path: "src/db/migrations/0042_add_notes.sql", isNew: true, added: ["ALTER TABLE t ADD COLUMN notes TEXT;"] },
+  ];
+
+  it("a merged crew-change PR re-derives as crew-change (WATCHED) — it would have been 'not code-fix class' and unwatched before", () => {
+    const res = reDeriveWatchedClass(base(MIGRATION_PR));
+    expect(res).toEqual({ ok: true, prClass: "crew-change", reasons: [] });
+  });
+
+  it("a merged code-fix PR still re-derives as code-fix (unchanged)", () => {
+    const res = reDeriveWatchedClass(base([{ path: "src/lib/router.ts", removed: ["a"], added: ["b"] }], { labels: ["bugsquasher", "automerge:code-fix"] }));
+    expect(res).toEqual({ ok: true, prClass: "code-fix", reasons: [] });
+  });
+
+  it("the gate's own stale needs-human, still on the PR when the tripwire reads it (the strip races the merge event), does NOT void the watch", () => {
+    expect(reDeriveWatchedClass(base(MIGRATION_PR, { labels: ["fleet-internal", "automerge:code-fix", "needs-human"] })).ok).toBe(true);
+  });
+
+  it("known-BAD controls: a hand-applied label on a PR that is NOT crew work is refused (the label buys nothing)", () => {
+    expect(reDeriveWatchedClass(base(MIGRATION_PR, { author: "somebody-else" })).ok).toBe(false);
+    expect(reDeriveWatchedClass(base(MIGRATION_PR, { labels: ["automerge:code-fix"] })).ok).toBe(false);
+    expect(reDeriveWatchedClass(base([...MIGRATION_PR, { path: ".github/workflows/x.yml", added: ["a: b"] }])).ok).toBe(false);
+  });
+
+  it("a red/missing named check at merge time refuses the watch", () => {
+    expect(reDeriveWatchedClass(base(MIGRATION_PR, { statusCheckRollup: [] })).ok).toBe(false);
+    expect(reDeriveWatchedClass(base(MIGRATION_PR, { requiredChecks: [] })).ok).toBe(false);
+  });
+
+  it("a fleet-internal-fallback PR (no tripwire label is ever written for it) is refused, not silently 'watched'", () => {
+    const res = reDeriveWatchedClass(base([{ path: "src/lib/router.ts", isNew: true }], { safePathGlobs: [] }));
+    // no safe globs: code-fix inert; crew-change takes it (it precedes fleet-internal) — still a WATCHED class
+    expect(res.prClass).toBe("crew-change");
+    const over = reDeriveWatchedClass(base([{ path: "src/lib/router.ts", isNew: true }], { safePathGlobs: [], totalChangedLines: 1600 }));
+    expect(over.ok).toBe(false);
+    expect(over.reasons.join(" ")).toContain("fleet-internal");
+  });
 });

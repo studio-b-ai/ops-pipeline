@@ -1601,3 +1601,60 @@ export function codeFixRevalidateDeltas(
 
   return deltas;
 }
+
+// ───────────────── post-merge tripwire re-derivation (ops#190 B2 §4.1; door policy, row 928) ─────────────────
+
+/**
+ * What the post-merge tripwire re-derives from a MERGED PR before it spends a health window on it. The
+ * `automerge:code-fix` label is a zero-authority filter; this is the verdict. Lifted out of
+ * post-merge-tripwire.ts (whose `main()` fires at import) so the SAME function is unit-tested.
+ *
+ * Door policy (row 928): the gate writes that label for crew-change merges too, so the re-derivation resolves
+ * `crew-change` as well as `code-fix` (TRIPWIRE_WATCHED_CLASSES). Without this a crew-change merge would carry the
+ * label, be refused here as "not code-fix class", and go UNWATCHED — the label alone would be a claim, not a watch
+ * (Rule #464). Review stays INHERITED (no durable machine receipt), CI is re-verified via the named checks.
+ * Post-merge, the `needs-human` / `hold` lane legs are meaningless (the PR already merged, and the gate retires its
+ * own stale needs-human a moment after the merge — a race the tripwire must not lose), so they are dropped from the
+ * label set before the universal legs run.
+ */
+export function reDeriveWatchedClass(input: {
+  paths: string[];
+  totalChangedLines: number;
+  diffText: string;
+  safePathGlobs: string[];
+  sensitivePaths: string[];
+  author: string;
+  labels: string[];
+  statusCheckRollup: RollupItem[];
+  requiredChecks: string[];
+}): { ok: boolean; prClass?: PrDiffClass; reasons: string[] } {
+  const parsed = parseUnifiedDiff(input.diffText);
+  const files = reconcileFileClasses(input.paths, parsed);
+  const cls = classifyPrDiffClass({
+    files,
+    totalChangedLines: input.totalChangedLines,
+    safePathGlobs: input.safePathGlobs,
+    sensitivePathPatterns: input.sensitivePaths,
+    author: input.author,
+    labels: input.labels,
+    crewChangeEnabled: true,
+    fileContents: fileContentsFromParsed(parsed),
+  });
+  if (cls.prClass === null || !TRIPWIRE_WATCHED_CLASSES.includes(cls.prClass)) {
+    return { ok: false, reasons: [`diff class re-derivation: ${cls.prClass ?? "null"} (${cls.reasons.join("; ") || "no reasons"})`] };
+  }
+
+  const gate = gateDecisionForClass({
+    prClass: cls.prClass,
+    author: input.author,
+    labels: input.labels.filter((l) => l !== NEEDS_HUMAN_LABEL && l !== HOLD_LABEL_VALUE),
+    ciClean: true,
+    reviewVerdict: "CLEAN",
+  });
+  if (gate.decision !== "merge") return { ok: false, reasons: gate.reasons };
+
+  const checks = requiredChecksSatisfied(input.statusCheckRollup, input.requiredChecks);
+  if (!checks.ok) return { ok: false, reasons: checks.reasons };
+
+  return { ok: true, prClass: cls.prClass, reasons: [] };
+}

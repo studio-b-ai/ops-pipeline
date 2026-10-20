@@ -29,14 +29,7 @@
 
 import { execFileSync } from "node:child_process";
 
-import {
-  classifyPrDiffClass,
-  gateDecisionForClass,
-  parseUnifiedDiff,
-  reconcileFileClasses,
-  requiredChecksSatisfied,
-  type RollupItem,
-} from "./lib/automerge-classify.js";
+import { reDeriveWatchedClass, type RollupItem } from "./lib/automerge-classify.js";
 import { ensureLabel, gh, openIssue } from "./lib/github-issues.js";
 import {
   fetchDeploymentsWithMeta,
@@ -181,6 +174,7 @@ function fetchSquashCommitDiff(repo: string, sha: string): SquashDiff {
 
 interface ReDerivation {
   ok: boolean;
+  prClass?: string;
   reasons: string[];
 }
 
@@ -202,39 +196,20 @@ interface ReDerivation {
  * remediation behind it stays human-gated (#97).
  */
 function reDeriveCodeFix(args: TripwireArgs, pr: MergedPrJson, diff: SquashDiff): ReDerivation {
-  const parsed = parseUnifiedDiff(diff.diffText);
-  const files = reconcileFileClasses(diff.paths, parsed);
-
-  const cls = classifyPrDiffClass({
-    files,
+  // One classification path, never a fork (Rule #283): the pure re-derivation lives in lib/automerge-classify.ts
+  // (unit-tested there). Door policy (row 928): a crew-change merge carries this label too, so it is re-derived as
+  // code-fix OR crew-change.
+  return reDeriveWatchedClass({
+    paths: diff.paths,
     totalChangedLines: diff.totalChangedLines,
+    diffText: diff.diffText,
     safePathGlobs: args.safePathGlobs,
-    sensitivePathPatterns: args.sensitivePaths,
-  });
-  if (cls.prClass !== "code-fix") {
-    return {
-      ok: false,
-      reasons: [`diff class re-derivation: ${cls.prClass ?? "null"} (${cls.reasons.join("; ") || "no reasons"})`],
-    };
-  }
-
-  const gate = gateDecisionForClass({
-    prClass: "code-fix",
+    sensitivePaths: args.sensitivePaths,
     author: pr.author.login,
     labels: pr.labels.map((l) => l.name),
-    ciClean: true,
-    reviewVerdict: "CLEAN",
+    statusCheckRollup: pr.statusCheckRollup ?? [],
+    requiredChecks: args.requiredChecks,
   });
-  if (gate.decision !== "merge") {
-    return { ok: false, reasons: gate.reasons };
-  }
-
-  const checks = requiredChecksSatisfied(pr.statusCheckRollup ?? [], args.requiredChecks);
-  if (!checks.ok) {
-    return { ok: false, reasons: checks.reasons };
-  }
-
-  return { ok: true, reasons: [] };
 }
 
 // ───────────────────────────── revert PR ─────────────────────────────
@@ -363,15 +338,15 @@ async function main(): Promise<void> {
 
   const derivation = reDeriveCodeFix(args, pr, diff);
   if (!derivation.ok) {
-    log(`refusal: not code-fix class — ${derivation.reasons.join("; ")}`);
+    log(`refusal: not code-fix/crew-change class — ${derivation.reasons.join("; ")}`);
     commentOnPr(
       args.repo,
       args.pr,
-      `${header}\n\n**Refused: not code-fix class.** The \`automerge:code-fix\` label is a filter, not authority — re-derivation against the squash commit did not qualify this PR, so the tripwire took no action:\n${derivation.reasons.map((r) => `- ${r}`).join("\n")}`,
+      `${header}\n\n**Refused: not code-fix/crew-change class.** The \`automerge:code-fix\` label is a filter, not authority — re-derivation against the squash commit did not qualify this PR, so the tripwire took no action:\n${derivation.reasons.map((r) => `- ${r}`).join("\n")}`,
     );
     return;
   }
-  log(`re-derivation: code-fix confirmed — class+author+label+checks re-verified, review leg inherited from the pre-merge gate (${diff.paths.length} files, ${diff.totalChangedLines} lines)`);
+  log(`re-derivation: ${derivation.prClass ?? "code-fix"} confirmed — class+author+label+checks re-verified, review leg inherited from the pre-merge gate (${diff.paths.length} files, ${diff.totalChangedLines} lines)`);
 
   // ── attribution: bind exactly one deployment by squash sha + createdAt after close ──
   const attributionDeadline = Date.now() + ATTRIBUTION_TIMEOUT_MS;
