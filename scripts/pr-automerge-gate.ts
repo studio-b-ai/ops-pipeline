@@ -30,7 +30,16 @@
  *      `fleet-internal` label, resolves LAST of all, guarded by the built-in
  *      denylist backstop, the class's own label legs — `fleet-internal` present,
  *      no `needs-human`, no `hold` — and leg 7's named-checks; ops-pipeline is
- *      excluded from the class by contract). A mixed-shape diff (e.g. a workflow
+ *      excluded from the class by contract), or crew-change (door policy, row 928 —
+ *      Kevin 10/20: the door merges anything that meets policy; joins only for a
+ *      CREW PR = owner identity + `fleet-internal` in a repo that enables it;
+ *      every file inside safe_path_globs, or outside the sensitive paths + the
+ *      class's built-in deny list when the repo declares none; <=1500 changed lines;
+ *      deny list: .github/**, pricing/price-sync, auth/credentials/secrets/token,
+ *      settings.json, manifests, migrations that drop/alter, the door itself — see
+ *      automerge-classify.ts; resolves after code-fix, before fleet-internal; named
+ *      checks + the `automerge:code-fix` tripwire label before the merge, like
+ *      code-fix). A mixed-shape diff (e.g. a workflow
  *      file AND a test file together) satisfies no shape candidate and resolves
  *      to `null` unless the fleet-internal candidate picks it up — never a
  *      partial/best-effort merge across classes.
@@ -45,7 +54,9 @@
  *      class-aware system prompt (`reviewSystemPromptFor` — test-only adds an extra
  *      assertion-weakening question; code-fix gets its OWN minimal-targeted-fix
  *      rubric, ops#190 B3, since the base docs-only rubric can never CLEAN a
- *      behavioral fix), which must return exactly the string `CLEAN`
+ *      behavioral fix; and a CREW PR in code-fix / fleet-internal / crew-change
+ *      gets the CORRECT / SAFE / SCOPED / PROVEN rubric — "is it a small bug
+ *      fix" was the wrong question for routine crew work, row 928), which must return exactly the string `CLEAN`
  *      (strict, case-sensitive) or the whole leg is FLAG. ANY API error (network,
  *      auth, rate limit, malformed response) is ALSO FLAG — fail-closed, never
  *      silently treated as clean. A FLAG is STICKY PER HEAD (stint #724,

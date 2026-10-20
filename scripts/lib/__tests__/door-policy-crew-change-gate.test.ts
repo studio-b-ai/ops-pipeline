@@ -294,6 +294,19 @@ describe("the crew-change door — refused: the surfaces that stay Kevin's", () 
     expect(receiptLines().at(-1)).toMatch(/verdict=missed leg=line-cap/);
   });
 
+  it("a named required check that never reported ⇒ refused at named-checks, no spend (the named-checks leg is live for crew-change)", async () => {
+    await runGate({ diff: CREW_PR }, { checks: ["ci", "Server — TypeScript + Tests"] });
+    expect(mergeCalls()).toHaveLength(0);
+    expect(createMock).not.toHaveBeenCalled();
+    expect(receiptLines().at(-1)).toMatch(/verdict=missed leg=named-checks/);
+  });
+
+  it("no required_checks declared at all ⇒ the class is inert (an empty list fails closed)", async () => {
+    await runGate({ diff: CREW_PR }, { checks: [] });
+    expect(mergeCalls()).toHaveLength(0);
+    expect(receiptLines().at(-1)).toMatch(/verdict=missed leg=named-checks/);
+  });
+
   it("exactly 1500 ⇒ the cap does not refuse", async () => {
     await runGate({ diff: CREW_PR, additions: 1000, deletions: 500 });
     expect(mergeCalls()).toHaveLength(1);
