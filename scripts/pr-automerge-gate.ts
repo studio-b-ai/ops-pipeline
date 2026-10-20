@@ -11,7 +11,10 @@
  * Legs (ALL required):
  *   1. PR is OPEN, NON-DRAFT, `mergeStateStatus === "CLEAN"`, and every CI check is green
  *      (`isRollupClean`) — checked FIRST and cheaply, before any diff fetch or API
- *      spend (Rule #88: probe before committing spend).
+ *      spend (Rule #88: probe before committing spend). Row 928 (strict branch
+ *      protection, Kevin 10/20): `BEHIND` passes this floor ONLY so an otherwise-eligible
+ *      PR can be brought current via update-branch (`handleBehind`, lib/behind-update.ts)
+ *      once its lane's pre-checks have passed — it is never merged or labeled while BEHIND.
  *   2. the PR's file set resolves to EXACTLY ONE PR-level diff class
  *      (`classifyPrDiffClass` — scripts/lib/automerge-classify.ts): docs-comment
  *      (<=10 lines, every file doc|comment-only, unchanged from the original #279
@@ -117,6 +120,7 @@ import {
   type RollupItem,
 } from "./lib/automerge-classify.js";
 import { loadSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
+import { BEHIND_UPDATE_CAP, requestBehindUpdate, type BehindOutcome } from "./lib/behind-update.js";
 import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
@@ -744,6 +748,40 @@ export async function independentReviewVote(diff: string, systemPrompt: string):
   return { verdict: "FLAG", detail: `votes: ${votes} (${cleanCount}/${REVIEW_VOTE_COUNT} CLEAN — ${REVIEW_QUALIFIED_VOTES} needed) — ${detail}` };
 }
 
+// ───────────────────────────── strict protection: bring a BEHIND PR current (row 928) ─────────────────────────────
+
+/**
+ * Kevin 10/20 "protect main": with strict branch protection GitHub reports `BEHIND` for a PR whose base moved, and the
+ * gate only merges CLEAN. A PR that has passed its lane's pre-checks and is BEHIND is brought current here — update-branch
+ * (a merge commit, expected_head_sha-pinned), capped at 3 per PR per 24h (lib/behind-update.ts) — and NOTHING else happens
+ * this cycle: no merge, no label, no paid review. Callers invoke this only past their pre-checks, so a PR the gate would
+ * never merge is never touched. Returns the receipt reason; never throws. After a request it runs the same box-patch-id
+ * refresh the DIRTY branch runs (inert unless GATE_PATCH_ID_WINS). A cap hit enrolls the existing decision line.
+ */
+async function handleBehind(lane: "squasher" | "train", repo: string, pr: number, prClass: PrDiffClass | "unclassified", prJson: PrJson): Promise<string> {
+  const start = process.hrtime.bigint();
+  const o: BehindOutcome = requestBehindUpdate(gh, repo, pr, prJson.headRefOid);
+  if (o.kind === "requested") {
+    try {
+      refreshBoxPatchIdAfterUpdateBranch(repo, pr, prJson.headRefOid, start);
+    } catch (e) {
+      console.log(`[warn] pr-automerge-gate ${repo}#${pr}: box-patch-id refresh-after-update-branch failed (non-fatal): ${(e as Error).message.split("\n")[0]}`);
+    }
+  }
+  const reason =
+    o.kind === "requested"
+      ? "update-branch requested"
+      : o.kind === "capped"
+        ? `behind-cap: ${o.used} gate-requested update-branch calls on this PR in the last 24h (cap ${BEHIND_UPDATE_CAP}) — refusing another; a human brings the branch current`
+        : o.reason;
+  console.log(`[wait] pr-automerge-gate ${repo}#${pr}: BEHIND base — ${reason}. No merge, no label this cycle.`);
+  const leg: GateReceiptLeg = o.kind === "capped" ? "behind-cap" : "behind";
+  if (lane === "squasher") console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg, reasons: [reason] }));
+  else logTrainGateLine(repo, pr, "refused", `behind: ${reason}`);
+  if (o.kind === "capped") await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg, reasons: [reason], additions: prJson.additions, deletions: prJson.deletions });
+  return reason;
+}
+
 // ───────────────────────────── main ─────────────────────────────
 
 /**
@@ -855,7 +893,8 @@ function globToRegex(glob: string): RegExp {
   return new RegExp(`^${p}$`);
 }
 
-async function evaluate(
+// Exported for tests only (importing must not fire main(): PR_AUTOMERGE_GATE_NO_MAIN, below).
+export async function evaluate(
   repo: string,
   pr: number,
   enabledClasses: PrDiffClass[],
@@ -945,12 +984,16 @@ async function evaluate(
   //    mergeStateStatus=CLEAN for an otherwise-mergeable DRAFT (ops-pipeline#202) — a
   //    mergeStateStatus-only check passes a draft, burns the paid review call, then
   //    fails at the SHA-pinned merge "still a draft". Pure predicate: evaluateMergeReadiness. ──
+  // Row 928: BEHIND does not refuse at this floor (allowBehind) — the lane pre-checks below run, and `behind` is acted on at
+  // exactly two points past them (the box override's merge; just before the paid review). Never a merge/label while true.
+  const behind = prJson.mergeStateStatus === "BEHIND";
   const readiness = evaluateMergeReadiness({
     state: prJson.state,
     isDraft: prJson.isDraft,
     ciClean,
     mergeStateStatus: prJson.mergeStateStatus,
     mergeTreeClean: isMergeTreeCheckClean(prJson.statusCheckRollup),
+    allowBehind: true,
   });
   if (!readiness.ready) {
     const detail = readiness.detail;
@@ -1142,6 +1185,14 @@ async function evaluate(
       `\`${REVIEWED_LABEL}\` receipt, \`${HOLD_LABEL}\` to park harder, or a new head.`;
     console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}`);
     console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "review", reasons: [detail] }));
+    return;
+  }
+
+  // ── Row 928: every lane pre-check has passed (class, enabled, cheap legs, named checks, no standing review FLAG on this
+  // head — a flagged head is PARKED, and the gate must not mint a "new head" that re-rolls the vote, stint #724). Only the
+  // paid review and the merge remain, and neither means anything on a head about to be replaced: bring it current instead.
+  if (behind) {
+    await handleBehind("squasher", repo, pr, prClass, prJson);
     return;
   }
 
@@ -1663,6 +1714,13 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
       return "abort-cycle";
     }
 
+    // Row 928: his word is authorized and revalidated (snapshot drift above already aborted any status change), but a BEHIND
+    // head cannot merge under strict protection — bring it current.
+    if (prJson.mergeStateStatus === "BEHIND") {
+      await handleBehind("squasher", repo, pr, "unclassified", prJson);
+      return "abort-cycle";
+    }
+
     // ── SHA-pinned merge (same TOCTOU contract as every other merge in this file) ──
     try {
       mergePr(repo, pr, prJson.headRefOid);
@@ -1977,10 +2035,16 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
     ciClean: isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo)),
     mergeStateStatus: prJson.mergeStateStatus,
     mergeTreeClean: isMergeTreeCheckClean(prJson.statusCheckRollup),
+    allowBehind: true, // row 928: BEHIND is handled just below, past the authority + floor legs
   });
   if (!readiness.ready) {
     const detail = `not merge-ready (${readiness.detail})`;
     logTrainGateLine(repo, pr, "refused", detail);
+    return { outcome: "refused", detail };
+  }
+  // Row 928: an AUTHORIZED box on an otherwise-ready PR whose branch is BEHIND (strict protection) — bring it current; no merge.
+  if (prJson.mergeStateStatus === "BEHIND") {
+    const detail = `behind: ${await handleBehind("train", repo, pr, "unclassified", prJson)}`;
     return { outcome: "refused", detail };
   }
 

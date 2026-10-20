@@ -55,6 +55,12 @@ export type GateReceiptVerdict = "qualified" | "missed" | "candidate";
  *                  authorizing, but the cycle aborted before/at the merge (revalidate
  *                  drift, or the sha-pinned merge call itself failed). Never retried
  *                  same-cycle; the next sweep re-evaluates.
+ * - `behind`       (row 928, strict branch protection) the PR passed its lane's
+ *                  pre-checks but its branch is BEHIND base: the gate requested
+ *                  update-branch (or was refused by GitHub / fail-closed) and merged
+ *                  nothing this cycle. A wait; the next sweep re-evaluates the new head.
+ * - `behind-cap`   `behind` hit its cap (3 gate-requested update-branch calls per PR per
+ *                  24h) — the base outruns CI; a human owns the update. A decision leg.
  * - `other`        UNFORESEEN ONLY. The gate threw. Investigate.
  */
 export type GateReceiptLeg =
@@ -75,6 +81,8 @@ export type GateReceiptLeg =
   // whose non-terminal state then deltas the gate's own revalidate. A decision leg,
   // not a wait: the loop cannot clear itself, so a human owns the outcome.
   | "flap-guard"
+  | "behind"
+  | "behind-cap"
   | "other";
 
 export interface GateReceiptInput {

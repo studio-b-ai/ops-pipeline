@@ -1297,6 +1297,11 @@ export interface MergeReadinessInput {
    *  merge-tree substitutes for the never-finishing GitHub mergeability computation.
    *  Omit/undefined → no fallback (current behavior). */
   mergeTreeClean?: boolean;
+  /** Row 928 (strict branch protection): true lets `BEHIND` satisfy the mergeability leg
+   *  so a BEHIND PR reaches its lane pre-checks and is brought current (behind-update.ts)
+   *  instead of refused at the cheap floor. Open/draft/CI still gate; the caller MUST NOT
+   *  merge while BEHIND. Omit/false → BEHIND refuses exactly as before (every other caller). */
+  allowBehind?: boolean;
 }
 
 /**
@@ -1321,7 +1326,8 @@ export function evaluateMergeReadiness(input: MergeReadinessInput): { ready: boo
   // CI check is green; mergeTreeClean only substitutes for the one UNKNOWN field.
   const mergeStatusClean =
     input.mergeStateStatus === "CLEAN" ||
-    (input.mergeStateStatus === "UNKNOWN" && input.mergeTreeClean === true);
+    (input.mergeStateStatus === "UNKNOWN" && input.mergeTreeClean === true) ||
+    (input.mergeStateStatus === "BEHIND" && input.allowBehind === true);
   const ready =
     input.state === "OPEN" && !input.isDraft && input.ciClean && mergeStatusClean;
   const detail = `state=${input.state} isDraft=${input.isDraft} ciClean=${input.ciClean} mergeStateStatus=${input.mergeStateStatus}`;

@@ -45,7 +45,9 @@ export const GATE_ORIGINATOR = "pr-automerge-gate";
 // re-enter the same loop — so a human decides the merge (or fixes the repo's
 // label-triggered CI). Enrolling it is what makes an otherwise-silent permanent stall
 // visible.
-const DECISION_LEGS: ReadonlySet<GateReceiptLeg> = new Set(["class-match", "line-cap", "named-checks", "review", "flap-guard"]);
+// `behind-cap` (row 928) is a DECISION for the same reason: past 3 update-branch requests per
+// 24h the base is outrunning CI and the gate stops — a human brings the branch current.
+const DECISION_LEGS: ReadonlySet<GateReceiptLeg> = new Set(["class-match", "line-cap", "named-checks", "review", "flap-guard", "behind-cap"]);
 
 /** True iff a refusal on this leg is a decision Kevin can make (vs a transient wait). */
 export function isDecisionLeg(leg: GateReceiptLeg): boolean {
@@ -111,7 +113,8 @@ export function buildEnrollment(r: GateRefusal): EnrollmentBody {
     // prose broader than its signal (#412).
     detail:
       `https://github.com/${r.repo}/pull/${r.pr} · ${r.leg}: ${reason} · +${r.additions}/−${r.deletions}` +
-      " · label `box` to merge; `hold` to park",
+      // #412: `box` does not open behind-cap (the cap binds every lane) — name the door that works.
+      (r.leg === "behind-cap" ? " · update the branch by hand (the gate has stopped); `hold` to park" : " · label `box` to merge; `hold` to park"),
     originator: GATE_ORIGINATOR,
   };
 }
