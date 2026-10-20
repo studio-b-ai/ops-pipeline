@@ -272,7 +272,7 @@ describe("pr-automerge-gate.ts parks a review-FLAGGED head instead of re-rolling
 
   it("the park check runs BEFORE the paid vote, and only when no human receipt holds", () => {
     const parkIdx = src.indexOf("reviewFlagCardOnHead(repo, pr, prJson.headRefOid)");
-    const voteIdx = src.indexOf("await independentReviewVote(diff, reviewSystemPromptFor(prClass))");
+    const voteIdx = src.indexOf("await independentReviewVote(diff, reviewSystemPromptFor(prClass, crewPr))");
     const receiptIdx = src.indexOf("const humanReceipt = humanReviewReceipt(repo, pr, labels);");
     expect(receiptIdx).toBeGreaterThan(-1);
     expect(parkIdx).toBeGreaterThan(receiptIdx); // a `reviewed` receipt still opens the door

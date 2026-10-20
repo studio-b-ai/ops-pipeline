@@ -28,6 +28,9 @@ import {
   TRIPWIRE_WATCHED_CLASSES,
 } from "../automerge-classify.js";
 import { parseArgs } from "../automerge-args.js";
+import { isDoorMachineryPath } from "../automerge-classify.js";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 interface D {
   path: string;
@@ -427,4 +430,76 @@ describe("parseUnifiedDiff — isNew (the migration leg's 'provably new' fact)",
     const parsed = parseUnifiedDiff(unified({ path: "c.ts", added: ["new file mode 100644"] }));
     expect(parsed[0].isNew).toBeUndefined();
   });
+});
+
+// ───── the registry (scripts/squasher-fleet.json) — who gets the class, and the two door lists never drift ─────
+
+describe("squasher-fleet.json — crew-change enablement and the door-machinery lock", () => {
+  const reg = JSON.parse(readFileSync(join(import.meta.dirname, "..", "..", "squasher-fleet.json"), "utf8")) as { repos: Record<string, string>[] };
+  const classesOf = (r: Record<string, string>) => r.enabled_classes.split(",").map((c) => c.trim());
+
+  it("crew-change is enabled in EXACTLY the repos that enable code-fix (Kevin's rule), and nowhere else", () => {
+    for (const r of reg.repos) {
+      const cs = classesOf(r);
+      expect(cs.includes("crew-change"), r.repo).toBe(cs.includes("code-fix"));
+    }
+  });
+
+  it.each(["studio-b-ai/acuops-pipeline", "studio-b-ai/acudev", "studio-b-ai/note-intelligence", "studio-b-ai/client-asthetik"])(
+    "%s stays docs-comment ONLY — Acumatica publishes restart Heritage's app pool and stay Kevin's",
+    (repo) => {
+      const r = reg.repos.find((x) => x.repo === repo)!;
+      expect(classesOf(r)).toEqual(["docs-comment"]);
+    },
+  );
+
+  it("every class named in the registry is a valid class (the sweep would otherwise throw at parse)", () => {
+    for (const r of reg.repos) for (const c of classesOf(r)) expect(ALL_PR_DIFF_CLASSES, `${r.repo}: ${c}`).toContain(c);
+  });
+
+  // The classifier's deny list and the registry's sensitive_path_patterns for ops-pipeline are two definitions of the
+  // same surface; code-fix's built-in denylist does not name the gate, so the registry is what keeps the OTHER classes off it.
+  const ops = reg.repos.find((x) => x.repo === "studio-b-ai/ops-pipeline")!;
+  const opsSensitive = ops.sensitive_path_patterns.split(",").map((p) => new RegExp(p.trim()));
+  const GATE_PATHS = [
+    "scripts/pr-automerge-gate.ts",
+    "scripts/post-merge-tripwire.ts",
+    "scripts/restart-train.ts",
+    "scripts/restart-train-args.ts",
+    "scripts/lib/restart-train-lib.ts",
+    "scripts/lib/__tests__/restart-train-lib.test.ts",
+    "scripts/lib/automerge-classify.ts",
+    "scripts/lib/automerge-review-prompt.ts",
+    "scripts/lib/automerge-skip-allowlist.ts",
+    "scripts/automerge-skip-allowlist.yaml",
+    "scripts/lib/__tests__/automerge-classify.test.ts",
+    "scripts/lib/label-authority.ts",
+    "scripts/lib/merge-door.ts",
+    "scripts/lib/gate-enroll.ts",
+    "scripts/lib/gate-flag-card.ts",
+    "scripts/lib/hold-rail.ts",
+    "scripts/lib/box-patch-id.ts",
+    "scripts/box-patch-id-controls/control-1-refresh-kept.zsh",
+    "scripts/lib/fleet-sweep-changed.ts",
+    "scripts/lib/fleet-sweep-order.ts",
+    "scripts/lib/timetable-gate.ts",
+    "scripts/lib/tripwire-health.ts",
+    "scripts/lib/squasher-fleet-not-the-door.ts",
+    "scripts/door-watch-coherence-check.ts",
+    "scripts/lib/door-watch-coherence.ts",
+    "scripts/squasher-fleet.json",
+  ];
+
+  it.each(GATE_PATHS)("%s: the classifier names it door machinery AND ops-pipeline's registry makes it sensitive", (p) => {
+    expect(isDoorMachineryPath(p), `classifier: ${p}`).toBe(true);
+    expect(opsSensitive.some((re) => re.test(p)), `registry: ${p}`).toBe(true);
+  });
+
+  it.each(["scripts/lib/new-worker.ts", "scripts/lib/__tests__/new-worker.test.ts", "scripts/credential-expiry-monitor.ts", "src/lib/gate-keeper.ts", "docs/plans/2026-10-20-note.md"])(
+    "known-GOOD control: %s is NOT door machinery (neither list over-matches)",
+    (p) => {
+      expect(isDoorMachineryPath(p)).toBe(false);
+      expect(opsSensitive.some((re) => re.test(p))).toBe(false);
+    },
+  );
 });

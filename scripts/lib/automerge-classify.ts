@@ -880,18 +880,17 @@ const CREW_PATH_DENY: { label: string; test: (path: string) => boolean }[] = [
   { label: "Customization/**", test: (p) => /^Customization\//.test(p) },
 ];
 
-/** The door's own machinery. Matches the path whether or not it sits under `scripts/` (a fork of the
- *  registry elsewhere is still the door), and includes the door's tests — weakening the test is
- *  weakening the gate. */
-function isDoorMachineryPath(path: string): boolean {
+/** The door's own machinery. Anchored on `scripts/` for the generic stems (a `src/lib/gate-keeper.ts` in some other
+ *  repo is not the door) and on specific basenames elsewhere. Includes the door's tests — weakening the test is
+ *  weakening the gate. The registry's ops-pipeline `sensitive_path_patterns` carries the same set, so the OTHER
+ *  classes (code-fix, whose built-in denylist does not name the gate) cannot merge it either; a test locks the two. */
+export function isDoorMachineryPath(path: string): boolean {
   if (/(^|\/)squasher-fleet\.json$/.test(path)) return true;
   if (/(^|\/)automerge-skip-allowlist\.yaml$/.test(path)) return true;
-  if (/(^|\/)pr-automerge-gate\.ts$/.test(path)) return true;
-  if (/(^|\/)post-merge-tripwire\.ts$/.test(path)) return true;
-  if (/(^|\/)restart-train[^/]*$/.test(path)) return true;
-  if (/(^|\/)box-patch-id[^/]*$/.test(path)) return true;
-  if (/(^|\/)door-watch-coherence[^/]*$/.test(path)) return true;
-  if (/(^|\/)lib\/(__tests__\/)?(automerge-|label-authority|merge-door|gate-|hold-rail|box-patch-id|fleet-sweep-|timetable-gate|squasher-fleet-not-the-door|restart-train|tripwire-|door-watch-coherence)/.test(path)) return true;
+  if (/(^|\/)(pr-automerge-gate|post-merge-tripwire)\.ts$/.test(path)) return true;
+  if (/(^|\/)label-authority\.ts$/.test(path)) return true;
+  if (/(^|\/)(restart-train|box-patch-id|door-watch-coherence)[^/]*(\/|$)/.test(path)) return true;
+  if (/(^|\/)scripts\/lib\/(__tests__\/)?(automerge-|label-authority|merge-door|gate-|hold-rail|fleet-sweep-|timetable-gate|squasher-fleet-not-the-door|tripwire-)/.test(path)) return true;
   return false;
 }
 

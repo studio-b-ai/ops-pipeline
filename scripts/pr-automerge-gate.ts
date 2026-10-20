@@ -105,7 +105,9 @@ import {
   classifyPrDiffClass,
   codeFixRevalidateDeltas,
   evaluateMergeReadiness,
+  fileContentsFromParsed,
   gateDecisionForClass,
+  isCrewPr,
   isMergeTreeCheckClean,
   isRollupClean,
   parseUnifiedDiff,
@@ -121,7 +123,16 @@ import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 import { enrollGateRefusal, resolveGateRefusals } from "./lib/gate-enroll.js";
-import { buildFlagCard, flagCardMarkersFor, isCardLeg, type CardLeg } from "./lib/gate-flag-card.js";
+import {
+  buildFlagCard,
+  classifyNeedsHumanProvenance,
+  flagCardMarkersFor,
+  GATE_CARD_COMMENT_PREFIX,
+  isCardLeg,
+  NEEDS_HUMAN_LABEL,
+  type CardLeg,
+} from "./lib/gate-flag-card.js";
+import { POLICY_VERSION } from "./lib/fleet-sweep-changed.js";
 import { mergeDoorFrom, formatTrainMergeReceipt, type MergeDoor } from "./lib/merge-door.js";
 import {
   resolveAuthorityLogins,
@@ -615,6 +626,48 @@ function addLabel(repo: string, pr: number, label: string): void {
 }
 
 /**
+ * Door policy (row 928, Kevin 10/20): is the PR's CURRENT `needs-human` the gate's OWN card? The label means
+ * "a human was asked"; but the gate writes it itself (postFlagCard) on every decision-leg refusal, and under a new
+ * policy a PR whose card the gate wrote may now qualify — that card is stale, the gate's to retire. A needs-human
+ * a HUMAN or the CREW added is a human's ask and is NEVER touched. Provenance = (the last needs-human label event
+ * on the timeline is the gate App's) AND (a gate card comment stands) — see classifyNeedsHumanProvenance.
+ * NEVER THROWS: any read failure resolves to "not the gate's" (fail-closed — the label stays, the PR stays parked).
+ */
+function gateOwnNeedsHuman(repo: string, pr: number, currentLabels: string[]): boolean {
+  try {
+    const { timeline, truncated } = fetchAuthorityTimeline(repo, pr);
+    const cards = gh([
+      "pr", "view", String(pr), "--repo", repo, "--json", "comments", "--jq",
+      `[.comments[].body | select(startswith("${GATE_CARD_COMMENT_PREFIX}"))] | length`,
+    ]).trim();
+    const verdict = classifyNeedsHumanProvenance({ currentLabels, timeline, truncated, hasGateCard: cards !== "0" });
+    console.log(
+      `[info] pr-automerge-gate ${repo}#${pr}: needs-human provenance — ` +
+        (verdict.gateOwn ? `the GATE'S OWN card (${verdict.detail})` : `NOT the gate's, left untouched (${verdict.reason})`),
+    );
+    return verdict.gateOwn;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.log(`[warn] pr-automerge-gate ${repo}#${pr}: could not establish who added needs-human (${message.split("\n")[0]}) — treated as a human's ask (fail-closed).`);
+    return false;
+  }
+}
+
+/** Retires the gate's own, now-stale `needs-human` card — called ONLY at the point of commitment (after the merge, or after
+ *  the train labels landed), never before: a card must not vanish from Kevin's glass while the PR is still stuck. Best-effort. */
+function stripGateOwnNeedsHuman(repo: string, pr: number): "removed" | string {
+  try {
+    gh(["pr", "edit", String(pr), "--repo", repo, "--remove-label", NEEDS_HUMAN_LABEL]);
+    console.log(`[info] pr-automerge-gate ${repo}#${pr}: removed the gate's own stale '${NEEDS_HUMAN_LABEL}' card (policy ${POLICY_VERSION}).`);
+    return "removed";
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.log(`[warn] pr-automerge-gate ${repo}#${pr}: could not remove the stale '${NEEDS_HUMAN_LABEL}' (${message.split("\n")[0]}) — harmless, a human can clear it.`);
+    return `failed: ${message.split("\n")[0]}`;
+  }
+}
+
+/**
  * The blue card (ops#313). Posts a per-leg card + `needs-human` for a DECISION-leg
  * refusal, idempotent per (leg, head sha). Copy lives in lib/gate-flag-card.ts.
  *
@@ -855,7 +908,7 @@ function globToRegex(glob: string): RegExp {
   return new RegExp(`^${p}$`);
 }
 
-async function evaluate(
+export async function evaluate(
   repo: string,
   pr: number,
   enabledClasses: PrDiffClass[],
@@ -1019,7 +1072,19 @@ async function evaluate(
   // `labels` is passed for the fleet-internal candidate ONLY (stint #689): it joins
   // the candidate set solely when the PR carries the runner's `fleet-internal` label;
   // every other candidate ignores labels, so prior resolutions stay byte-identical.
-  const classification = classifyPrDiffClass({ files, totalChangedLines, additions: codeFixLines, sensitivePathPatterns, safePathGlobs, labels });
+  // Door policy (row 928): `author` + `crewChangeEnabled` + `fileContents` feed the crew-change candidate ONLY; it joins
+  // solely for an opted-in caller AND a crew PR (owner identity + `fleet-internal`), so every other PR is byte-identical.
+  const classification = classifyPrDiffClass({
+    files,
+    totalChangedLines,
+    additions: codeFixLines,
+    sensitivePathPatterns,
+    safePathGlobs,
+    labels,
+    author,
+    crewChangeEnabled: enabledClasses.includes("crew-change"),
+    fileContents: fileContentsFromParsed(parsed),
+  });
   if (classification.prClass === null) {
     const leg: GateReceiptLeg = classification.failureLeg ?? "other";
     console.log(`[wait] pr-automerge-gate ${repo}#${pr}: no diff class resolved (${leg}) — ` + classification.reasons.join("; "));
@@ -1050,7 +1115,7 @@ async function evaluate(
   // on, the squasher's work here is DONE — the human queued authority owns the
   // merge decision. Short-circuit BEFORE the remaining legs (and before the paid
   // review) so scheduled re-runs don't re-spend on a PR whose outcome can't change.
-  if (prClass === "code-fix" && repoClassFor(repo) === "train" && labels.includes(TRAIN_CANDIDATE_LABEL)) {
+  if ((prClass === "code-fix" || prClass === "crew-change") && repoClassFor(repo) === "train" && labels.includes(TRAIN_CANDIDATE_LABEL)) {
     console.log(
       `[no-op] pr-automerge-gate ${repo}#${pr}: already labeled '${TRAIN_CANDIDATE_LABEL}' — the \`${QUEUED_LABEL}\` ` +
         `authority owns the merge decision now; nothing to re-evaluate (no review spend).`,
@@ -1059,11 +1124,21 @@ async function evaluate(
     return;
   }
 
+  // ── Door policy (row 928): the gate's OWN stale needs-human card must not park a crew PR that now qualifies. ──
+  // Provenance is read ONLY for a crew PR (owner identity + fleet-internal) in a class that can merge unattended, and ONLY
+  // when the label is present — a human's/crew's needs-human is never touched, and a bugsquasher PR is not this lane.
+  // `gateLabels` is what the class label legs see (own card excluded); the real label is retired at the point of
+  // commitment (after the merge / after the train labels landed), so a PR that is still stuck keeps its card.
+  const crewPr = isCrewPr(author, labels);
+  const crewLane = crewPr && (prClass === "crew-change" || prClass === "fleet-internal" || prClass === "code-fix");
+  const ownNeedsHuman = crewLane && labels.includes(NEEDS_HUMAN_LABEL) && gateOwnNeedsHuman(repo, pr, labels);
+  const gateLabels = ownNeedsHuman ? labels.filter((l) => l !== NEEDS_HUMAN_LABEL) : labels;
+
   // ── Cheap universal legs (author/label) — BEFORE any API spend ──
   const cheapCheck = gateDecisionForClass({
     prClass,
     author,
-    labels,
+    labels: gateLabels,
     ciClean,
     reviewVerdict: "CLEAN", // best-case placeholder — the ONLY leg not yet evaluated
   });
@@ -1089,7 +1164,7 @@ async function evaluate(
   // strictly SUCCESS on the head commit — SKIPPED is not green here even when the
   // skip allowlist sanctions it elsewhere, NEUTRAL is not SUCCESS, and an EMPTY
   // required_checks list fails closed (the class can never merge without one).
-  if (prClass === "code-fix" || prClass === "fleet-internal") {
+  if (prClass === "code-fix" || prClass === "fleet-internal" || prClass === "crew-change") {
     const effectiveChecks = filterRequiredChecksByPathDeps(
       requiredChecks,
       requiredChecksPathDeps,
@@ -1147,12 +1222,12 @@ async function evaluate(
 
   const review = humanReceipt
     ? { verdict: "CLEAN" as ReviewVerdict, detail: humanReceipt }
-    : await independentReviewVote(diff, reviewSystemPromptFor(prClass));
+    : await independentReviewVote(diff, reviewSystemPromptFor(prClass, crewPr));
 
   const finalCheck = gateDecisionForClass({
     prClass,
     author,
-    labels,
+    labels: gateLabels,
     ciClean,
     reviewVerdict: review.verdict,
   });
@@ -1180,7 +1255,7 @@ async function evaluate(
   // `queued` authority (rung A1). A code-fix that passed EVERY leg (review
   // included) becomes a train CANDIDATE: label + comment, then done. Verdict
   // "candidate" is a healthy terminal outcome, not a miss.
-  if (prClass === "code-fix" && repoClassFor(repo) === "train") {
+  if ((prClass === "code-fix" || prClass === "crew-change") && repoClassFor(repo) === "train") {
     // 2026-09-06 (Kevin, "go"): for a `bugsquasher` PR the gate applies `queued` itself,
     // right after `candidate`, so the restart train merges it on its next tick without
     // a human hand. The train's label authority accepts the gate's `queued` ONLY when
@@ -1213,11 +1288,13 @@ async function evaluate(
       );
       return;
     }
+    // Door policy (row 928): the PR is now genuinely in motion (candidate + box written) — retire the gate's own stale card.
+    const stripNote = ownNeedsHuman ? stripGateOwnNeedsHuman(repo, pr) : null;
     commentOnPr(
       repo,
       pr,
       [
-        `**squasher auto-merge gate — TRAIN CANDIDATE** (class: \`code-fix\`; ops#190 B1)`,
+        `**squasher auto-merge gate — TRAIN CANDIDATE** (class: \`${prClass}\`; ops#190 B1)`,
         "",
         `Every gate leg passed (shape, line cap, safe_path_globs, built-in denylist, named checks, independent ` +
           `review CLEAN) — but this repo is TRAIN-class, where the squasher never merges. Applied ` +
@@ -1225,6 +1302,8 @@ async function evaluate(
           (gateQueues
             ? ` and \`${QUEUED_LABEL}\` (Kevin 2026-09-06: a \`bugsquasher\` PR that passes every leg rides the next train tick; \`hold\` still parks it).`
             : `; a merge-authorized human decides \`${QUEUED_LABEL}\` (Rule #279).`),
+        "",
+        ...(stripNote !== null ? ["", `The gate's own stale \`${NEEDS_HUMAN_LABEL}\` card was retired (${stripNote}); policy \`${POLICY_VERSION}\`.`] : []),
         "",
         `Evaluated sha: \`${prJson.headRefOid}\`.`,
       ].join("\n"),
@@ -1269,7 +1348,7 @@ async function evaluate(
     mustCleanCodeFixLabel = false;
   };
 
-  if (prClass === "code-fix") {
+  if (prClass === "code-fix" || prClass === "crew-change") {
     // ── Flap circuit-breaker (bolt-wms#2120, 2026-09-06). The label write below is
     // not inert: on a repo whose CI listens on `pull_request: [labeled, unlabeled]`
     // it wakes a fresh check-run, whose non-terminal state `isRollupClean` correctly
@@ -1405,6 +1484,9 @@ async function evaluate(
     return;
   }
 
+  // Door policy (row 928): the merge landed — retire the gate's own stale needs-human card (best-effort, harmless if it fails).
+  const stripNote = ownNeedsHuman ? stripGateOwnNeedsHuman(repo, pr) : null;
+
   const receipt = [
     `**squasher auto-merge gate — MERGED** (class: \`${prClass}\`; gate v2, Kevin-approved 2026-08-02)`,
     "",
@@ -1414,10 +1496,10 @@ async function evaluate(
     `| author === kbibelhausen | ✅ (${author}) |`,
     `| label \`bugsquasher\` present | ✅ (${labels.join(", ")}) |`,
     `| totalChangedLines | ✅ (${totalChangedLines}) |`,
-    ...(prClass === "code-fix"
+    ...(prClass === "code-fix" || prClass === "crew-change"
       ? [
-          `| safe_path_globs (allowlist-primary) | ✅ every file matched (${safePathGlobs.length} glob(s)) |`,
-          `| built-in denylist backstop | ✅ no hits |`,
+          `| safe_path_globs (allowlist-primary) | ✅ ${safePathGlobs.length > 0 ? `every file matched (${safePathGlobs.length} glob(s))` : "none declared — outside sensitive paths + the deny list"} |`,
+          `| built-in denylist backstop${prClass === "crew-change" ? " (crew-change deny list)" : ""} | ✅ no hits |`,
           `| named checks strictly SUCCESS | ✅ (${requiredChecks.join(", ")}) |`,
           `| B2 tripwire label \`${CODE_FIX_MERGE_LABEL}\` | ✅ applied pre-merge |`,
         ]
@@ -1429,8 +1511,14 @@ async function evaluate(
           `| named checks strictly SUCCESS | ✅ (${requiredChecks.join(", ")}) |`,
         ]
       : []),
+    ...(prClass === "crew-change"
+      ? [`| class legs (row 928) | ✅ crew PR (owner identity + \`fleet-internal\`), no human-added \`needs-human\`, no \`hold\` |`]
+      : []),
+    ...(stripNote !== null
+      ? [`| gate's own stale \`${NEEDS_HUMAN_LABEL}\` card | ${stripNote === "removed" ? "✅ retired after the merge" : `⚠️ not removed (${stripNote}) — harmless`} |`]
+      : []),
     `| CI clean | ✅ |`,
-    `| independent review (Claude Sonnet 5) | ✅ CLEAN |`,
+    `| independent review (Claude Sonnet 5${crewPr && (prClass === "crew-change" || prClass === "code-fix" || prClass === "fleet-internal") ? "; crew rubric CORRECT/SAFE/SCOPED/PROVEN" : ""}) | ✅ CLEAN |`,
     "",
     `Evaluated sha: \`${prJson.headRefOid}\` (merge was SHA-pinned via \`--match-head-commit\`).`,
   ].join("\n");
