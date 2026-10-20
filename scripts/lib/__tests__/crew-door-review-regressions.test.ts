@@ -22,7 +22,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { flagCardMarkersFor } from "../gate-flag-card.js";
 import { authorizeAcrossGateRebase, type GateRebaseContext } from "../crew-merge-guards.js";
-import { evaluateLabelAuthority, QUEUED_LABEL_PAIR, type AuthorityInput, type AuthorityTimelineItem } from "../label-authority.js";
+import { evaluateLabelAuthority, fetchAuthorityTimeline, QUEUED_LABEL_PAIR, type AuthorityInput, type AuthorityTimelineItem } from "../label-authority.js";
 import { FLEET_APP_SLUG, FRESH, STALE_BY_AGE, World } from "./fixtures/fake-gh.js";
 
 process.env.PR_AUTOMERGE_GATE_NO_MAIN = "1";
@@ -449,5 +449,44 @@ describe("authorizeAcrossGateRebase — each condition of the proof is load-bear
   it("a bot-applied box is still refused by the roster rules after the upgrade path (the proof opens staleness only)", () => {
     const botBox: AuthorityTimelineItem = { ...box, actorLogin: "somebody-else" };
     expect(authorizeAcrossGateRebase(input([boxed, botBox, gateMerge]), ctx())).toMatchObject({ authorized: false, reason: "unauthorized-actor" });
+  });
+});
+
+// ───────── the timeline fetch reads each commit's shape (the proof's input), through the REAL fetchAuthorityTimeline ─────────
+
+describe("fetchAuthorityTimeline — commit oid, parents and who signed", () => {
+  const page = (nodes: unknown[]) =>
+    JSON.stringify({ data: { repository: { pullRequest: { timelineItems: { filteredCount: nodes.length, pageInfo: { hasPreviousPage: false, startCursor: null }, nodes } } } } });
+  const commitNode = (oid: string, parents: string[], signature: unknown) => ({ __typename: "PullRequestCommit", commit: { oid, parents: { nodes: parents.map((p) => ({ oid: p })) }, signature } });
+  const read = (nodes: unknown[]) => fetchAuthorityTimeline("studio-b-ai/radio", PR, () => page(nodes)).timeline;
+
+  it("maps oid and the two parents", () => {
+    const [c] = read([commitNode("aaa", ["p1", "p2"], null)]);
+    expect(c.oid).toBe("aaa");
+    expect(c.parents).toEqual(["p1", "p2"]);
+  });
+  it("GitHub's own signature (web-flow) and the fleet App's own signature are gate/GitHub-made", () => {
+    const [webFlow, appSigned] = read([
+      commitNode("a", ["p"], { isValid: true, wasSignedByGitHub: true, signer: { login: "web-flow" } }),
+      commitNode("b", ["p"], { isValid: true, wasSignedByGitHub: false, signer: { login: "studiob-fleet-bot" } }),
+    ]);
+    expect(webFlow.signedByGitHub).toBe(true);
+    expect(appSigned.signedByGitHub).toBe(true);
+  });
+  it("NOT gate/GitHub-made: unsigned, an invalid signature, or a valid signature by someone else's key", () => {
+    const [unsigned, invalid, theirKey] = read([
+      commitNode("a", ["p"], null),
+      commitNode("b", ["p"], { isValid: false, wasSignedByGitHub: true, signer: { login: "web-flow" } }),
+      commitNode("c", ["p"], { isValid: true, wasSignedByGitHub: false, signer: { login: "kbibelhausen" } }),
+    ]);
+    expect(unsigned.signedByGitHub).not.toBe(true);
+    expect(invalid.signedByGitHub).toBe(false);
+    expect(theirKey.signedByGitHub).toBe(false);
+  });
+  it("a commit node carrying no commit data (an older fixture) leaves every field undefined — 'cannot prove', never a default", () => {
+    const [c] = read([{ __typename: "PullRequestCommit" }]);
+    expect(c.oid).toBeUndefined();
+    expect(c.parents).toBeUndefined();
+    expect(c.signedByGitHub).toBeUndefined();
   });
 });

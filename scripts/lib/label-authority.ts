@@ -792,7 +792,7 @@ query($owner: String!, $repo: String!, $number: Int!, $before: String) {
           __typename
           ... on LabeledEvent { label { name } actor { __typename login } createdAt }
           ... on UnlabeledEvent { label { name } actor { __typename login } }
-          ... on PullRequestCommit { commit { oid parents(first: 2) { nodes { oid } } signature { isValid wasSignedByGitHub } } }
+          ... on PullRequestCommit { commit { oid parents(first: 2) { nodes { oid } } signature { isValid wasSignedByGitHub signer { login } } } }
         }
       }
     }
@@ -818,7 +818,7 @@ interface GraphQLTimelineNode {
   commit?: {
     oid?: string | null;
     parents?: { nodes?: Array<{ oid?: string | null } | null> | null } | null;
-    signature?: { isValid?: boolean | null; wasSignedByGitHub?: boolean | null } | null;
+    signature?: { isValid?: boolean | null; wasSignedByGitHub?: boolean | null; signer?: { login?: string | null } | null } | null;
   } | null;
 }
 
@@ -872,6 +872,9 @@ export function normalizeActorLogin(actor: { __typename?: string | null; login?:
  * (an older fixture, a node GitHub returned without `commit`). Each field is set ONLY when it
  * was positively read, so an absent value stays `undefined` — "can't prove", never a default.
  */
+/** The fleet App's own signer identity, with and without the `[bot]` suffix GraphQL does not always carry. */
+const GATE_SIGNER_LOGINS: readonly string[] = [GATE_AUTHORITY_LOGIN, GATE_AUTHORITY_LOGIN.replace(/\[bot\]$/, "")];
+
 function commitFields(node: GraphQLTimelineNode): Pick<AuthorityTimelineItem, "oid" | "parents" | "signedByGitHub"> {
   const commit = node.commit;
   if (!commit) return {};
@@ -883,7 +886,11 @@ function commitFields(node: GraphQLTimelineNode): Pick<AuthorityTimelineItem, "o
     if (oids.length === parentNodes.length) out.parents = oids;
   }
   const sig = commit.signature;
-  if (sig) out.signedByGitHub = sig.isValid === true && sig.wasSignedByGitHub === true;
+  // GitHub-made = a VALID signature that GitHub's own key made (`web-flow`, what signs a merge GitHub creates
+  // on request) OR that the fleet App's own signing identity made (an App-initiated commit). A crew cannot
+  // produce either: they hold neither GitHub's key nor the App's. Anything else — unsigned, invalid, or signed
+  // by some other identity — is "not provably made by the gate or GitHub".
+  if (sig) out.signedByGitHub = sig.isValid === true && (sig.wasSignedByGitHub === true || GATE_SIGNER_LOGINS.includes(sig.signer?.login ?? ""));
   return out;
 }
 
