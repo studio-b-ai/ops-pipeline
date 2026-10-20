@@ -131,7 +131,7 @@ import {
 } from "./lib/automerge-classify.js";
 import { loadSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
 import { parseArgs } from "./lib/automerge-args.js";
-import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
+import { crewReviewInput, reviewSystemPromptFor, usesCrewRubric } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 import { enrollGateRefusal, resolveGateRefusals } from "./lib/gate-enroll.js";
 import {
@@ -264,13 +264,16 @@ interface PrJson {
    *  guess `repo` (Rule #4). */
   headRepositoryOwner: PrHeadRepoOwner | null;
   headRepository: PrHeadRepo | null;
+  /** The author's claim about the change — fed to the voters on the crew rubric ONLY (never for any other class). */
+  title?: string;
+  body?: string;
 }
 
 function fetchPr(repo: string, pr: number): PrJson {
   const out = gh([
     "pr", "view", String(pr), "--repo", repo,
     "--json",
-    "author,createdAt,labels,state,isDraft,mergeStateStatus,additions,deletions,headRefOid,baseRefName,statusCheckRollup,files,changedFiles,headRepositoryOwner,headRepository",
+    "author,createdAt,labels,state,isDraft,mergeStateStatus,additions,deletions,headRefOid,baseRefName,statusCheckRollup,files,changedFiles,headRepositoryOwner,headRepository,title,body",
   ]);
   return JSON.parse(out) as PrJson;
 }
@@ -1209,6 +1212,9 @@ export async function evaluate(
   // FLAG carried no reason at all). Same sha-pinned, roster-human, hold-wins predicate
   // as `queued`; a bot's `reviewed`, or one older than the head, does not count.
   const humanReceipt = humanReviewReceipt(repo, pr, labels);
+  // Door policy (row 928): a crew-rubric vote sees the author's title + description (SCOPED / CORRECT are judged against
+  // the stated intent) before the diff; every other PR's review input is the raw diff, byte-identical to before.
+  const reviewInput = usesCrewRubric(prClass, crewPr) ? crewReviewInput(prJson.title, prJson.body, diff) : diff;
 
   // ── Sticky flag (stint #724, the 2026-09-18 FIRE — 4 in 48h): a review FLAG on THIS
   // head is a PARK, not a re-roll ticket. The 2-of-3 model vote is non-deterministic —
@@ -1233,7 +1239,7 @@ export async function evaluate(
 
   const review = humanReceipt
     ? { verdict: "CLEAN" as ReviewVerdict, detail: humanReceipt }
-    : await independentReviewVote(diff, reviewSystemPromptFor(prClass, crewPr));
+    : await independentReviewVote(reviewInput, reviewSystemPromptFor(prClass, crewPr));
 
   const finalCheck = gateDecisionForClass({
     prClass,

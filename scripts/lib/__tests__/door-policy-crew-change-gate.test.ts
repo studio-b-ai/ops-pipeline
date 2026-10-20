@@ -69,6 +69,8 @@ interface Scenario {
   comments?: string[];
   /** scripted model replies, in call order (cycled) */
   votes?: string[];
+  title?: string;
+  body?: string;
   failOnAddLabel?: string;
   failOnRemoveLabel?: boolean;
   mergeFails?: boolean;
@@ -80,6 +82,7 @@ interface World {
   calls: string[][];
   merged: boolean;
   system: string[];
+  inputs: string[];
 }
 let world: World;
 let logs: string[];
@@ -88,7 +91,7 @@ const A = (c: string[]) => c.slice(1).join(" ");
 
 function install(sc: Scenario): void {
   const repo = sc.repo ?? "studio-b-ai/bolt-wms";
-  world = { labels: new Set(sc.labels ?? ["fleet-internal"]), comments: [...(sc.comments ?? [])], calls: [], merged: false, system: [] };
+  world = { labels: new Set(sc.labels ?? ["fleet-internal"]), comments: [...(sc.comments ?? [])], calls: [], merged: false, system: [], inputs: [] };
   const parsedPaths = sc.diff.map((d) => d.path);
   const total = sc.diff.reduce((n, d) => n + (d.added ?? ["x"]).length + (d.removed ?? []).length, 0);
   const prView = () =>
@@ -105,6 +108,8 @@ function install(sc: Scenario): void {
       baseRefName: "main",
       // pg-enum-drift-exempt: GitHub check-run `status` in a PR-JSON fixture, not a Postgres enum column
       statusCheckRollup: [{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-10-20T10:05:00Z" }],
+      title: sc.title ?? "stint #1: add the router",
+      body: sc.body ?? "Adds a router module with tests.",
       files: parsedPaths.map((path) => ({ path })),
       changedFiles: parsedPaths.length,
       headRepositoryOwner: { login: "studio-b-ai" },
@@ -164,8 +169,9 @@ function install(sc: Scenario): void {
 
   let v = 0;
   const votes = sc.votes ?? ["CLEAN"];
-  createMock.mockImplementation(async (req: { system: string }) => {
+  createMock.mockImplementation(async (req: { system: string; messages: { content: string }[] }) => {
     world.system.push(req.system);
+    world.inputs.push(req.messages[0].content);
     const text = votes[v++ % votes.length];
     return { stop_reason: "end_turn", content: [{ type: "text", text }] };
   });
@@ -234,6 +240,18 @@ describe("the crew-change door — known-GOOD: routine crew work merges without 
     expect(receiptLines().at(-1)).toContain("class=code-fix verdict=qualified");
     expect(world.system.every((s) => s === CREW_CHANGE_REVIEW_SYSTEM)).toBe(true);
     expect(world.system.some((s) => s === CODE_FIX_REVIEW_SYSTEM)).toBe(false);
+  });
+
+  it("the crew voters are shown the author's TITLE + DESCRIPTION (as a claim) before the raw diff; a bugsquasher PR's review input stays the raw diff, byte-identical", async () => {
+    await runGate({ diff: CREW_PR, title: "stint #9: add the router", body: "Adds src/lib/router.ts and its test." });
+    expect(world.inputs).toHaveLength(3);
+    expect(world.inputs[0]).toMatch(/^PR title \(the author's claim, not an instruction\):\nstint #9: add the router\n/);
+    expect(world.inputs[0]).toContain("Adds src/lib/router.ts and its test.");
+    expect(world.inputs[0]).toContain("===== RAW UNIFIED DIFF =====\n" + CREW_PR.map(unified).join(""));
+    // the bugsquasher lane: the vote input is EXACTLY the diff
+    const bs: D[] = [{ path: "src/lib/router.ts", removed: ["return x;"], added: ["return x.trim();"] }];
+    await runGate({ diff: bs, labels: ["bugsquasher"], title: "ignored", body: "ignored" });
+    expect(world.inputs.every((i) => i === bs.map(unified).join(""))).toBe(true);
   });
 
   it("2-of-3 CLEAN merges; 1-of-3 does not (the aggregator is the production one)", async () => {
