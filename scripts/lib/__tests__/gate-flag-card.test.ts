@@ -10,6 +10,9 @@ import {
   legacyCardMarkerFor,
 } from "../gate-flag-card.js";
 import { classifyPrDiffClass } from "../automerge-classify.js";
+import { GATE_ACTOR_LOGIN, classifyNeedsHumanProvenance, type NeedsHumanTimelineEvent } from "../gate-flag-card.js";
+import { GATE_AUTHORITY_LOGIN } from "../label-authority.js";
+import { POLICY_VERSION } from "../fleet-sweep-changed.js";
 
 const SCRIPTS_DIR = join(import.meta.dirname, "..", "..");
 
@@ -98,16 +101,26 @@ describe("idempotency markers are per (leg, head)", () => {
     expect(cardMarkerFor("review", "f".repeat(40))).not.toEqual(cardMarkerFor("review", "0".repeat(40)));
   });
 
-  it("the review leg ALSO carries the legacy marker, so pre-#313 cards are not duplicated", () => {
+  it("the review marker is stamped with the POLICY_VERSION (row 928: a FLAG is sticky per head AND per policy)", () => {
     const head = "836fa56a1822d3339841fb9b5c5fd104272eca83";
     const card = buildFlagCard({ leg: "review", headSha: head, reasons: ["x"] });
-    expect(card.legacyMarker).toEqual(legacyCardMarkerFor(head));
-    // The real card on cp#302's earlier head used exactly this shape.
-    expect(card.legacyMarker).toEqual(`<!-- gate-flag ${head} -->`);
+    expect(card.marker).toEqual(`<!-- gate-flag review ${head} policy:${POLICY_VERSION} -->`);
+    expect(card.legacyMarker).toBeUndefined(); // pre-policy forms deliberately no longer match
+    // The old per-leg form is what cp#302's earlier head carried; it must differ from today's marker.
+    expect(card.marker).not.toEqual(`<!-- gate-flag review ${head} -->`);
   });
 
-  it("non-review legs have NO legacy marker (they never posted a card before #313)", () => {
-    expect(buildFlagCard({ leg: "class-match", headSha: "1".repeat(40), reasons: ["x"] }).legacyMarker).toBeUndefined();
+  it("only the REVIEW leg is policy-stamped; the other legs keep their per-(leg, head) markers byte-for-byte", () => {
+    const head = "1".repeat(40);
+    for (const leg of ["class-match", "line-cap", "named-checks"] as const) {
+      expect(cardMarkerFor(leg, head)).toEqual(`<!-- gate-flag ${leg} ${head} -->`);
+      expect(buildFlagCard({ leg, headSha: head, reasons: ["x"] }).legacyMarker).toBeUndefined();
+    }
+  });
+
+  it("a different policy writes a different review marker (one card per head per policy)", () => {
+    const head = "2".repeat(40);
+    expect(cardMarkerFor("review", head, "OLD-POLICY")).not.toEqual(cardMarkerFor("review", head));
   });
 
   it("a marker is an HTML comment — invisible in the rendered PR thread", () => {
@@ -118,8 +131,25 @@ describe("idempotency markers are per (leg, head)", () => {
 describe("flagCardMarkersFor — one marker vocabulary for poster AND probe (stint #724)", () => {
   const head = "6c54b4419eb93ce7980261200b40703ddc34d224"; // cp#471's flagged-and-merged head
 
-  it("review leg: the probe sees BOTH the per-leg marker and the pre-#313 legacy form", () => {
-    expect(flagCardMarkersFor("review", head)).toEqual([cardMarkerFor("review", head), legacyCardMarkerFor(head)]);
+  it("review leg: the probe sees exactly the CURRENT-policy marker", () => {
+    expect(flagCardMarkersFor("review", head)).toEqual([cardMarkerFor("review", head)]);
+  });
+
+  // The door-policy re-vote (row 928): a card written under a superseded rubric must not park the head.
+  describe("a FLAG written under an OLDER policy does not park the head; one written under THIS policy does", () => {
+    const parks = (commentBody: string) => flagCardMarkersFor("review", head).some((m) => commentBody.includes(m));
+    it("known-BAD control: a card posted by THIS policy parks (sticky holds within one policy — stint #724 intact)", () => {
+      expect(parks(buildFlagCard({ leg: "review", headSha: head, reasons: ["votes: FLAG,FLAG,FLAG"] }).body)).toBe(true);
+    });
+    it("the pre-#313 legacy card does not park", () => {
+      expect(parks(`${legacyCardMarkerFor(head)}\n**Release door — review FLAG**`)).toBe(false);
+    });
+    it("the unstamped per-leg card (the form this repo posted until row 928) does not park", () => {
+      expect(parks(`<!-- gate-flag review ${head} -->\n**Release door — review FLAG**`)).toBe(false);
+    });
+    it("a card stamped with some OTHER policy version does not park", () => {
+      expect(parks(`${cardMarkerFor("review", head, "2026-09-01-small-fix-rubric")}\n**Release door — review FLAG**`)).toBe(false);
+    });
   });
 
   it.each(["class-match", "line-cap", "named-checks"] as const)("%s leg: exactly one marker (no legacy form exists)", (leg) => {
@@ -321,5 +351,72 @@ describe("claude-config-plane#302 refuses at class-match, and the card matches",
     });
     expect(res.failureLeg).toBeNull();
     expect(res.prClass).toBe("code-fix");
+  });
+});
+
+// ───────────── needs-human provenance (row 928): the gate strips ONLY its own card ─────────────
+
+describe("classifyNeedsHumanProvenance — whose needs-human is this?", () => {
+  const ev = (type: string, actorLogin: string, position: number, label = "needs-human"): NeedsHumanTimelineEvent => ({ type, label, actorLogin, position });
+  const base = { currentLabels: ["fleet-internal", "needs-human"], truncated: false, hasGateCard: true };
+
+  it("known-GOOD: the last needs-human event is the gate App's LABELED and a gate card stands -> the gate's own", () => {
+    const res = classifyNeedsHumanProvenance({ ...base, timeline: [ev("LABELED", GATE_ACTOR_LOGIN, 3)] });
+    expect(res.gateOwn).toBe(true);
+  });
+
+  it("a needs-human added by a HUMAN is not the gate's — untouched", () => {
+    const res = classifyNeedsHumanProvenance({ ...base, timeline: [ev("LABELED", "kbibelhausen", 3)] });
+    expect(res).toMatchObject({ gateOwn: false });
+    expect((res as { reason: string }).reason).toContain("kbibelhausen");
+  });
+
+  it("a needs-human added by the CREW (owner identity) is not the gate's — untouched", () => {
+    expect(classifyNeedsHumanProvenance({ ...base, timeline: [ev("LABELED", "kbibelhausen", 1)] }).gateOwn).toBe(false);
+  });
+
+  it("the gate added it, then a human removed it and re-added it -> the LAST actor is the human -> not the gate's", () => {
+    const res = classifyNeedsHumanProvenance({
+      ...base,
+      timeline: [ev("LABELED", GATE_ACTOR_LOGIN, 1), ev("UNLABELED", "kbibelhausen", 2), ev("LABELED", "kbibelhausen", 3)],
+    });
+    expect(res.gateOwn).toBe(false);
+  });
+
+  it("a human added it first, the human removed it, the gate re-carded -> the gate's own", () => {
+    const res = classifyNeedsHumanProvenance({
+      ...base,
+      timeline: [ev("LABELED", "kbibelhausen", 1), ev("UNLABELED", "kbibelhausen", 2), ev("LABELED", GATE_ACTOR_LOGIN, 5)],
+    });
+    expect(res.gateOwn).toBe(true);
+  });
+
+  it("another fleet-App label does not count: only needs-human events are read", () => {
+    const res = classifyNeedsHumanProvenance({
+      ...base,
+      timeline: [ev("LABELED", "kbibelhausen", 1), ev("LABELED", GATE_ACTOR_LOGIN, 4, "automerge:code-fix")],
+    });
+    expect(res.gateOwn).toBe(false);
+  });
+
+  it("no gate card comment: the actor alone is not proof (the App also writes other labels) -> not the gate's", () => {
+    expect(classifyNeedsHumanProvenance({ ...base, hasGateCard: false, timeline: [ev("LABELED", GATE_ACTOR_LOGIN, 3)] }).gateOwn).toBe(false);
+  });
+
+  it("truncated timeline: fail-closed", () => {
+    expect(classifyNeedsHumanProvenance({ ...base, truncated: true, timeline: [ev("LABELED", GATE_ACTOR_LOGIN, 3)] }).gateOwn).toBe(false);
+  });
+
+  it("no needs-human event in the window, or the label is not on the PR: fail-closed", () => {
+    expect(classifyNeedsHumanProvenance({ ...base, timeline: [] }).gateOwn).toBe(false);
+    expect(classifyNeedsHumanProvenance({ ...base, currentLabels: ["fleet-internal"], timeline: [ev("LABELED", GATE_ACTOR_LOGIN, 3)] }).gateOwn).toBe(false);
+  });
+
+  it("the last event being a removal while the label is present is inconsistent: fail-closed", () => {
+    expect(classifyNeedsHumanProvenance({ ...base, timeline: [ev("LABELED", GATE_ACTOR_LOGIN, 1), ev("UNLABELED", GATE_ACTOR_LOGIN, 2)] }).gateOwn).toBe(false);
+  });
+
+  it("the gate actor login here never drifts from label-authority's GATE_AUTHORITY_LOGIN", () => {
+    expect(GATE_ACTOR_LOGIN).toBe(GATE_AUTHORITY_LOGIN);
   });
 });

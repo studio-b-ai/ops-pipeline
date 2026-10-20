@@ -315,23 +315,15 @@ jobs:
           # receipt line to stderr. The state file lives in the GitHub Actions cache
           # (fleet-sweep-state-* key).
           GATE_SHA=$(git rev-parse HEAD 2>/dev/null || echo "0000000")
-          entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-changed.ts /tmp/fleet-sweep-state.json "$GATE_SHA" --record)
-          changed_count=$(jq length <<<"$entries")
-          if [ "$changed_count" -lt "$count" ]; then
-            echo "Change-driven filter: $changed_count of $count labeled PRs have new fingerprints (fleet-sweep-changed.ts, ops#836). Skipped entries printed to stderr above."
-          fi
-
-          # ops#327: order for this cycle — box (train) FIRST fleet-wide,
-          # per-repo cap inside each group, round-robin rotation of the
-          # bugsquasher group by run_number, global fanout applied last. The
-          # ordering logic (pure) + tests live in scripts/lib/fleet-sweep-order.ts.
-          # With the change-driven filter above (ops#836), the fanout cap is a safety
-          # measure — unchanged PRs aren't re-evaluated each cycle.
-          entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-order.ts "$MAX_FANOUT" "$PER_REPO_CAP" "$RUN_OFFSET")
-          ordered_count=$(jq length <<<"$entries")
-          if [ "$ordered_count" -lt "$changed_count" ]; then
-            echo "::warning::Fanout applied: $changed_count changed PRs found, $ordered_count evaluated this cycle (per-repo cap=$PER_REPO_CAP, global cap=$MAX_FANOUT, run_offset=$RUN_OFFSET; #327 — train-first, round-robin rotation of the bugsquasher group)."
-          fi
+          # Row 928 (2026-10-20): the fanout cap now runs INSIDE the change filter, and a fingerprint is recorded ONLY
+          # for the entries that survive it. The old order (record every changed entry, THEN cap in the step below)
+          # marked every PR the cap cut as "seen" and never evaluated it again — the 10/20 20:25Z sweep skipped 310 of
+          # 361 labelled PRs as "unchanged since 2026-10-06T13:32:47Z", one bulk record, while that day's run fanned out
+          # 74 gate jobs. Capped-out entries now keep their prior fingerprint and return next sweep.
+          # ops#327 ordering (box (train) FIRST fleet-wide, per-repo cap inside each group, round-robin rotation of the
+          # bugsquasher group by run_number, global fanout last) is the SAME pure function, imported by the filter:
+          # scripts/lib/fleet-sweep-order.ts (tests live with it). Counts + the "Fanout applied" warning print to stderr.
+          entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-changed.ts /tmp/fleet-sweep-state.json "$GATE_SHA" --record --max-fanout "$MAX_FANOUT" --per-repo-cap "$PER_REPO_CAP" --run-offset "$RUN_OFFSET")
           echo "entries=$entries" >> "$GITHUB_OUTPUT"
 
       - name: Save sweep state
