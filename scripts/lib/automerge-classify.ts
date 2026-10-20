@@ -214,6 +214,10 @@ export interface ParsedDiffFile {
   added: string[];
   removed: string[];
   binary?: boolean;
+  /** True when the diff header carried `new file mode` (the file did not exist at the base). Set
+   *  ONLY when true (an absent key means "not known to be new" — fail-closed for the crew-change
+   *  migration leg, which admits a migration only when it is provably NEW). */
+  isNew?: boolean;
 }
 
 export function stripAbPrefix(p: string): string {
@@ -245,17 +249,19 @@ export function parseUnifiedDiff(diff: string): ParsedDiffFile[] {
   let added: string[] = [];
   let removed: string[] = [];
   let binary = false;
+  let isNew = false;
 
   function flush(): void {
     const path = newPath && newPath !== "/dev/null" ? newPath : oldPath;
     if (path && path !== "/dev/null") {
-      files.push({ path, added, removed, binary });
+      files.push({ path, added, removed, binary, ...(isNew ? { isNew: true } : {}) });
     }
     oldPath = null;
     newPath = null;
     added = [];
     removed = [];
     binary = false;
+    isNew = false;
   }
 
   // Header-zone tracking (codex P2 fix, 2026-07-31): `---`/`+++` lines are file
@@ -272,6 +278,10 @@ export function parseUnifiedDiff(diff: string): ParsedDiffFile[] {
     }
     if (line.startsWith("@@")) {
       inHeaderZone = false;
+      continue;
+    }
+    if (inHeaderZone && line.startsWith("new file mode")) {
+      isNew = true;
       continue;
     }
     if (inHeaderZone && line.startsWith("--- ")) {
@@ -425,12 +435,12 @@ const CLEAN_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL"]);
 // evaluated after it, so every existing docs-comment decision is byte-identical to
 // before.
 
-export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only" | "vault-doc" | "code-fix" | "fleet-internal";
+export type PrDiffClass = "docs-comment" | "ci-infra" | "test-only" | "vault-doc" | "code-fix" | "fleet-internal" | "crew-change";
 
 // The single canonical enumeration of valid classes — both the runner's CLI parsing
 // (--enabled-classes validation) and gateDecisionForClass's own runtime guard import
 // this SAME array, so the two can never drift out of sync with each other.
-export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only", "vault-doc", "code-fix", "fleet-internal"];
+export const ALL_PR_DIFF_CLASSES: readonly PrDiffClass[] = ["docs-comment", "ci-infra", "test-only", "vault-doc", "code-fix", "fleet-internal", "crew-change"];
 
 const DOCS_COMMENT_LINE_CAP = MAX_CHANGED_LINES; // 10, unchanged
 const CI_INFRA_LINE_CAP = 120;  // 9/13: a workflow file with its comments is rarely under 40
@@ -827,6 +837,159 @@ function evalFleetInternal(files: GateFile[]): CandidateEval {
   return { prClass: "fleet-internal", shapeOk, lineCapOk: true, cap: Number.POSITIVE_INFINITY, shapeReasons };
 }
 
+// ───────────────────────────── crew-change class (door policy, row 928) ─────────────────────────────
+//
+// Kevin 10/20: "I don't want to have to manually box PRs" — 294 green fleet PRs sat parked on his
+// hand because the door's classes admit only a SMALL TARGETED BUG FIX. A crew PR is routine,
+// correct work (a new module with its tests, a feature, a refactor); the question the door asks of it
+// is not "is it small?" but "is it correct, safe, scoped and proven?" — the review rubric's
+// four-part test (automerge-review-prompt.ts CREW_CHANGE_REVIEW_SYSTEM) — plus a deterministic
+// SHAPE gate that this class owns:
+//   - the PR is a CREW PR (`isCrewPr`): authored under the owner's identity AND carrying the runner's
+//     `fleet-internal` label. Anything else never joins the candidate set (a bugsquasher-only PR keeps
+//     its lane byte-identical — Kevin: "do NOT change the bugsquasher lane");
+//   - every file is inside the repo's safe_path_globs (or, when the repo declares none, outside its
+//     sensitive_path_patterns — enforced by the caller-level check at the top of classifyPrDiffClass —
+//     AND outside the deny list below);
+//   - the deny list below: the surfaces that stay Kevin's whatever the review says;
+//   - <= CREW_CHANGE_LINE_CAP changed lines (additions + deletions).
+// New AND modified files are allowed. The universal legs (author, labels, CI clean, named checks, review
+// 2-of-3 CLEAN) and the post-merge tripwire label (`automerge:code-fix`, written before the merge,
+// fail-closed) are enforced by the runner exactly as for code-fix.
+
+const CREW_CHANGE_LINE_CAP = 1500;
+
+/** The surfaces a crew PR may never touch through this class — each is a path test; content tests follow. */
+const CREW_PATH_DENY: { label: string; test: (path: string) => boolean }[] = [
+  // CI/authority-adjacent: workflows + composite actions are the spec's named minimum; CODEOWNERS,
+  // dependabot.yml, PR templates and the rest of .github/ are repo-policy files, never routine crew work.
+  { label: ".github/** (workflows, actions, repo policy)", test: (p) => /^\.github\//.test(p) },
+  // Pricing / price-sync (Kevin 9/26: "never touch live B2B pricing" — any trade price change is his call).
+  { label: "pricing/price-sync", test: (p) => /price|pricing|worksheet|catalog/i.test(p) },
+  // Auth / credentials / secrets / token handling. `auth(?!or)` so `author` is not an auth path.
+  { label: "auth/credentials/secrets/token", test: (p) => /auth(?!or)|credential|secret|token|passw(or)?d|oauth|middleware|(^|\/)\.env/i.test(p) },
+  // Hook registration: a hook's settings.json entry is a separate act on the live runner branch (Rule #491).
+  { label: "hook registration (settings.json)", test: (p) => /(^|\/)settings([.-][\w.-]+)?\.json$/i.test(p) },
+  // The door itself: the gate, its classifier/rubric/telemetry/authority/sweep/tripwire machinery, its
+  // registry. The named minimum is pr-automerge-gate.ts, lib/automerge-*.ts, label-authority.ts,
+  // restart-train*.ts and squasher-fleet.json; the rest of the door's own files are the same surface.
+  { label: "gate/door machinery", test: isDoorMachineryPath },
+  // A dependency change is its own class of risk (Rule #289).
+  { label: "package manifest/lockfile", test: isPackageManifestOrLockfile },
+  // Acumatica customizations are never an autonomous class (code-fix doc §7).
+  { label: "Customization/**", test: (p) => /^Customization\//.test(p) },
+];
+
+/** The door's own machinery. Matches the path whether or not it sits under `scripts/` (a fork of the
+ *  registry elsewhere is still the door), and includes the door's tests — weakening the test is
+ *  weakening the gate. */
+function isDoorMachineryPath(path: string): boolean {
+  if (/(^|\/)squasher-fleet\.json$/.test(path)) return true;
+  if (/(^|\/)automerge-skip-allowlist\.yaml$/.test(path)) return true;
+  if (/(^|\/)pr-automerge-gate\.ts$/.test(path)) return true;
+  if (/(^|\/)post-merge-tripwire\.ts$/.test(path)) return true;
+  if (/(^|\/)restart-train[^/]*$/.test(path)) return true;
+  if (/(^|\/)box-patch-id[^/]*$/.test(path)) return true;
+  if (/(^|\/)door-watch-coherence[^/]*$/.test(path)) return true;
+  if (/(^|\/)lib\/(__tests__\/)?(automerge-|label-authority|merge-door|gate-|hold-rail|box-patch-id|fleet-sweep-|timetable-gate|squasher-fleet-not-the-door|restart-train|tripwire-|door-watch-coherence)/.test(path)) return true;
+  return false;
+}
+
+// Content tests (applied to the ADDED and REMOVED lines of every non-doc, non-test file). Deliberately
+// vocabulary-shaped, not substring-shaped: `max_tokens` is not auth, a doc sentence is not a price write.
+const CREW_PRICING_CONTENT =
+  /\b(pricing|price[-_ ]?sync|price[-_ ]?list\w*|price[-_ ]?class\w*|price[-_ ]?worksheet\w*|sales[-_ ]?price\w*|worksheet|priceOverride|contextualPricing|resolvePrice|computeV2\w*|TIER_TO_PRICE_CLASS|prices?)\b/i;
+const CREW_AUTH_CONTENT =
+  /\b(Authorization|Bearer|oauth\w*|authenticat\w*|authoriz\w*|jwt|jsonwebtoken|createHmac|timingSafeEqual|bcrypt|argon2|pbkdf2|api[_-]?key|client[_-]?secret|private[_-]?key|passw(or)?d)\b|process\.env\.\w*(TOKEN|SECRET|PASSWORD|API_?KEY|PRIVATE_?KEY|CREDENTIAL)|os\.environ\S*\s*[[(]?\s*["'][A-Z0-9_]*(TOKEN|SECRET|PASSWORD|API_?KEY|PRIVATE_?KEY|CREDENTIAL)|sk-ant-|ghp_[A-Za-z0-9]|github_pat_|xox[abp]-|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----/i;
+// A migration is admitted only when it is NEW (append-only, Rule #156) and ADDITIVE — never a statement
+// that drops, renames, re-types or rewrites something that already exists.
+const CREW_DESTRUCTIVE_SQL =
+  /\b(DROP\s+(TABLE|COLUMN|INDEX|CONSTRAINT|SCHEMA|TYPE|VIEW|DATABASE|TRIGGER|FUNCTION)|TRUNCATE|RENAME\s+(TO|COLUMN|CONSTRAINT)|ALTER\s+COLUMN|ALTER\s+TYPE|SET\s+DATA\s+TYPE|DELETE\s+FROM|UPDATE\s+\S+\s+SET)\b/i;
+
+function isMigrationLikePath(path: string): boolean {
+  return /migrat/i.test(path) || /\.sql$/i.test(path);
+}
+
+/** What a changed file's diff said, keyed by path — built by `fileContentsFromParsed`. */
+export interface CrewFileContent {
+  added: string[];
+  removed: string[];
+  binary?: boolean;
+  isNew?: boolean;
+}
+
+/** Builds the per-path content map crew-change inspects from a parsed unified diff. A Map, not a
+ *  plain object: a path named `__proto__` must not read back Object.prototype as "content". */
+export function fileContentsFromParsed(parsed: ParsedDiffFile[]): Map<string, CrewFileContent> {
+  return new Map(parsed.map((f) => [f.path, { added: f.added, removed: f.removed, binary: f.binary, isNew: f.isNew }]));
+}
+
+/** Labels of every deny-list rule this file trips. Empty = the file is clean for crew-change. */
+export function crewChangeDenyHits(path: string, content: CrewFileContent | undefined): string[] {
+  const hits = CREW_PATH_DENY.filter((d) => d.test(path)).map((d) => d.label);
+  if (!content) {
+    // A pure rename / mode-only change has no hunks: nothing to inspect, so nothing to clear (fail-closed).
+    hits.push("uninspectable (no diff content — rename or mode-only change)");
+    return hits;
+  }
+  if (content.binary) hits.push("binary file (no reviewable text)");
+  const isDoc = /\.md$/i.test(path) || /^docs\//.test(path);
+  const isTest = isTestFilePath(path);
+  const lines = [...content.added, ...content.removed];
+  if (!isDoc && !isTest) {
+    if (lines.some((l) => CREW_PRICING_CONTENT.test(l))) hits.push("pricing/price-sync (content)");
+    if (lines.some((l) => CREW_AUTH_CONTENT.test(l))) hits.push("auth/credentials/secrets/token (content)");
+  }
+  if (!isDoc && !isTest && isMigrationLikePath(path)) {
+    if (content.isNew !== true) hits.push("migration: modifies an existing file (append-only, Rule #156)");
+    else if (content.added.some((l) => CREW_DESTRUCTIVE_SQL.test(l))) hits.push("migration: drops/alters existing columns");
+  }
+  return hits;
+}
+
+function evalCrewChange(
+  files: GateFile[],
+  totalChangedLines: number,
+  safePathGlobs: string[] | undefined,
+  fileContents: ReadonlyMap<string, CrewFileContent> | undefined,
+): CandidateEval {
+  const shapeReasons: string[] = [];
+
+  const declared = (safePathGlobs ?? []).filter((g) => g.trim() !== "");
+  const compiled = declared.map(compileSafePathGlob).filter((re): re is RegExp => re !== null);
+  if (declared.length > 0 && compiled.length === 0) {
+    shapeReasons.push("crew-change: safe_path_globs declared but none is valid — fail-closed");
+  }
+  const outsideGlobs = compiled.length === 0 ? [] : files.filter((f) => !compiled.some((re) => re.test(f.path)));
+  if (outsideGlobs.length > 0) {
+    shapeReasons.push(`crew-change: file(s) outside safe_path_globs: ${outsideGlobs.map((f) => f.path).join(", ")}`);
+  }
+
+  if (!fileContents) {
+    shapeReasons.push("crew-change: no diff contents supplied — cannot inspect (fail-closed)");
+  } else {
+    const denyHits = files
+      .map((f) => ({ path: f.path, hits: crewChangeDenyHits(f.path, fileContents.get(f.path)) }))
+      .filter((f) => f.hits.length > 0);
+    if (denyHits.length > 0) {
+      shapeReasons.push(`crew-change: denylist hit(s): ${denyHits.map((f) => `${f.path} (${f.hits.join("; ")})`).join(", ")}`);
+    }
+  }
+
+  const shapeOk = shapeReasons.length === 0;
+  return { prClass: "crew-change", shapeOk, lineCapOk: totalChangedLines <= CREW_CHANGE_LINE_CAP, cap: CREW_CHANGE_LINE_CAP, shapeReasons };
+}
+
+/** Door policy (row 928): a crew PR = authored under the owner's identity (crews run as him — see
+ *  label-authority.ts's self-box note) AND carrying the runner's `fleet-internal` label. */
+export function isCrewPr(author: string, labels: readonly string[]): boolean {
+  return author === BUGSQUASHER_AUTHOR && labels.includes(FLEET_INTERNAL_LABEL);
+}
+
+/** Classes whose merged PRs the post-merge tripwire re-derives and watches (it keys on the
+ *  `automerge:code-fix` label the gate writes pre-merge for BOTH). */
+export const TRIPWIRE_WATCHED_CLASSES: readonly PrDiffClass[] = ["code-fix", "crew-change"];
+
 export interface ClassifyPrDiffClassInput {
   /** Every changed file's path AND its existing doc|comment-only|code file class
    *  (from classifyDiffFile/reconcileFileClasses) — reused as-is for the unchanged
@@ -865,6 +1028,16 @@ export interface ClassifyPrDiffClassInput {
    *  (same opt-in shape as code-fix's safePathGlobs). Omitted/without the label ⇒
    *  the fleet-internal candidate never joins. */
   labels?: string[];
+  /** Door policy (row 928): the PR author's login. Read ONLY by the crew-change candidate (joins
+   *  only for a crew PR — `isCrewPr`). Omitted ⇒ crew-change never joins. */
+  author?: string;
+  /** Door policy (row 928): true when this caller has `crew-change` in its enabled classes. The
+   *  candidate joins ONLY then — a caller that never opts in gets byte-identical receipts, with no
+   *  "crew-change:" reason lines on its missed-PR telemetry (same opt-in shape as code-fix's globs). */
+  crewChangeEnabled?: boolean;
+  /** Door policy (row 928): per-path diff content for the crew-change deny list (`fileContentsFromParsed`).
+   *  Absent ⇒ crew-change cannot inspect and refuses (fail-closed). */
+  fileContents?: ReadonlyMap<string, CrewFileContent>;
 }
 
 export interface ClassifyPrDiffClassResult {
@@ -899,7 +1072,7 @@ export interface ClassifyPrDiffClassResult {
  * longest-proven class gets first refusal.
  */
 export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPrDiffClassResult {
-  const { files, totalChangedLines, sensitivePathPatterns, additions, safePathGlobs, labels } = input;
+  const { files, totalChangedLines, sensitivePathPatterns, additions, safePathGlobs, labels, author, crewChangeEnabled, fileContents } = input;
 
   if (files.length === 0) {
     return { prClass: null, failureLeg: "class-match", reasons: ["no changed files"] };
@@ -947,6 +1120,13 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
   // and the runner's [config] note covers the enabled-with-zero-globs case.
   if (safePathGlobs && safePathGlobs.length > 0) {
     candidates.push(evalCodeFix(files, totalChangedLines, safePathGlobs, additions));
+  }
+  // Crew-change (door policy, row 928) AFTER code-fix and BEFORE fleet-internal: every narrower,
+  // longer-proven class keeps first refusal; crew-change then wins over the fleet-internal fallback
+  // for a PR that fits both, because it is the one that writes the post-merge tripwire label.
+  // Joins ONLY for an opted-in caller AND a crew PR — every other PR is byte-identical to before.
+  if (crewChangeEnabled === true && author !== undefined && isCrewPr(author, labels ?? [])) {
+    candidates.push(evalCrewChange(files, totalChangedLines, safePathGlobs, fileContents));
   }
   // Fleet-internal LAST of all (stint #689): the widest class only ever picks up what
   // every narrower, longer-proven class refused, and it joins the candidate set ONLY
@@ -1025,7 +1205,8 @@ export function gateDecisionForClass(input: GateInputV2): GateResult {
     reasons.push(`independent review verdict '${input.reviewVerdict}' !== 'CLEAN'`);
   }
 
-  // Stint #689: the fleet-internal class's OWN label legs, scoped to that class ONLY —
+  // Stint #689 (+ door policy, row 928: crew-change rides the SAME lane law): the fleet-internal class's
+  // OWN label legs, scoped to that class and to crew-change ONLY —
   // every other class's label handling stays byte-identical (the blue-card flow relies
   // on `needs-human` NOT blocking the narrower classes: the label is applied AFTER a
   // refusal, and the next sweep re-evaluates and re-refuses at the same leg).
@@ -1038,9 +1219,9 @@ export function gateDecisionForClass(input: GateInputV2): GateResult {
   // - `hold` parks it (defense-in-depth: the runner's "held" leg already short-circuits
   //   BEFORE classification, but this function is exported and callable independently —
   //   a caller that skips the runner's ordering must still fail closed on Kevin's word).
-  if (input.prClass === "fleet-internal") {
+  if (input.prClass === "fleet-internal" || input.prClass === "crew-change") {
     if (!input.labels.includes(FLEET_INTERNAL_LABEL)) {
-      reasons.push(`class 'fleet-internal' requires the '${FLEET_INTERNAL_LABEL}' label itself (has: ${input.labels.length ? input.labels.join(", ") : "none"})`);
+      reasons.push(`class '${input.prClass}' requires the '${FLEET_INTERNAL_LABEL}' label itself (has: ${input.labels.length ? input.labels.join(", ") : "none"})`);
     }
     if (input.labels.includes(NEEDS_HUMAN_LABEL)) {
       reasons.push(`'${NEEDS_HUMAN_LABEL}' is present — the PR is already a human's decision; only 'box' opens it, never this machine class`);
