@@ -3,6 +3,7 @@ import {
   classifyDiffFile,
   classifyPrDiffClass,
   codeFixRevalidateDeltas,
+  crewNeedsHumanRefusal,
   withoutLabelWokenReruns,
   compileSafePathGlob,
   evaluateMergeReadiness,
@@ -1135,10 +1136,11 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
   // Crew PRs: fleet-internal + NOT bugsquasher → 200-line cap.
   // Kevin PRs: bugsquasher (with or without fleet-internal) → 1500-line cap unchanged.
 
-  it("crew code-fix: refuses at 201 additions with fleet-internal label (crew cap 200) — falls through to fleet-internal", () => {
+  it("crew code-fix: REFUSES at 201 additions (crew cap 200) — line-cap, never routed to the uncapped fleet-internal class (review F1)", () => {
     const result = classifyPrDiffClass({ ...GOOD, additions: 201, labels: ["fleet-internal"] });
-    expect(result.prClass).toBe("fleet-internal");
-    expect(result.failureLeg).toBeNull();
+    expect(result.prClass).toBeNull();
+    expect(result.failureLeg).toBe("line-cap");
+    expect(result.reasons.some((r) => r.includes("code-fix") && r.includes("additions 201 > 200"))).toBe(true);
   });
 
   it("crew code-fix: resolves at exactly 200 additions with fleet-internal label", () => {
@@ -1159,10 +1161,17 @@ describe("classifyPrDiffClass — code-fix class (ops#190 B1)", () => {
     expect(result.failureLeg).toBeNull();
   });
 
-  it("crew code-fix: over 200 but under 1500 with fleet-internal falls through to fleet-internal class when denylist-clean", () => {
-    const result = classifyPrDiffClass({ ...GOOD, additions: 250, labels: ["fleet-internal"] });
+  it("crew code-fix: over 200 and under 1500 is REFUSED too (it used to merge as code-fix on main, watched; it must not become an unwatched fleet-internal merge)", () => {
+    for (const additions of [250, 450, 1500]) {
+      const result = classifyPrDiffClass({ ...GOOD, additions, labels: ["fleet-internal"] });
+      expect(result.prClass, `additions=${additions}`).toBeNull();
+      expect(result.failureLeg, `additions=${additions}`).toBe("line-cap");
+    }
+  });
+
+  it("crew PR whose shape does NOT fit code-fix (outside safe_path_globs) is the fleet-internal class's business, unchanged — the cap refusal is only for code-fix-shaped diffs", () => {
+    const result = classifyPrDiffClass({ ...GOOD, files: files(["tools/helper.ts"]), additions: 30, totalChangedLines: 30, labels: ["fleet-internal"] });
     expect(result.prClass).toBe("fleet-internal");
-    expect(result.failureLeg).toBeNull();
   });
 
   it("crew code-fix: denylist path (< 200 lines) is refused — crew flag doesn't lower the denylist", () => {
@@ -1879,12 +1888,10 @@ describe("stale-base × classification — a fresh base never rescues what the o
     expect(over.prClass).not.toBe("code-fix");
   });
 
-  it("(e) over the cap, a repo that has not enabled the fleet-internal class refuses outright — the cap routes, the enabled-classes set refuses", () => {
-    // The classifier alone resolves an over-cap crew PR to the pre-existing fleet-internal class (no
-    // line cap by design — stint #689). Refusal for a repo that has not enabled it is the gate's
-    // --enabled-classes leg; that half is asserted end-to-end in crew-stale-base-rerun.test.ts.
+  it("(e) over the cap is a REFUSAL (prClass null, line-cap), not a route to the uncapped fleet-internal class", () => {
     const over = classifyPrDiffClass({ files: files(["src/fix.ts"]), totalChangedLines: 201, additions: 201, safePathGlobs: ["src/**"], labels: ["fleet-internal"] });
-    expect(over.prClass).toBe("fleet-internal");
+    expect(over.prClass).toBeNull();
+    expect(over.failureLeg).toBe("line-cap");
   });
 
   it("(e) control: Kevin's lane keeps the 1500 cap (bugsquasher, with or without fleet-internal) — #580 did not move it", () => {
@@ -1892,5 +1899,22 @@ describe("stale-base × classification — a fresh base never rescues what the o
       const result = classifyPrDiffClass({ files: files(["src/fix.ts"]), totalChangedLines: 900, additions: 900, safePathGlobs: ["src/**"], labels });
       expect(result.prClass, labels.join("+")).toBe("code-fix");
     }
+  });
+});
+
+describe("crewNeedsHumanRefusal — a flagged crew code-fix PR is a human's decision (review F2/F4)", () => {
+  it("refuses a crew code-fix PR that carries needs-human", () => {
+    expect(crewNeedsHumanRefusal("code-fix", ["fleet-internal", "needs-human"])).toContain("needs-human");
+  });
+  it("does not apply without needs-human, to Kevin's lane, to human PRs, or to other classes", () => {
+    expect(crewNeedsHumanRefusal("code-fix", ["fleet-internal"])).toBeNull();
+    expect(crewNeedsHumanRefusal("code-fix", ["fleet-internal", "bugsquasher", "needs-human"])).toBeNull(); // Kevin's lane
+    expect(crewNeedsHumanRefusal("code-fix", ["needs-human"])).toBeNull(); // not crew
+    expect(crewNeedsHumanRefusal("docs-comment", ["fleet-internal", "needs-human"])).toBeNull(); // blue-card flow relies on the narrower classes re-refusing, not parking
+    expect(crewNeedsHumanRefusal("fleet-internal", ["fleet-internal", "needs-human"])).toBeNull(); // that class has its own needs-human leg in gateDecisionForClass
+  });
+  it("is NOT folded into gateDecisionForClass, which the post-merge tripwire re-derives with (a Kevin-boxed flagged crew PR keeps its health window)", () => {
+    const res = gateDecisionForClass({ prClass: "code-fix", author: "kbibelhausen", labels: ["fleet-internal", "needs-human", "box"], ciClean: true, reviewVerdict: "CLEAN" });
+    expect(res.decision).toBe("merge");
   });
 });

@@ -201,6 +201,22 @@ export interface AuthorityTimelineItem {
    */
   oid?: string;
   /**
+   * Stint #928 (Kevin's box survives the gate's own rebase): for PULL_REQUEST_COMMIT only — the
+   * commit's parent shas (`commit.parents`, first two), in GitHub's order (first parent = the
+   * branch tip the commit was made on; second parent of a merge = the commit merged in).
+   * Absent on older fixtures / a node that carried no `commit` — absent means "can't prove
+   * the commit's shape", never a wildcard. Read ONLY by crew-merge-guards.ts's
+   * `authorizeAcrossGateRebase`; `evaluateLabelAuthority` itself never looks at it.
+   */
+  parents?: string[];
+  /**
+   * Stint #928: for PULL_REQUEST_COMMIT only — true iff GitHub itself signed the commit and
+   * the signature is valid (`commit.signature.isValid && wasSignedByGitHub`; the web-flow key
+   * GitHub uses for merges it creates, e.g. the update-branch merge). A crew's own pushed
+   * commit is never GitHub-signed. Absent/false ⇒ not provably GitHub-made.
+   */
+  signedByGitHub?: boolean;
+  /**
    * Rollout step 5: only meaningful for LABELED — the GraphQL `databaseId` of the
    * LabeledEvent itself (distinct from `position`, which is this array's own index,
    * not a GitHub-assigned id). Used by `box-patch-id.ts`'s `readBoxPatchIdCheckRuns`
@@ -776,6 +792,7 @@ query($owner: String!, $repo: String!, $number: Int!, $before: String) {
           __typename
           ... on LabeledEvent { label { name } actor { __typename login } createdAt }
           ... on UnlabeledEvent { label { name } actor { __typename login } }
+          ... on PullRequestCommit { commit { oid parents(first: 2) { nodes { oid } } signature { isValid wasSignedByGitHub } } }
         }
       }
     }
@@ -796,6 +813,13 @@ interface GraphQLTimelineNode {
   /** Only requested on the `LabeledEvent` fragment above — always absent/undefined on
    *  every other node type. */
   createdAt?: string | null;
+  /** Only requested on the `PullRequestCommit` fragment (stint #928); absent on every other
+   *  node type and on any fixture that predates it. */
+  commit?: {
+    oid?: string | null;
+    parents?: { nodes?: Array<{ oid?: string | null } | null> | null } | null;
+    signature?: { isValid?: boolean | null; wasSignedByGitHub?: boolean | null } | null;
+  } | null;
 }
 
 interface GraphQLTimelineResponse {
@@ -841,6 +865,26 @@ export function normalizeActorLogin(actor: { __typename?: string | null; login?:
   if (typeof login !== "string" || login.length === 0) return undefined;
   if (actor?.__typename === "Bot" && !login.endsWith("[bot]")) return `${login}[bot]`;
   return login;
+}
+
+/**
+ * Stint #928: the commit-shape fields of a PullRequestCommit node, tolerant of every absence
+ * (an older fixture, a node GitHub returned without `commit`). Each field is set ONLY when it
+ * was positively read, so an absent value stays `undefined` — "can't prove", never a default.
+ */
+function commitFields(node: GraphQLTimelineNode): Pick<AuthorityTimelineItem, "oid" | "parents" | "signedByGitHub"> {
+  const commit = node.commit;
+  if (!commit) return {};
+  const out: Pick<AuthorityTimelineItem, "oid" | "parents" | "signedByGitHub"> = {};
+  if (typeof commit.oid === "string" && commit.oid.length > 0) out.oid = commit.oid;
+  const parentNodes = commit.parents?.nodes;
+  if (Array.isArray(parentNodes)) {
+    const oids = parentNodes.map((p) => p?.oid).filter((o): o is string => typeof o === "string" && o.length > 0);
+    if (oids.length === parentNodes.length) out.parents = oids;
+  }
+  const sig = commit.signature;
+  if (sig) out.signedByGitHub = sig.isValid === true && sig.wasSignedByGitHub === true;
+  return out;
 }
 
 /** One GraphQL page runner — injectable so the pagination walk is testable without a
@@ -1010,6 +1054,7 @@ export function fetchAuthorityTimeline(
       actorLogin: normalizeActorLogin(node.actor),
       position: index,
       createdAt: node.createdAt ?? undefined,
+      ...(type === "PULL_REQUEST_COMMIT" ? commitFields(node) : {}),
     };
   });
   // Truncation = a previous page still exists past the page bound (relevant events

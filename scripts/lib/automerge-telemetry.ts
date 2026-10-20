@@ -52,6 +52,10 @@ export type GateReceiptVerdict = "qualified" | "missed" | "candidate";
  *                  requested an update-branch (or could not — conflict / unreadable) and
  *                  refuses THIS cycle; the next sweep re-evaluates the new head after CI
  *                  re-runs. A wait, never a decision ask: `box` does not open this leg.
+ * - `tripwire-label` (stint #928) a CREW PR the gate was about to merge (or hand to a merge)
+ *                  lacked `automerge:code-fix`, the label the post-merge 5xx tripwire's
+ *                  caller-side filter watches — written (or the write FAILED) and the
+ *                  cycle refused; the next sweep merges. A wait, never a decision ask.
  * - `review`       the independent review returned anything other than exactly CLEAN
  *                  (including any API error — fail-closed).
  * - `held`         (ops-pipeline#260 leg 4) Kevin's `hold` label is present — parked
@@ -70,6 +74,7 @@ export type GateReceiptLeg =
   | "eligibility"
   | "named-checks"
   | "stale-base"
+  | "tripwire-label"
   | "review"
   | "held"
   | "box"

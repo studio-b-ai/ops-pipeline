@@ -12,15 +12,18 @@
  *
  * Choice (a), the least invasive: write the EXISTING `automerge:code-fix` label — no new
  * label, no cross-repo change to the caller's filter. These tests import and call the REAL
- * `evaluate` / `evaluateTrainReady` (Rule #223) against a STATEFUL fake `gh` (labels added by
- * the gate stay on the PR; the merge call records the labels the PR carried at that instant),
- * so "a crew-route merge carries the watched label" is asserted on what the fake captured at
- * the merge, across two real sweeps — never on a hand-assembled fixture.
+ * `evaluate` / `evaluateTrainReady` (Rule #223) against the stateful fake GitHub
+ * (fixtures/fake-gh.ts: labels the gate adds stay on the PR; the merge call records the labels
+ * the PR carried at that instant), so "a crew-route merge carries the watched label" is asserted
+ * on what the world captured at the merge, across real sweeps — never on a hand-assembled fixture.
  *
- *   QUALIFICATION  sweep 1 writes `automerge:code-fix` FIRST, then candidate, then box; a failed
- *                  write of the filter label writes NEITHER of the merge-authorizing labels.
- *   MERGE INSTANT  sweep 2 (the bot-box merge) carries the label; a bot-boxed crew PR that lacks
- *                  it gets it written and does NOT merge that cycle (box door AND train door).
+ *   QUALIFICATION  the label is written FIRST — before the paid vote, before candidate, before box —
+ *                  and a failed write writes NO merge-authorizing label and spends no vote. The label is
+ *                  CREATED in the repo when missing (toto/power-unit/lightsout do not have it).
+ *   MERGE INSTANT  the bot-box merge carries the label; a bot-boxed crew PR that lacks it gets it written
+ *                  and does NOT merge that cycle (box door AND train door).
+ *   FLEET-INTERNAL a crew PR that resolves the fleet-internal class (outside the safe globs) merges
+ *                  DIRECTLY — it gets the label first, fail-closed, and holds the cycle it was written.
  *   SCOPE          Kevin's box (attended), plain human PRs and Kevin's `bugsquasher` lane are untouched.
  *   FILTER PAIRING the filter expression documented in the tripwire workflow matches the labels at
  *                  merge, and REJECTS the pre-change label set (negative control, Rule #322).
@@ -30,6 +33,7 @@ import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { classifyPrDiffClass, gateDecisionForClass, parseUnifiedDiff, reconcileFileClasses } from "../automerge-classify.js";
+import { FLEET_APP_SLUG, FRESH, World } from "./fixtures/fake-gh.js";
 
 process.env.PR_AUTOMERGE_GATE_NO_MAIN = "1";
 
@@ -44,110 +48,23 @@ const { evaluate, evaluateTrainReady, CODE_FIX_MERGE_LABEL } = await import("../
 const REPO = "studio-b-ai/radio"; // the repo that carries the tripwire caller today
 const TRAIN_REPO = "studio-b-ai/studiob"; // repoClassFor() === "train"
 const PR = 777;
-const HEAD = "7771a1b2c3d4e5f6777a1b2c3d4e5f6777a1b2c3";
-const TIP = "2026-10-20T12:00:00Z";
-
-const DIFF = [
-  "diff --git a/src/fix.ts b/src/fix.ts",
-  "--- a/src/fix.ts",
-  "+++ b/src/fix.ts",
-  "@@ -1,2 +1,3 @@",
-  "-const a = 1;",
-  "+const a = 2;",
-  "+export const b = 3;",
-  "",
-].join("\n");
-
-type BoxActor = "bot" | "kevin" | null;
-
-interface World {
-  /** The labels currently on the PR — mutated by the gate's `pr edit --add-label`. */
-  labels: string[];
-  /** Who applied `box` (the timeline's LabeledEvent actor). The gate sets "bot" when IT adds box. */
-  boxActor: BoxActor;
-  /** A label whose `--add-label` write throws (gh failure). */
-  failLabel?: string;
-  /** What the PR carried at each `pr merge` call. */
-  mergedWithLabels: string[][];
-}
 
 let world: World;
-type GhCall = string[];
-let ghCalls: GhCall[];
 let logLines: string[];
 
-function prView(): string {
-  return JSON.stringify({
-    author: { login: "kbibelhausen" },
-    createdAt: "2026-10-01T00:00:00Z",
-    labels: world.labels.map((name) => ({ name })),
-    state: "OPEN",
-    isDraft: false,
-    mergeStateStatus: "CLEAN",
-    additions: 22,
-    deletions: 2,
-    headRefOid: HEAD,
-    baseRefName: "main",
-    statusCheckRollup: [{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-10-20T09:00:00Z" }],
-    files: [{ path: "src/fix.ts" }],
-    changedFiles: 1,
-  });
+function install(init: Partial<ConstructorParameters<typeof World>[0]> & { labels: string[] }, repo = REPO): World {
+  world = new World({ repo, pr: PR, ...init });
+  execFileSyncMock.mockImplementation((cmd: string, args: string[]) => world.handle(cmd, args));
+  return world;
+}
+/** A bot-boxed candidate as a qualifying sweep leaves it, minus whichever of label/check the test removes. */
+function botBoxed(over: { withLabel?: boolean; qualified?: boolean; repo?: string } = {}): World {
+  const labels = ["fleet-internal", "candidate", "box", ...(over.withLabel === false ? [] : [CODE_FIX_MERGE_LABEL])];
+  const w = install({ labels, boxBy: "bot", baseBehind: FRESH }, over.repo ?? REPO);
+  if (over.qualified !== false) w.injectCheck({ name: "crew-qualified", head_sha: w.head, app: FLEET_APP_SLUG });
+  return w;
 }
 
-function timeline(): string {
-  const actor = world.boxActor === "bot" ? { __typename: "Bot", login: "studiob-fleet-bot" } : { __typename: "User", login: "kbibelhausen" };
-  return JSON.stringify({
-    data: {
-      repository: {
-        pullRequest: {
-          timelineItems: {
-            filteredCount: 2,
-            pageInfo: { hasPreviousPage: false, startCursor: null },
-            nodes: [
-              { __typename: "PullRequestCommit" },
-              { __typename: "LabeledEvent", label: { name: "box" }, actor, createdAt: "2026-10-20T10:30:00Z" },
-            ],
-          },
-        },
-      },
-    },
-  });
-}
-
-function install(w: Partial<World> & { labels: string[] }, repo: string) {
-  world = { boxActor: null, mergedWithLabels: [], ...w };
-  execFileSyncMock.mockImplementation((cmd: string, args: string[]) => {
-    ghCalls.push([cmd, ...args]);
-    if (cmd === "sleep") return "";
-    const a = args.join(" ");
-    if (a.startsWith("api graphql")) return timeline();
-    if (a.startsWith("pr view") && a.includes("--json comments")) return "0\n";
-    if (a.startsWith("pr view") && a.includes("--json headRefOid")) return `${HEAD}\n`;
-    if (a.startsWith("pr view")) return prView();
-    if (a.startsWith(`api repos/${repo}/compare/`) && args.includes("-H")) return DIFF;
-    if (a.startsWith(`api repos/${repo}/compare/`) && a.includes("per_page=1")) {
-      return JSON.stringify({ ahead_by: 0, merge_base_date: TIP, file_count: 0, files: [] }); // FRESH base: this file is about labels
-    }
-    if (a.startsWith(`api repos/${repo}/commits/main`)) return `${TIP}\n`;
-    if (a.startsWith("pr edit")) {
-      const label = args[args.indexOf("--add-label") + 1];
-      if (label === world.failLabel) throw new Error(`gh: could not add label '${label}' (HTTP 422)\nsecond line`);
-      if (!world.labels.includes(label)) world.labels.push(label);
-      if (label === "box") world.boxActor = "bot"; // the gate's own fleet-bot key
-      return "";
-    }
-    if (a.startsWith("pr merge")) {
-      world.mergedWithLabels.push([...world.labels]);
-      return "";
-    }
-    if (a.startsWith("pr comment") || a.startsWith("api -X POST")) return "";
-    throw new Error(`unexpected gh invocation in crew-tripwire-label test: ${a}`);
-  });
-}
-
-const joined = (c: GhCall) => c.slice(1).join(" ");
-const labelAdds = () => ghCalls.filter((c) => joined(c).startsWith("pr edit")).map((c) => c[c.indexOf("--add-label") + 1]);
-const merges = () => ghCalls.filter((c) => joined(c).startsWith("pr merge"));
 const receipts = () => logLines.filter((l) => l.startsWith("[gate-receipt]"));
 const ENABLED = ["code-fix", "fleet-internal"] as never;
 const sweep = (repo = REPO) => evaluate(repo, PR, ENABLED, [], ["src/**"], ["ci"], []);
@@ -180,7 +97,6 @@ function filterMatches(expr: string, labels: readonly string[]): boolean {
 }
 
 beforeEach(() => {
-  ghCalls = [];
   logLines = [];
   execFileSyncMock.mockReset();
   reviewCreate.mockReset();
@@ -205,8 +121,8 @@ describe("the contract between the gate and the tripwire's caller-side filter", 
   });
 
   it("the tripwire's re-derivation accepts what the crew route merges (same predicates it calls, no labels passed, as it does)", () => {
-    const parsed = parseUnifiedDiff(DIFF);
-    const files = reconcileFileClasses(["src/fix.ts"], parsed);
+    const w = new World({ repo: REPO, pr: PR, labels: ["fleet-internal"] });
+    const files = reconcileFileClasses(["src/fix.ts"], parseUnifiedDiff(w.diff));
     const cls = classifyPrDiffClass({ files, totalChangedLines: 24, safePathGlobs: ["src/**"], sensitivePathPatterns: ["(^|/)(auth|credential|secret|token)"] });
     expect(cls.prClass).toBe("code-fix");
     const gate = gateDecisionForClass({ prClass: "code-fix", author: "kbibelhausen", labels: ["fleet-internal", "candidate", "box", CODE_FIX_MERGE_LABEL], ciClean: true, reviewVerdict: "CLEAN" });
@@ -216,113 +132,175 @@ describe("the contract between the gate and the tripwire's caller-side filter", 
 
 describe("crew route (standard repo) — qualification writes the filter label first; the next sweep's merge carries it", () => {
   it("END TO END over two real sweeps: the PR merged by the bot box carries automerge:code-fix, and the documented filter matches it", async () => {
-    install({ labels: ["fleet-internal"] }, REPO);
+    const w = install({ labels: ["fleet-internal"] });
     await sweep(); // sweep 1: qualification
-    expect(labelAdds()).toEqual([CODE_FIX_MERGE_LABEL, "candidate", "box"]); // filter label FIRST
-    expect(merges()).toHaveLength(0);
+    expect(w.labelAddAttempts()).toEqual([CODE_FIX_MERGE_LABEL, "candidate", "box"]); // filter label FIRST
+    expect(w.mergeCalls()).toHaveLength(0);
 
     await sweep(); // sweep 2: the gate's own bot box is honored
-    expect(merges()).toHaveLength(1);
-    expect(world.mergedWithLabels).toHaveLength(1);
-    expect(world.mergedWithLabels[0]).toContain(CODE_FIX_MERGE_LABEL);
-    expect(filterMatches(documentedCallerFilter(), world.mergedWithLabels[0])).toBe(true);
+    expect(w.mergeCalls()).toHaveLength(1);
+    expect(w.merges).toHaveLength(1);
+    expect(w.merges[0].labels).toContain(CODE_FIX_MERGE_LABEL);
+    expect(filterMatches(documentedCallerFilter(), w.merges[0].labels)).toBe(true);
     expect(receipts().some((r) => r.includes("verdict=qualified"))).toBe(true);
   });
 
-  it("a label already on the PR is not re-written (GitHub emits no event for a no-op add; the flap guard counts adds)", async () => {
-    install({ labels: ["fleet-internal", CODE_FIX_MERGE_LABEL] }, REPO);
+  it("the filter label is written BEFORE the paid vote: a crew PR that gets it written spends the vote once, on this sweep", async () => {
+    const w = install({ labels: ["fleet-internal"] });
     await sweep();
-    expect(labelAdds()).toEqual(["candidate", "box"]);
+    const firstAdd = w.calls.findIndex((c) => w.joined(c).includes(`--add-label ${CODE_FIX_MERGE_LABEL}`));
+    expect(firstAdd).toBeGreaterThan(-1);
+    expect(reviewCreate).toHaveBeenCalledTimes(3);
   });
 
-  it("FAIL-CLOSED: if the filter label cannot be written, NEITHER merge-authorizing label is written and nothing merges", async () => {
-    install({ labels: ["fleet-internal"], failLabel: CODE_FIX_MERGE_LABEL }, REPO);
+  it("a label already on the PR is not re-written (GitHub emits no event for a no-op add; the flap guard counts adds)", async () => {
+    const w = install({ labels: ["fleet-internal", CODE_FIX_MERGE_LABEL] });
     await sweep();
-    expect(labelAdds()).toEqual([CODE_FIX_MERGE_LABEL]); // the one attempt; no candidate, no box
-    expect(world.labels).toEqual(["fleet-internal"]);
-    expect(merges()).toHaveLength(0);
-    expect(logLines.some((l) => l.includes("NOT written") && l.includes(CODE_FIX_MERGE_LABEL))).toBe(true);
+    expect(w.labelAddAttempts()).toEqual(["candidate", "box"]);
+  });
+
+  it("the label is CREATED in a repo that does not have it (toto, power-unit, lightsout), then added — and an existing label is never overwritten", async () => {
+    const w = install({ labels: ["fleet-internal"], repoLabels: ["fleet-internal", "candidate", "box", "needs-human"] }); // no automerge:code-fix
+    await sweep();
+    const creates = w.callsMatching("label create");
+    expect(creates).toHaveLength(1);
+    expect(creates[0][3]).toBe(CODE_FIX_MERGE_LABEL);
+    expect(creates[0]).not.toContain("--force"); // a label a repo already curates is not overwritten
+    expect(w.labelAddAttempts()).toEqual([CODE_FIX_MERGE_LABEL, "candidate", "box"]);
+
+    const w2 = install({ labels: ["fleet-internal"] }); // label exists
+    await sweep();
+    expect(w2.callsMatching("label create")).toHaveLength(0);
+  });
+
+  it("FAIL-CLOSED: if the filter label cannot be written, NO vote is spent, NEITHER merge-authorizing label is written, and nothing merges", async () => {
+    const w = install({ labels: ["fleet-internal"] });
+    w.failLabelAdd = CODE_FIX_MERGE_LABEL;
+    await sweep();
+    expect(w.labelAddAttempts()).toEqual([CODE_FIX_MERGE_LABEL]); // the one attempt; no candidate, no box
+    expect(w.labels).toEqual(["fleet-internal"]);
+    expect(reviewCreate).not.toHaveBeenCalled();
+    expect(w.checkPosts("crew-qualified")).toHaveLength(0);
+    expect(w.mergeCalls()).toHaveLength(0);
+    expect(receipts().some((r) => r.includes("leg=tripwire-label") && r.includes("FAILED"))).toBe(true);
     await sweep(); // and a second sweep cannot merge what was never boxed
-    expect(merges()).toHaveLength(0);
+    expect(w.mergeCalls()).toHaveLength(0);
   });
 
   it("MERGE INSTANT: a bot-boxed crew PR that LACKS the label gets it written and does NOT merge that cycle; the next sweep merges with it", async () => {
-    install({ labels: ["fleet-internal", "candidate", "box"], boxActor: "bot" }, REPO);
+    const w = botBoxed({ withLabel: false });
     await sweep();
-    expect(merges()).toHaveLength(0);
-    expect(labelAdds()).toEqual([CODE_FIX_MERGE_LABEL]);
-    const r = receipts().find((l) => l.includes("leg=box"));
-    expect(r).toContain("tripwire-label-missing");
+    expect(w.mergeCalls()).toHaveLength(0);
+    expect(w.labelAddAttempts()).toEqual([CODE_FIX_MERGE_LABEL]);
+    expect(receipts().find((l) => l.includes("leg=tripwire-label"))).toContain("tripwire-label-missing");
     await sweep();
-    expect(merges()).toHaveLength(1);
-    expect(world.mergedWithLabels[0]).toContain(CODE_FIX_MERGE_LABEL);
+    expect(w.mergeCalls()).toHaveLength(1);
+    expect(w.merges[0].labels).toContain(CODE_FIX_MERGE_LABEL);
   });
 
   it("MERGE INSTANT, FAIL-CLOSED: label missing and the write fails → no merge (an unwatched unattended merge is refused)", async () => {
-    install({ labels: ["fleet-internal", "candidate", "box"], boxActor: "bot", failLabel: CODE_FIX_MERGE_LABEL }, REPO);
+    const w = botBoxed({ withLabel: false });
+    w.failLabelAdd = CODE_FIX_MERGE_LABEL;
     await sweep();
-    expect(merges()).toHaveLength(0);
-    expect(receipts().find((l) => l.includes("leg=box"))).toContain("FAILED");
+    expect(w.mergeCalls()).toHaveLength(0);
+    expect(receipts().find((l) => l.includes("leg=tripwire-label"))).toContain("FAILED");
   });
 
   it("SCOPE: Kevin's OWN box is attended — a crew PR he boxes merges without the gate writing the filter label", async () => {
-    install({ labels: ["fleet-internal", "candidate", "box"], boxActor: "kevin" }, REPO);
+    const w = install({ labels: ["fleet-internal", "candidate", "box"], boxBy: "kevin", baseBehind: FRESH });
     await sweep();
-    expect(merges()).toHaveLength(1);
-    expect(labelAdds()).toEqual([]);
+    expect(w.mergeCalls()).toHaveLength(1);
+    expect(w.labelAddAttempts()).toEqual([]);
   });
 
   it("SCOPE: a plain human PR (no fleet-internal) with Kevin's box is untouched", async () => {
-    install({ labels: ["box"], boxActor: "kevin" }, REPO);
+    const w = install({ labels: ["box"], boxBy: "kevin", baseBehind: FRESH });
     await sweep();
-    expect(merges()).toHaveLength(1);
-    expect(labelAdds()).toEqual([]);
+    expect(w.mergeCalls()).toHaveLength(1);
+    expect(w.labelAddAttempts()).toEqual([]);
+  });
+});
+
+describe("crew PRs that resolve the fleet-internal class merge DIRECTLY — they carry the label too (review F1/F2)", () => {
+  const OUTSIDE_GLOBS = { labels: ["fleet-internal"], files: ["tools/helper.ts"], baseBehind: FRESH };
+
+  it("END TO END: sweep 1 writes the label and HOLDS (no merge in the cycle that wrote it); sweep 2 merges directly, carrying the label", async () => {
+    const w = install(OUTSIDE_GLOBS);
+    await sweep();
+    expect(w.labelAddAttempts()).toEqual([CODE_FIX_MERGE_LABEL]); // no candidate / box on this route
+    expect(w.mergeCalls()).toHaveLength(0);
+    expect(receipts().some((r) => r.includes("class=fleet-internal") && r.includes("leg=tripwire-label"))).toBe(true);
+    expect(reviewCreate).not.toHaveBeenCalled(); // the label step is before the vote: held cycles spend nothing
+
+    await sweep();
+    expect(w.mergeCalls()).toHaveLength(1);
+    expect(w.merges[0].labels).toContain(CODE_FIX_MERGE_LABEL);
+    expect(filterMatches(documentedCallerFilter(), w.merges[0].labels)).toBe(true);
+    expect(receipts().some((r) => r.includes("class=fleet-internal") && r.includes("verdict=qualified"))).toBe(true);
+  });
+
+  it("FAIL-CLOSED: a failed label write refuses the direct merge, now and on every later sweep, and spends no vote", async () => {
+    const w = install(OUTSIDE_GLOBS);
+    w.failLabelAdd = CODE_FIX_MERGE_LABEL;
+    await sweep();
+    await sweep();
+    expect(w.mergeCalls()).toHaveLength(0);
+    expect(reviewCreate).not.toHaveBeenCalled();
+    expect(receipts().filter((r) => r.includes("leg=tripwire-label") && r.includes("FAILED"))).toHaveLength(2);
+  });
+
+  it("SCOPE: Kevin's lane (bugsquasher + fleet-internal) is Kevin's cap and Kevin's route — no filter label is written for it by this leg", async () => {
+    const w = install({ labels: ["fleet-internal", "bugsquasher"], files: ["tools/helper.ts"], baseBehind: FRESH });
+    await sweep();
+    expect(w.labelAddAttempts().filter((l) => l === CODE_FIX_MERGE_LABEL)).toEqual([]);
   });
 });
 
 describe("crew route (train-class repo) — the same label rides the train block and the train door", () => {
   it("train block: a qualifying CREW code-fix gets the filter label first, then candidate + box", async () => {
-    install({ labels: ["fleet-internal"] }, TRAIN_REPO);
+    const w = install({ labels: ["fleet-internal"] }, TRAIN_REPO);
     await evaluate(TRAIN_REPO, PR, ["code-fix"], [], ["src/**"], ["ci"], []);
-    expect(labelAdds()).toEqual([CODE_FIX_MERGE_LABEL, "candidate", "box"]);
+    expect(w.labelAddAttempts()).toEqual([CODE_FIX_MERGE_LABEL, "candidate", "box"]);
   });
 
-  it("train block SCOPE: Kevin's bugsquasher lane is unchanged — candidate + box only, no filter label", async () => {
-    install({ labels: ["bugsquasher"] }, TRAIN_REPO);
+  it("train block SCOPE: Kevin's bugsquasher lane is unchanged — candidate + box only, no filter label, no qualification check", async () => {
+    const w = install({ labels: ["bugsquasher"] }, TRAIN_REPO);
     await evaluate(TRAIN_REPO, PR, ["code-fix"], [], ["src/**"], ["ci"], []);
-    expect(labelAdds()).toEqual(["candidate", "box"]);
+    expect(w.labelAddAttempts()).toEqual(["candidate", "box"]);
+    expect(w.checkPosts()).toHaveLength(0);
   });
 
   it("train block FAIL-CLOSED: filter-label write fails → no candidate, no box", async () => {
-    install({ labels: ["fleet-internal"], failLabel: CODE_FIX_MERGE_LABEL }, TRAIN_REPO);
+    const w = install({ labels: ["fleet-internal"] }, TRAIN_REPO);
+    w.failLabelAdd = CODE_FIX_MERGE_LABEL;
     await evaluate(TRAIN_REPO, PR, ["code-fix"], [], ["src/**"], ["ci"], []);
-    expect(labelAdds()).toEqual([CODE_FIX_MERGE_LABEL]);
-    expect(world.labels).toEqual(["fleet-internal"]);
+    expect(w.labelAddAttempts()).toEqual([CODE_FIX_MERGE_LABEL]);
+    expect(w.labels).toEqual(["fleet-internal"]);
   });
 
   it("train door: a bot-boxed crew PR lacking the label is refused with the label written; the next pass merges with it", async () => {
-    install({ labels: ["fleet-internal", "candidate", "box"], boxActor: "bot" }, TRAIN_REPO);
+    const w = botBoxed({ withLabel: false, repo: TRAIN_REPO });
     const first = await evaluateTrainReady(TRAIN_REPO, PR, { door: null });
     expect(first.outcome).toBe("refused");
     expect(first.detail).toContain("tripwire-label-missing");
-    expect(merges()).toHaveLength(0);
-    expect(labelAdds()).toEqual([CODE_FIX_MERGE_LABEL]);
+    expect(w.mergeCalls()).toHaveLength(0);
+    expect(w.labelAddAttempts()).toEqual([CODE_FIX_MERGE_LABEL]);
     const second = await evaluateTrainReady(TRAIN_REPO, PR, { door: null });
     expect(second.outcome).toBe("merged");
-    expect(world.mergedWithLabels[0]).toContain(CODE_FIX_MERGE_LABEL);
+    expect(w.merges[0].labels).toContain(CODE_FIX_MERGE_LABEL);
   });
 
   it("train door SCOPE: Kevin's box on a crew PR is attended — merges, no filter-label write", async () => {
-    install({ labels: ["fleet-internal", "box"], boxActor: "kevin" }, TRAIN_REPO);
+    const w = install({ labels: ["fleet-internal", "box"], boxBy: "kevin", baseBehind: FRESH }, TRAIN_REPO);
     const res = await evaluateTrainReady(TRAIN_REPO, PR, { door: null });
     expect(res.outcome).toBe("merged");
-    expect(labelAdds()).toEqual([]);
+    expect(w.labelAddAttempts()).toEqual([]);
   });
 
   it("train door SCOPE: a human PR with Kevin's box is untouched", async () => {
-    install({ labels: ["box"], boxActor: "kevin" }, TRAIN_REPO);
+    const w = install({ labels: ["box"], boxBy: "kevin", baseBehind: FRESH }, TRAIN_REPO);
     const res = await evaluateTrainReady(TRAIN_REPO, PR, { door: null });
     expect(res.outcome).toBe("merged");
-    expect(labelAdds()).toEqual([]);
+    expect(w.labelAddAttempts()).toEqual([]);
   });
 });

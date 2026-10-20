@@ -72,6 +72,11 @@ export interface Ticket {
    * but not enforced here — orderQueue treats it uniformly and lets the worker choose whether to
    * ever set it true for a non-client-asthetik ticket. */
   consolidate: boolean;
+  /** Stint #928: the login that applied the authorizing `box` (the authorized verdict's
+   * `authorizingEvent.actorLogin`). Optional — a ticket built before this field existed carries
+   * none, and the train's crew guard then fails CLOSED (treats the box as the gate's own, whose
+   * unattended merge needs the strictest checks). */
+  authorizingActor?: string;
 }
 
 export type QueueEntry =

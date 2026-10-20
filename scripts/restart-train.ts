@@ -169,6 +169,7 @@ import {
   postAuthorityReceipt,
   formatStaleLabelRemovalReceipt,
   hasAuthoritySnapshotDrifted,
+  GATE_AUTHORITY_LOGIN,
   type AuthoritySnapshot,
   type AuthorityTimelineItem,
   type StaleLabelAuthorityVerdict,
@@ -197,7 +198,8 @@ import {
   type WorkflowJobLike,
   type WorkflowRunLike,
 } from "./lib/restart-train-fire.js";
-import { isRollupClean, evaluateMergeReadiness, type RollupItem } from "./lib/automerge-classify.js";
+import { isRollupClean, evaluateMergeReadiness, isCrewPr, type RollupItem } from "./lib/automerge-classify.js";
+import { authorizeAcrossGateRebase, crewMergeDoorGuard } from "./lib/crew-merge-guards.js";
 import { loadTrainSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
 import { parseArgs, parseTarget, CALENDAR_REPO, CALENDAR_ISSUE, type Flags } from "./lib/restart-train-args.js";
 
@@ -452,7 +454,7 @@ async function fetchCalendarComments(): Promise<RestartTrainComment[]> {
  * single PR's timeline being unreadable this tick is exactly the kind of ambiguous-input case
  * this worker resolves toward exclusion, not toward killing every other repo's tickets too.
  */
-async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
+export async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
   const tickets: Ticket[] = [];
   const authorityLogins = resolveAuthorityLogins();
   for (const repo of TICKET_REPOS) {
@@ -472,14 +474,14 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
           "--state",
           "open",
           "--json",
-          "number,headRefOid,labels",
+          "number,headRefOid,labels,baseRefName",
           "--limit",
           "50",
         ]),
       );
-      const seen = new Map<number, { number: number; headRefOid: string; labels: Array<{ name: string }> }>();
+      const seen = new Map<number, { number: number; headRefOid: string; labels: Array<{ name: string }>; baseRefName?: string }>();
       for (const out of lists) {
-        for (const row of JSON.parse(out) as Array<{ number: number; headRefOid: string; labels: Array<{ name: string }> }>) {
+        for (const row of JSON.parse(out) as Array<{ number: number; headRefOid: string; labels: Array<{ name: string }>; baseRefName?: string }>) {
           if (!seen.has(row.number)) seen.set(row.number, row);
         }
       }
@@ -491,6 +493,7 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
       number: number;
       headRefOid: string;
       labels: Array<{ name: string }>;
+      baseRefName?: string;
     }>;
     for (const pr of prs) {
       const currentLabels = pr.labels.map((l) => l.name);
@@ -506,12 +509,17 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
         continue;
       }
 
-      const verdict = evaluateLabelAuthority({
+      const authorityInput = {
         currentLabels,
         timeline: timelineResult.timeline,
         authorityLogins,
         truncated: timelineResult.truncated,
-      });
+      };
+      // Stint #928: for a CREW PR, Kevin's box survives the gate's OWN update-branch merge commit (and
+      // nothing else after the label) — see lib/crew-merge-guards.ts `authorizeAcrossGateRebase`.
+      const verdict = isCrewPr(currentLabels)
+        ? authorizeAcrossGateRebase(authorityInput, { repo, headOid: pr.headRefOid, baseRefName: pr.baseRefName ?? "main" })
+        : evaluateLabelAuthority(authorityInput);
 
       if (!verdict.authorized) {
         if (verdict.reason === "stale-label") {
@@ -581,6 +589,7 @@ async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
         currentHeadSha: pr.headRefOid,
         afterTokens: parseTrainAfterTokens(comments),
         consolidate: hasTrainConsolidate(comments),
+        authorizingActor: verdict.authorizingEvent.actorLogin,
       });
     }
   }
@@ -689,6 +698,8 @@ async function fetchQueueHeadRollup(
   title: string;
   labels: Array<{ name: string }>;
   headRefOid: string;
+  baseRefName: string;
+  files: Array<{ path: string }>;
 }> {
   let out: string;
   try {
@@ -699,7 +710,7 @@ async function fetchQueueHeadRollup(
       "--repo",
       repo,
       "--json",
-      "state,isDraft,mergeStateStatus,statusCheckRollup,title,labels,headRefOid",
+      "state,isDraft,mergeStateStatus,statusCheckRollup,title,labels,headRefOid,baseRefName,files",
     ]);
   } catch (err) {
     throw classifyReadError(err, "pull_requests:read (queue-head rollup check)");
@@ -712,6 +723,8 @@ async function fetchQueueHeadRollup(
     title: string;
     labels: Array<{ name: string }>;
     headRefOid: string;
+    baseRefName: string;
+    files: Array<{ path: string }>;
   };
 }
 
@@ -917,7 +930,7 @@ async function maybePage(
  *   - START receipts are log-on-failure — same reason: a merged PR can't re-fire, so a missed
  *     START line costs one ledger entry, never a duplicate merge.
  */
-async function fireQueueHead(
+export async function fireQueueHead(
   target: { repo: string; number: number },
   ticket: Ticket,
   prView: Awaited<ReturnType<typeof fetchQueueHeadRollup>>,
@@ -966,6 +979,35 @@ async function fireQueueHead(
       `[restart-train] --fire: ${ticket.repo}#${ticket.number} authority snapshot drifted between gate-check and fire — aborting (no same-cycle retry; next cycle re-evaluates from scratch)`,
     );
     return;
+  }
+
+  // ── Crew door guard (stint #928, review F6/F8): studiob's REAL box door. The fleet sweep never routes
+  // studiob box PRs to the gate (squasher-fleet-sweep.yml sets owns_box=false for studiob), so the guards
+  // the gate runs at its own doors had to run HERE too, or "box or no box" stopped at the fleet sweep.
+  // Non-crew PRs pass untouched. For a CREW ticket, before the merge (lib/crew-merge-guards.ts):
+  //   - the gate's OWN bot box is declined while `needs-human` stands, or on a head that does not carry
+  //     the `crew-qualified` App check run (a crew push around the box write — F3/F4);
+  //   - the stale-base re-run, box or no box (Kevin 9/27): a stale ticket is rebased (update-branch) and
+  //     NOT merged this tick; Kevin's own box survives the gate's merge commit (fetchTickets above),
+  //     a crew push still voids it;
+  //   - the bot's unattended merge carries `automerge:code-fix` (written + this tick held when missing).
+  // Anything but `proceed` = no merge this tick; the next tick re-reads the ticket from scratch.
+  if (isCrewPr(after.labels)) {
+    const door = crewMergeDoorGuard({
+      repo: ticket.repo,
+      pr: ticket.number,
+      labels: after.labels,
+      headRefOid: ticket.pinnedHeadSha,
+      baseRefName: prView.baseRefName,
+      files: prView.files,
+      // A ticket that names no authorizing actor is treated as the gate's own (the strictest checks).
+      authorizingActor: ticket.authorizingActor ?? GATE_AUTHORITY_LOGIN,
+    });
+    if (door.action !== "proceed") {
+      const why = door.action === "decline" ? door.detail : door.reasons.join("; ");
+      console.log(`[restart-train] --fire: ${ticket.repo}#${ticket.number} crew guard (${door.kind}) — NOT merging this tick: ${why}`);
+      return;
+    }
   }
 
   if (!post) {
@@ -1704,7 +1746,12 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error(`restart-train FAILED: ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+// Test hook (stint #928): vitest imports this module to drive `fireQueueHead`; importing must NOT run
+// `main()` (it would parse the test runner's argv and exit the worker). The env-var guard keeps the
+// production path byte-identical — the heritage-restart-train workflow never sets it.
+if (!process.env.RESTART_TRAIN_NO_MAIN) {
+  main().catch((err) => {
+    console.error(`restart-train FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });
+}

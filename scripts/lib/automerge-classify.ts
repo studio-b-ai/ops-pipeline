@@ -454,9 +454,19 @@ const CODE_FIX_LINE_CAP = 1500; // 2026-09-13 (Kevin 'go', door pens): 800 → 1
 // same guardrails (CI green, review 2-of-3 CLEAN, safe_path_globs, denylist, named
 // checks) at a tighter 200-line cap so the second-model reviewer reads a small,
 // self-contained diff. Kevin-authored code-fix PRs (`bugsquasher`) keep the 1500-line
-// cap unchanged. Over-200 crew diffs fall through to the fleet-internal class
-// (denylist-only, no named-checks), not to "wait" — the fleet-internal class was
-// already handling them before this cap existed.
+// cap unchanged.
+//
+// An over-200 crew diff whose SHAPE fits code-fix (inside the repo's safe_path_globs,
+// no denylist hit) is REFUSED — `classifyPrDiffClass` returns prClass null with
+// failureLeg "line-cap" — and is NEVER handed to the fleet-internal class. (An earlier
+// draft of this comment said the opposite, that fleet-internal "was already handling
+// them"; that was false and the behavior it described was a regression: on main the same
+// PR resolved to code-fix at the 1500 cap and got the post-merge tripwire's label, while
+// the fleet-internal class has no line cap and no tripwire label at all, so the "cap"
+// only re-routed bigger PRs to an uncapped, unwatched merge. Review of #580 at a9b614c,
+// finding F1.) Kevin's `box` still opens an over-cap crew PR (the line-cap card says so).
+// Crew PRs whose shape does NOT fit code-fix at all (outside the globs, or no globs) are
+// the fleet-internal class's business, unchanged.
 const CREW_CODE_FIX_LINE_CAP = 200;
 
 /**
@@ -467,6 +477,22 @@ const CREW_CODE_FIX_LINE_CAP = 200;
  */
 export function isCrewPr(labels: readonly string[] | undefined): boolean {
   return labels !== undefined && labels.includes(FLEET_INTERNAL_LABEL) && !labels.includes(BUGSQUASHER_LABEL);
+}
+
+/**
+ * Stint #928 (review F2/F4): a CREW code-fix PR that already carries `needs-human` is a
+ * human's decision — a blue card or a human ask is open on it — and the gate must neither
+ * write the bot `box` on it nor re-run a vote on it. (The fleet-internal class already
+ * refuses on `needs-human`, see gateDecisionForClass; code-fix did not, so a flagged crew
+ * code-fix PR whose head moved reached the bot-box route with the card still standing.)
+ * Only Kevin's own `box` opens it. Returns the refusal reason, or null when the rule does
+ * not apply. Deliberately NOT inside `gateDecisionForClass`: the post-merge tripwire calls
+ * that function to re-derive a merged PR, and a Kevin-boxed (attended) crew PR still
+ * carrying `needs-human` must not lose its health window because of this rule.
+ */
+export function crewNeedsHumanRefusal(prClass: PrDiffClass, labels: readonly string[]): string | null {
+  if (prClass !== "code-fix" || !isCrewPr(labels) || !labels.includes(NEEDS_HUMAN_LABEL)) return null;
+  return `'${NEEDS_HUMAN_LABEL}' is present on a crew code-fix PR — the PR is already a human's decision; the gate writes no bot box and runs no vote on it, only Kevin's 'box' opens it`;
 }
 
 // ───────────────────────────── stale-base re-run (stint #928, Kevin 9/27) ─────────────────────────────
@@ -1041,8 +1067,13 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
   // on every legacy missed-PR comment. A caller that DID supply globs which all
   // trim to nothing still gets the inert-reason diagnostic (opt-in-but-broken),
   // and the runner's [config] note covers the enabled-with-zero-globs case.
+  let crewOverCap = false;
   if (safePathGlobs && safePathGlobs.length > 0) {
-    candidates.push(evalCodeFix(files, totalChangedLines, safePathGlobs, additions, isCrew));
+    const codeFix = evalCodeFix(files, totalChangedLines, safePathGlobs, additions, isCrew);
+    candidates.push(codeFix);
+    // A crew diff that fits code-fix's SHAPE but busts the 200-line crew cap is refused outright
+    // (F1): the fleet-internal candidate below must not pick it up (it has no line cap).
+    crewOverCap = isCrew && codeFix.shapeOk && !codeFix.lineCapOk;
   }
   // Fleet-internal LAST of all (stint #689): the widest class only ever picks up what
   // every narrower, longer-proven class refused, and it joins the candidate set ONLY
@@ -1050,7 +1081,7 @@ export function classifyPrDiffClass(input: ClassifyPrDiffClassInput): ClassifyPr
   // input shape as code-fix's globs, so a caller that never passes labels (or a PR
   // without the label) gets byte-identical receipts, with no "fleet-internal:" reason
   // lines appearing on their missed-PR telemetry.
-  if (labels && labels.includes(FLEET_INTERNAL_LABEL)) {
+  if (labels && labels.includes(FLEET_INTERNAL_LABEL) && !crewOverCap) {
     candidates.push(evalFleetInternal(files));
   }
 
