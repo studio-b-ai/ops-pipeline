@@ -79,6 +79,10 @@
  *      review in `evaluate()`, and again at the `box` override and the restart-train
  *      door (a box does not skip it). An unreadable base is refused, never fresh.
  *      See the "stale-base re-run leg" section below.
+ *      Crew merges are also made visible to the post-merge 5xx tripwire: the crew
+ *      route writes the existing `automerge:code-fix` label (the caller-side filter
+ *      key) BEFORE `candidate`/`box`, fail-closed, and the bot-box merge doors
+ *      re-check it at the merge instant (`ensureTripwireLabel`).
  *
  * Cost discipline: legs 2-5 are cheap (already-fetched PR metadata + a diff parse)
  * and are evaluated BEFORE the paid Anthropic API call. If any of them already fail,
@@ -188,7 +192,11 @@ const REVIEW_QUALIFIED_VOTES = 2; // 2-of-3 (ops#371, Kevin "widen" 2026-09-09)
 // server state). TRAIN_CANDIDATE_LABEL is what a fully-passing code-fix gets in a
 // TRAIN-class repo instead of a merge — the human `queued` authority (rung A1)
 // owns the merge decision from there.
-const CODE_FIX_MERGE_LABEL = "automerge:code-fix";
+// Exported (stint #928) so the crew-route tests can pair it with the tripwire's caller-side filter: the
+// filter is a `contains(github.event.pull_request.labels.*.name, 'automerge:code-fix')` expression in each
+// CALLER repo's workflow (today: studio-b-ai/radio's post-merge-tripwire-caller.yml; documented in
+// post-merge-tripwire.yml's header), so this string is the contract between the two repos.
+export const CODE_FIX_MERGE_LABEL = "automerge:code-fix";
 // Kevin's 2026-09-02 one-vocabulary rename: train:candidate → candidate (label-authority.ts).
 const TRAIN_CANDIDATE_LABEL = "candidate";
 const BUGSQUASHER_LABEL = "bugsquasher";
@@ -825,6 +833,28 @@ function commentOncePerMarker(repo: string, pr: number, marker: string, body: st
   }
 }
 
+/**
+ * Stint #928 (post-#580 review): every UNATTENDED crew merge must be visible to the post-merge 5xx
+ * tripwire, whose caller-side filter keys on `automerge:code-fix`. The standard code-fix route writes
+ * that label itself before its direct merge; the crew route merges LATER, through the gate's own bot
+ * `box`, so the label is written at QUALIFICATION time instead — hours before the merge sweep, with no
+ * revalidate in the same run, so the label-wakes-CI → regress → remove → wake loop (bolt-wms#2120) has
+ * no removal half to run on. Idempotent: a label already present is not re-written (GitHub emits no event
+ * for a no-op add, and the flap guard counts adds). The label carries ZERO authority (the tripwire
+ * re-derives its own verdict), so writing it at the merge leg for a bot-boxed crew PR the gate already
+ * qualified grants nothing. NEVER throws: `ok:false` means the caller must NOT authorize a merge — an
+ * unmerged PR beats an unwatched one.
+ */
+function ensureTripwireLabel(repo: string, pr: number, labels: readonly string[]): { ok: true; wrote: boolean } | { ok: false; error: string } {
+  if (labels.includes(CODE_FIX_MERGE_LABEL)) return { ok: true, wrote: false };
+  try {
+    addLabel(repo, pr, CODE_FIX_MERGE_LABEL);
+    return { ok: true, wrote: true };
+  } catch (err) {
+    return { ok: false, error: (err instanceof Error ? err.message : String(err)).split("\n")[0] };
+  }
+}
+
 export type StaleBaseGuardResult =
   | { action: "proceed" }
   /** Anything but `proceed` means the caller must NOT merge or label this cycle. */
@@ -1373,6 +1403,19 @@ export async function evaluate(
       console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "head-moved", reasons: [`reviewed ${prJson.headRefOid}, now ${headNow}`] }));
       return;
     }
+    // Crew PRs only (Kevin's `bugsquasher` lane is unchanged): the gate's bot `queued` makes the train's
+    // merge unattended, so the tripwire's filter label is written first, fail-closed (stint #928).
+    if (isCrewPr(labels)) {
+      const tripwire = ensureTripwireLabel(repo, pr, labels);
+      if (!tripwire.ok) {
+        console.log(
+          `[no-op] pr-automerge-gate ${repo}#${pr}: crew code-fix passed every leg but applying '${CODE_FIX_MERGE_LABEL}' FAILED — ` +
+            `'${TRAIN_CANDIDATE_LABEL}'/'${QUEUED_LABEL}' NOT written (an unwatched unattended merge is refused). ` +
+            `Not retried this run (Rules #109/#161). Underlying error: ${tripwire.error}`,
+        );
+        return;
+      }
+    }
     try {
       addLabel(repo, pr, TRAIN_CANDIDATE_LABEL);
       if (gateQueues) addLabel(repo, pr, QUEUED_LABEL);
@@ -1418,8 +1461,9 @@ export async function evaluate(
   // IS the unattended merge Kevin approved, every leg having just passed (CI green,
   // review 2-of-3 CLEAN, no sensitive path, under the 200-line crew cap, base fresh).
   // `hold` parks it; a head move, a CI regression or a stale base (rebased + CI re-run
-  // first, box or no box) voids it. (This route writes no `automerge:code-fix` B2
-  // tripwire label — see the PR #580 body's open finding.)
+  // first, box or no box) voids it. The route writes the `automerge:code-fix` B2 tripwire
+  // label FIRST (ensureTripwireLabel), so the unattended merge is visible to the post-merge
+  // 5xx tripwire's caller-side filter; the box override re-checks it at merge time.
   const isCrewCodeFix = prClass === "code-fix" && isCrewPr(labels);
   if (isCrewCodeFix) {
     const headNow = gh(["pr", "view", String(pr), "--repo", repo, "--json", "headRefOid", "--jq", ".headRefOid"]).trim();
@@ -1429,6 +1473,17 @@ export async function evaluate(
           `now ${headNow}) — no labels written; the next scheduled run re-evaluates.`,
       );
       console.log(formatGateReceiptLine({ repo, pr, prClass, verdict: "missed", leg: "head-moved", reasons: [`reviewed ${prJson.headRefOid}, now ${headNow}`] }));
+      return;
+    }
+    // The tripwire's filter label goes FIRST: if it cannot be written, the merge-authorizing labels are
+    // NOT written either — an unmerged PR beats an unwatched unattended merge.
+    const tripwire = ensureTripwireLabel(repo, pr, labels);
+    if (!tripwire.ok) {
+      console.log(
+        `[no-op] pr-automerge-gate ${repo}#${pr}: crew code-fix passed every leg but applying '${CODE_FIX_MERGE_LABEL}' FAILED — ` +
+          `'${TRAIN_CANDIDATE_LABEL}'/'${QUEUED_LABEL}' NOT written (the post-merge tripwire filters on it; an unwatched unattended ` +
+          `merge is refused). Not retried this run (Rules #109/#161). Underlying error: ${tripwire.error}`,
+      );
       return;
     }
     try {
@@ -1449,8 +1504,9 @@ export async function evaluate(
         `**squasher auto-merge gate — CREW CODE-FIX CANDIDATE** (class: \`code-fix\`; stint #928)`,
         "",
         `Every gate leg passed (shape, crew line cap 200, safe_path_globs, built-in denylist, ` +
-          `named checks, stale-base, independent review 2-of-3 CLEAN). Applied \`${TRAIN_CANDIDATE_LABEL}\` and ` +
-          `\`${QUEUED_LABEL}\` (the gate's own fleet-bot key — honored only for \`fleet-internal\` + \`candidate\`); ` +
+          `named checks, stale-base, independent review 2-of-3 CLEAN). Applied \`${CODE_FIX_MERGE_LABEL}\` (the post-merge ` +
+          `tripwire's filter), \`${TRAIN_CANDIDATE_LABEL}\` and \`${QUEUED_LABEL}\` (the gate's own fleet-bot key — honored ` +
+          `only for \`fleet-internal\` + \`candidate\`); ` +
           `the next sweep merges this head, sha-pinned, unless the head moves, CI regresses, the base goes stale ` +
           `(rebased and CI re-run first, box or no box), or a human applies \`${HOLD_LABEL}\` (Rule #279, stint #928).`,
         "",
@@ -1852,6 +1908,22 @@ async function evaluateQueuedOverride(repo: string, pr: number, prJson: PrJson, 
       }
     }
 
+    // ── Tripwire visibility (stint #928): an UNATTENDED crew merge — the box is the gate's own bot key —
+    //    must carry the label the post-merge tripwire's caller-side filter watches. The qualification
+    //    step writes it first; this re-checks at the merge instant (a removed label, a PR qualified before
+    //    this leg existed). Missing → write it and abort THIS cycle with no merge: the write wakes
+    //    label-triggered checks, and the next sweep (new fingerprint) merges once they settle. Kevin's own
+    //    box is attended and untouched. ──
+    if (isCrewPr(labels) && isGateAuthorizedActor(verdict.authorizingEvent.actorLogin, labels) && !labels.includes(CODE_FIX_MERGE_LABEL)) {
+      const tripwire = ensureTripwireLabel(repo, pr, labels);
+      const reason = tripwire.ok
+        ? `tripwire-label-missing: the bot-boxed crew PR lacked '${CODE_FIX_MERGE_LABEL}' (the post-merge tripwire's filter) — written; no merge this cycle, the next sweep merges`
+        : `tripwire-label-missing: the bot-boxed crew PR lacks '${CODE_FIX_MERGE_LABEL}' and writing it FAILED (${tripwire.error}) — no merge (an unwatched unattended merge is refused)`;
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: queued: ${reason}`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "box", reasons: [reason] }));
+      return "abort-cycle";
+    }
+
     // ── Revalidate (train shape): snapshot drift, then a fresh authority re-evaluation ──
     const before: AuthoritySnapshot = { labels, headRefOid: prJson.headRefOid, state: prJson.state, mergeStateStatus: prJson.mergeStateStatus };
     let revalidatePr = fetchPr(repo, pr);
@@ -2236,6 +2308,19 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
       logTrainGateLine(repo, pr, "refused", detail);
       return { outcome: "refused", detail };
     }
+  }
+
+  // ── Tripwire visibility (stint #928): the train's merge of a crew PR on the gate's OWN bot `box` is
+  // unattended, so the PR must carry the label the post-merge tripwire's caller-side filter watches (written
+  // at qualification; re-checked here at the merge instant — see the same leg in evaluateQueuedOverride).
+  // Missing → write it and refuse THIS cycle; a later sweep merges. Kevin's own box is attended, untouched.
+  if (isCrewPr(currentLabels) && isGateAuthorizedActor(verdict.authorizingEvent.actorLogin, currentLabels) && !currentLabels.includes(CODE_FIX_MERGE_LABEL)) {
+    const tripwire = ensureTripwireLabel(repo, pr, currentLabels);
+    const detail = tripwire.ok
+      ? `tripwire-label-missing: the bot-boxed crew PR lacked '${CODE_FIX_MERGE_LABEL}' (the post-merge tripwire's filter) — written; refused this cycle, a later sweep merges`
+      : `tripwire-label-missing: the bot-boxed crew PR lacks '${CODE_FIX_MERGE_LABEL}' and writing it FAILED (${tripwire.error}) — refused (an unwatched unattended merge)`;
+    logTrainGateLine(repo, pr, "refused", detail);
+    return { outcome: "refused", detail };
   }
 
   // TODO(A2 or later rung): window law (doc §3.1 step 6) — restart-train repos

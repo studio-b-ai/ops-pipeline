@@ -179,7 +179,7 @@ describe("normal legs — a crew code-fix candidate (class code-fix)", () => {
     expect(factsReads()).toHaveLength(1); // the leg really looked
     expect(updateBranches()).toHaveLength(0);
     expect(reviewCreate).toHaveBeenCalledTimes(3); // 2-of-3 vote ran
-    expect(labelAdds()).toEqual(["candidate", "box"]);
+    expect(labelAdds()).toEqual(["automerge:code-fix", "candidate", "box"]); // tripwire filter label first (crew-tripwire-label.test.ts)
     expect(merges()).toHaveLength(0); // the merge is the NEXT sweep's box override
     expect(receipts().some((r) => r.includes("class=code-fix") && r.includes("verdict=candidate"))).toBe(true);
     expect(botComments().join("\n")).not.toContain("Kevin's `box` key"); // #412: the prose names the real signal
@@ -189,7 +189,7 @@ describe("normal legs — a crew code-fix candidate (class code-fix)", () => {
     dispatch({ compare: FRESH_BEHIND_UNRELATED });
     await runEvaluate();
     expect(updateBranches()).toHaveLength(0);
-    expect(labelAdds()).toEqual(["candidate", "box"]);
+    expect(labelAdds()).toEqual(["automerge:code-fix", "candidate", "box"]); // tripwire filter label first (crew-tripwire-label.test.ts)
   });
 
   it("(b) base older than one day (the toto#131 shape, 4 days): refused, update-branch requested ONCE pinned to the head, no review spend, no labels, no merge", async () => {
@@ -261,7 +261,7 @@ describe("normal legs — a crew code-fix candidate (class code-fix)", () => {
   it("(e) at exactly the cap (200 additions) the PR is still a code-fix candidate (boundary control)", async () => {
     dispatch({ compare: FRESH_COMPARE, pr: prView({ additions: 200, deletions: 0 }) });
     await runEvaluate({ enabled: ["code-fix"] });
-    expect(labelAdds()).toEqual(["candidate", "box"]);
+    expect(labelAdds()).toEqual(["automerge:code-fix", "candidate", "box"]); // tripwire filter label first (crew-tripwire-label.test.ts)
   });
 
   it("an over-cap crew PR that DOES resolve the pre-existing fleet-internal class is guarded by the same leg — no unattended merge past a stale base", async () => {
@@ -292,7 +292,7 @@ describe("normal legs — a crew code-fix candidate (class code-fix)", () => {
 
 describe("box or no box — the leg holds on every door that can merge a crew PR (Kevin 9/27)", () => {
   it("the gate's OWN bot box on a candidate with a STALE base: nothing merges, update-branch requested, receipt leg=stale-base", async () => {
-    dispatch({ compare: STALE_AGE_COMPARE, timeline: BOT_BOX, pr: prView({ labels: labelsOf("fleet-internal", "candidate", "box") }) });
+    dispatch({ compare: STALE_AGE_COMPARE, timeline: BOT_BOX, pr: prView({ labels: labelsOf("fleet-internal", "candidate", "box", "automerge:code-fix") }) });
     await runEvaluate();
     expect(merges()).toHaveLength(0);
     expect(updateBranches()).toHaveLength(1);
@@ -309,7 +309,7 @@ describe("box or no box — the leg holds on every door that can merge a crew PR
   });
 
   it("POSITIVE CONTROL: the same bot-boxed candidate with a FRESH base merges, sha-pinned — the leg does not over-block", async () => {
-    dispatch({ compare: FRESH_COMPARE, timeline: BOT_BOX, pr: prView({ labels: labelsOf("fleet-internal", "candidate", "box") }) });
+    dispatch({ compare: FRESH_COMPARE, timeline: BOT_BOX, pr: prView({ labels: labelsOf("fleet-internal", "candidate", "box", "automerge:code-fix") }) });
     await runEvaluate();
     expect(factsReads()).toHaveLength(1);
     expect(updateBranches()).toHaveLength(0);
@@ -391,7 +391,7 @@ describe("the re-run fails or cannot be checked — never merged, returned to th
   });
 
   it("compare UNREADABLE on the box door: the boxed crew PR is NOT merged", async () => {
-    dispatch({ compare: "throw", timeline: BOT_BOX, pr: prView({ labels: labelsOf("fleet-internal", "candidate", "box") }) });
+    dispatch({ compare: "throw", timeline: BOT_BOX, pr: prView({ labels: labelsOf("fleet-internal", "candidate", "box", "automerge:code-fix") }) });
     await runEvaluate();
     expect(merges()).toHaveLength(0);
     expect(updateBranches()).toHaveLength(0);
