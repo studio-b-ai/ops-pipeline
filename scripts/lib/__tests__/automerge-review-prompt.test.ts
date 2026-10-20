@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { BASE_REVIEW_SYSTEM, CODE_FIX_REVIEW_SYSTEM, CREW_CHANGE_REVIEW_SYSTEM, reviewSystemPromptFor } from "../automerge-review-prompt.js";
 import { ALL_PR_DIFF_CLASSES } from "../automerge-classify.js";
+import { createHash } from "node:crypto";
 
 describe("reviewSystemPromptFor", () => {
   // ───── Negative controls first (Rule #322) ─────
@@ -197,5 +198,31 @@ describe("reviewSystemPromptFor — crew rubric (CORRECT / SAFE / SCOPED / PROVE
       expect(reviewSystemPromptFor(c).length).toBeGreaterThan(100);
       expect(reviewSystemPromptFor(c, true).length).toBeGreaterThan(100);
     }
+  });
+});
+
+// ───── golden hashes: every NON-crew prompt is byte-identical to origin/main at the door-policy fork point ─────
+//
+// "Do NOT change the bugsquasher lane." The comparisons above assert the code-fix prompt against the exported
+// constant — which would pass if the constant itself were edited. These hashes were computed from
+// origin/main (130613e) `reviewSystemPromptFor(c)` BEFORE the crew rubric existed. Changing any of these
+// prompts is a deliberate policy act: update the hash in the same PR that says so.
+
+describe("reviewSystemPromptFor — every non-crew prompt is byte-identical to origin/main (golden hashes)", () => {
+  const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+  const MAIN_130613E: Record<string, string> = {
+    "docs-comment": "fd3a515e214664a3a46abf756bf1edba051b1cc17c4c34aa5a65c3b6b3d30cc5",
+    "ci-infra": "fd3a515e214664a3a46abf756bf1edba051b1cc17c4c34aa5a65c3b6b3d30cc5",
+    "test-only": "ed420efc76eb9f31594b0d393f39cfc2ec738bbd9999dc5fb514db43b83c1c03",
+    "vault-doc": "fd3a515e214664a3a46abf756bf1edba051b1cc17c4c34aa5a65c3b6b3d30cc5",
+    "code-fix": "d23856fd4ad0d4f6c971a3d6aea3cd6ed39be17ef4de56f2c28676f31d15dd6d",
+    "fleet-internal": "fd3a515e214664a3a46abf756bf1edba051b1cc17c4c34aa5a65c3b6b3d30cc5",
+  };
+  it.each(Object.keys(MAIN_130613E))("%s (non-crew) hashes to main's", (c) => {
+    expect(sha(reviewSystemPromptFor(c as never))).toBe(MAIN_130613E[c]);
+    expect(sha(reviewSystemPromptFor(c as never, false))).toBe(MAIN_130613E[c]);
+  });
+  it("known-BAD control: the crew rubric does NOT hash to any of them (the oracle can tell the prompts apart)", () => {
+    expect(Object.values(MAIN_130613E)).not.toContain(sha(CREW_CHANGE_REVIEW_SYSTEM));
   });
 });

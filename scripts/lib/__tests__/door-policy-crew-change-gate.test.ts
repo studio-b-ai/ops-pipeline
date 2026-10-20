@@ -327,10 +327,12 @@ describe("the crew-change door — non-crew PRs never get the class", () => {
     expect(receiptLines().at(-1)).toMatch(/verdict=missed leg=class-match/);
   });
 
-  it("a caller whose enabled classes lack crew-change never sees it (acuops/acudev/note-intelligence/client-asthetik shape)", async () => {
+  it("a caller whose enabled classes lack crew-change never sees it (acuops/acudev/note-intelligence/client-asthetik shape) — its receipt does not even MENTION the class", async () => {
     await runGate({ diff: CREW_PR }, { classes: ["docs-comment"] });
     expect(mergeCalls()).toHaveLength(0);
     expect(createMock).not.toHaveBeenCalled();
+    expect(receiptLines().at(-1)).toMatch(/verdict=missed leg=class-match/);
+    expect(receiptLines().at(-1)).not.toContain("crew-change"); // byte-identical receipts for callers that never opted in
   });
 
   it("BUGSQUASHER LANE UNCHANGED: a bugsquasher-only code-fix PR still gets the CODE_FIX rubric and merges as before", async () => {
