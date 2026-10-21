@@ -1,0 +1,207 @@
+name: AI review sweep
+
+# go-native (Kevin 2026-10-21; native-plan §4): the central `studiob-ai-review` check. One sweep reads the open pull requests of the repos in
+# scripts/native/manifest.json (today: toto, SHADOW — at most the 3 most recent PRs, and nothing requires the check yet), derives a verdict per
+# head SHA (deterministic legs + a 3-vote model review; see scripts/ai-review.ts), and posts ONE check run per SHA as the reviewer GitHub App.
+#
+# TWO JOBS, split on purpose:
+#   review  no `environment`, so its OIDC `sub` is the branch form `repo:studio-b-ai/ops-pipeline:ref:refs/heads/main` and matches the Anthropic
+#           WIF rule (anthropic-wif-probe.yml). Reuses ./.github/actions/anthropic-federated-token exactly as the current gate does. Reads the
+#           private repos with a READ-ONLY fleet installation token scoped to the manifest repos. It NEVER sees the reviewer App PEM.
+#   post    `environment: ai-review` (deployment branches: main only) holds REVIEWER_APP_ID / REVIEWER_APP_PRIVATE_KEY. Mints the reviewer token
+#           and posts the check runs. It never calls the model.
+#
+# THIS IS A PUBLIC REPO — its logs and job outputs are public. So:
+#   - the scripts print repo / PR / SHA / verdict enums only (scripts/lib/ai-review-log.ts is the choke point; reasons never reach a log);
+#   - the verdicts, which carry reasons derived from private diffs, cross from `review` to `post` SEALED (AES-256-GCM, key derived with HKDF
+#     from the fleet App key — a secret both jobs can already read — bound to this run). A public job output is only ever ciphertext;
+#   - no `run:` script interpolates an expression (`${{ }}`); every dynamic value reaches the shell through `env:`.
+#
+# UNTIL THE REVIEWER APP EXISTS (REVIEWER_APP_ID absent) `post` logs "reviewer app not configured; nothing posted" and exits 0 without minting a
+# token or calling the API. `review` cannot see environment secrets, so it still derives verdicts in that window (bounded: 3 PRs per repo in shadow).
+# Create the `ai-review` environment (deployment branches: main only) BEFORE this merges: a job that names a missing environment creates it, unrestricted.
+#
+# Triggers. `schedule` is a BACKSTOP only (measured delivery of a `*/5` cron here is ~31%); `repository_dispatch: ai-review` (fleet-pr-open, runner lap
+# end) and `workflow_dispatch` (runner heartbeat) are the prompt paths. The dispatch payload is IGNORED: every fact is re-derived from the API (#398).
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [ai-review]
+  schedule:
+    - cron: "*/10 * * * *"
+
+permissions:
+  contents: read
+
+# one sweep at a time; a queued run waits (never cancelled mid-post). GitHub keeps only the newest pending run, which is fine: every sweep is a full reconcile.
+concurrency:
+  group: ai-review-sweep
+  cancel-in-progress: false
+
+jobs:
+  review:
+    name: "review (model verdicts; no reviewer credentials)"
+    # main only: a dispatch of a branch must never run branch code next to the fleet App key
+    if: github.repository == 'studio-b-ai/ops-pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write   # WIF — the Anthropic federated token (no environment on this job: the sub must stay the branch form)
+    outputs:
+      handoff: ${{ steps.sweep.outputs.handoff }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci
+
+      # `repositories:` MUST be non-empty: an empty value would mint a token for EVERY repo of the installation.
+      - name: Manifest repos
+        id: repos
+        run: |
+          set -euo pipefail
+          names=$(jq -r '[.repos[] | select(.live or .shadow) | .repo | split("/")[1]] | join(",")' scripts/native/manifest.json)
+          if [ -z "$names" ]; then
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "manifest lists no active repo; nothing to review"
+          else
+            echo "active=true" >> "$GITHUB_OUTPUT"
+            echo "names=$names" >> "$GITHUB_OUTPUT"
+          fi
+
+      # read-only, scoped to the manifest repos: pulls, reviews, CODEOWNERS errors, the diff, and the reviewer's earlier check runs
+      - name: Mint read-only fleet token
+        id: mint
+        if: steps.repos.outputs.active == 'true'
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+          repositories: ${{ steps.repos.outputs.names }}
+          permission-contents: read
+          permission-pull-requests: read
+          permission-checks: read
+          permission-metadata: read
+
+      - name: Fail loud if the mint returned nothing
+        if: steps.repos.outputs.active == 'true' && steps.mint.outputs.token == ''
+        run: |
+          echo "::error::Read-only fleet token mint returned an empty token; refusing to sweep."
+          exit 1
+
+      # continue-on-error: if federation is down the sweep must still run, because the deterministic Kevin-waiver leg needs no model
+      # (a fail-closed reviewer must not deadlock its own fix). A PR that needs the model then gets NO verdict (never a success).
+      - name: "Anthropic federated token (keyless, WIF)"
+        if: steps.repos.outputs.active == 'true'
+        continue-on-error: true
+        uses: ./.github/actions/anthropic-federated-token
+        with:
+          rule_id: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          organization_id: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          service_account_id: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          workspace_id: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+
+      - name: Sweep
+        id: sweep
+        if: steps.repos.outputs.active == 'true'
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          AI_REVIEW_HANDOFF_KEY: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+        run: npx tsx ai-review.ts review
+
+  post:
+    name: "post (reviewer App check runs)"
+    needs: review
+    if: github.repository == 'studio-b-ai/ops-pipeline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: ai-review   # REVIEWER_APP_ID + REVIEWER_APP_PRIVATE_KEY live here; deployment branches = main only
+    permissions:
+      contents: read
+    steps:
+      # No expression in this script: the values arrive through env. An App id may be stored as a variable or as a secret.
+      - name: Reviewer app configured?
+        id: cfg
+        env:
+          APP_ID_VAR: ${{ vars.REVIEWER_APP_ID }}
+          APP_ID_SECRET: ${{ secrets.REVIEWER_APP_ID }}
+          APP_KEY: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          app_id="${APP_ID_VAR:-$APP_ID_SECRET}"
+          if [ -z "$app_id" ] || [ -z "$APP_KEY" ]; then
+            echo "reviewer app not configured; nothing posted"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        if: steps.cfg.outputs.configured == 'true'
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        if: steps.cfg.outputs.configured == 'true'
+        working-directory: scripts
+        run: npm ci
+
+      - name: Manifest repos
+        id: repos
+        if: steps.cfg.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          names=$(jq -r '[.repos[] | select(.live or .shadow) | .repo | split("/")[1]] | join(",")' scripts/native/manifest.json)
+          if [ -z "$names" ]; then
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "manifest lists no active repo; nothing to post"
+          else
+            echo "active=true" >> "$GITHUB_OUTPUT"
+            echo "names=$names" >> "$GITHUB_OUTPUT"
+          fi
+
+      # checks:write is the only permission needed to post (and read) check runs; scoped to the manifest repos, never the whole installation
+      - name: Mint reviewer App token
+        id: mint
+        if: steps.cfg.outputs.configured == 'true' && steps.repos.outputs.active == 'true'
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1.12.0
+        with:
+          app-id: ${{ vars.REVIEWER_APP_ID || secrets.REVIEWER_APP_ID }}
+          private-key: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+          repositories: ${{ steps.repos.outputs.names }}
+          permission-checks: write
+          permission-metadata: read
+
+      - name: Fail loud if the mint returned nothing
+        if: steps.cfg.outputs.configured == 'true' && steps.repos.outputs.active == 'true' && steps.mint.outputs.token == ''
+        run: |
+          echo "::error::Reviewer App token mint returned an empty token; refusing to post."
+          exit 1
+
+      - name: Post check runs
+        if: steps.cfg.outputs.configured == 'true' && steps.repos.outputs.active == 'true'
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          REVIEWER_APP_ID: ${{ vars.REVIEWER_APP_ID || secrets.REVIEWER_APP_ID }}
+          AI_REVIEW_HANDOFF_KEY: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          # sealed: ciphertext only (the step's env header is public)
+          AI_REVIEW_HANDOFF: ${{ needs.review.outputs.handoff }}
+        run: npx tsx ai-review.ts post
