@@ -46,6 +46,16 @@ name: box-patch-id (labeled handler)
 # collaborator, or a workflow running with the ambient, widely-triggerable
 # github.token, cannot forge or overwrite it.
 #
+# PR-A2 item 4 (go-native Phase A, Kevin 2026-10-21): the `pull_request:labeled` path RUNS code from the BASE sha and reads the PR
+# head only as DATA. This job mints a full-scope fleet App token, and any identity with `issues:write` can apply `box` — so checking
+# out the PR HEAD and then running its `npm ci` (package-lock install scripts) and `box-patch-id-labeled.ts` handed that token to
+# whoever authored the head. Now: checkout = `pull_request.base.sha` (already-merged code), the head SHA is only `git fetch`ed as an
+# object (mintBoxPatchId runs `merge-base`/`diff`/`patch-id` on explicit shas — it never needs the head checked out), and the
+# head's identity reaches the script as env DATA from the event payload. A test (box-patch-id-labeled-workflow.test.ts) fails if any
+# step on that path checks out a head-derived ref or moves the working tree to it. Residual, see the PR body: the workflow FILE
+# itself comes from the PR merge ref on `pull_request` events — protected by `workflows` permission + CODEOWNERS on `.github/`, not by
+# this change; and the dispatch path below is unchanged (it needs actions:write, and still checks out a same-repo PR's head).
+#
 # BOX_PATCH_ID_KEY (ruling open item: Kevin's hand to mint, not yet created as of this
 # PR) is read straight from the secret store and passed through unchanged when
 # present; when absent, GH_TOKEN's caller reads process.env directly and the patch-id
@@ -168,11 +178,27 @@ jobs:
       # fetch-depth: 0 (full history) is required whenever this checkout IS the
       # analyzed repo: mintBoxPatchId computes `merge-base origin/<baseRef> <headSha>`,
       # which needs both refs' full ancestry, not just the one commit.
-      - name: Checkout full history
-        if: github.event.label.name == 'box' || github.event_name == 'workflow_dispatch'
+      #
+      # PR-A2 item 4: two checkouts, one per path. The pull_request:labeled path checks out the BASE sha (trusted, already-merged code)
+      # and fetches the head as an OBJECT only; the dispatch path keeps its same-repo-head-sha checkout (see the header's residual).
+      - name: Checkout BASE sha, full history (pull_request:labeled path — trusted code only)
+        if: github.event_name == 'pull_request' && github.event.label.name == 'box'
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event.pull_request.head.sha || steps.resolve.outputs.same-repo-head-sha || github.sha }}
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+
+      - name: Fetch the PR head as DATA (object only — never checked out, never executed)
+        if: github.event_name == 'pull_request' && github.event.label.name == 'box'
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: git fetch --no-tags origin "$HEAD_SHA"
+
+      - name: Checkout full history (workflow_dispatch path)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.resolve.outputs.same-repo-head-sha || github.sha }}
           fetch-depth: 0
 
       - if: github.event.label.name == 'box' || github.event_name == 'workflow_dispatch'
