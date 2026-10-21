@@ -1,0 +1,114 @@
+name: Daily Brief Watch
+
+# Stint #436 — the Daily Brief did not post on 9/16 and nothing noticed.
+# This watchdog runs at 12:30Z Mon-Fri, checks if today's brief was posted
+# to Kevin's Slack DM by the cos-brief-worker (8am ET = 12:00Z). On success
+# it records a durable receipt artifact; if the brief is missing it DMs
+# Kevin "Daily Brief missing" via the Slack bot.
+
+on:
+  schedule:
+    - cron: "30 12 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: brief-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: "Brief watch — check if today's brief was posted"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: "Check Kevin's DM for today's Daily Brief"
+        id: check
+        env:
+          SLACK_TOKEN: ${{ secrets.STUDIOB_SLACK_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          TODAY=$(date -u +%Y-%m-%d)
+
+          echo "[brief-watch] checking for daily brief on $TODAY"
+          [ -z "$SLACK_TOKEN" ] && { echo "[brief-watch] no slack token — abort"; exit 1; }
+
+          # 1. Resolve Kevin's Slack user ID by email
+          USER_RESP=$(curl -sS "https://slack.com/api/users.lookupByEmail?email=kevin@bibelhausen.com" \
+            -H "Authorization: Bearer $SLACK_TOKEN")
+          USER_ID=$(echo "$USER_RESP" | jq -r '.user.id')
+          if [ -z "$USER_ID" ] || [ "$USER_ID" = "null" ]; then
+            echo "[brief-watch] FAILED: could not resolve Kevin's Slack user"
+            echo "$USER_RESP" | jq .
+            exit 1
+          fi
+          echo "[brief-watch] resolved Kevin's user ID: $USER_ID"
+
+          # 2. Open the bot↔Kevin DM channel
+          OPEN_RESP=$(curl -sS -X POST https://slack.com/api/conversations.open \
+            -H "Authorization: Bearer $SLACK_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"users\":[\"$USER_ID\"]}")
+          DM_CHANNEL=$(echo "$OPEN_RESP" | jq -r '.channel.id')
+          if [ -z "$DM_CHANNEL" ] || [ "$DM_CHANNEL" = "null" ]; then
+            echo "[brief-watch] FAILED: could not open DM channel"
+            echo "$OPEN_RESP" | jq .
+            exit 1
+          fi
+          echo "[brief-watch] DM channel: $DM_CHANNEL"
+
+          # 3. Scan recent DM history for the brief (posted within last ~26h)
+          HISTORY_RESP=$(curl -sS \
+            "https://slack.com/api/conversations.history?channel=$DM_CHANNEL&limit=25" \
+            -H "Authorization: Bearer $SLACK_TOKEN")
+          HISTORY_OK=$(echo "$HISTORY_RESP" | jq -r '.ok')
+          if [ "$HISTORY_OK" != "true" ]; then
+            echo "[brief-watch] FAILED: conversation history read failed"
+            echo "$HISTORY_RESP" | jq .
+            exit 1
+          fi
+
+          # Check bot messages (have bot_id) whose text contains "Daily Brief" and today's date
+          FOUND=$(echo "$HISTORY_RESP" | jq -r --arg d "$TODAY" \
+            '[.messages[]? | select(.bot_id != null) | select(.text != null) | select(.text | contains("Daily Brief")) | select(.text | contains($d))] | length')
+
+          if [ "$FOUND" -gt 0 ]; then
+            echo "[brief-watch] receipt: brief sent $TODAY (found $FOUND matching message(s))"
+            echo "brief_sent=true" >> "$GITHUB_OUTPUT"
+            echo "receipt_date=$TODAY" >> "$GITHUB_OUTPUT"
+          else
+            echo "[brief-watch] ALERT: daily brief MISSING for $TODAY"
+
+            # DM Kevin via the same bot
+            DM_RESULT=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+              -H "Authorization: Bearer $SLACK_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"channel\":\"$DM_CHANNEL\",\"text\":\"Daily Brief missing\"}")
+            DM_OK=$(echo "$DM_RESULT" | jq -r '.ok')
+            if [ "$DM_OK" = "true" ]; then
+              echo "[brief-watch] DM sent: 'Daily Brief missing'"
+            else
+              echo "[brief-watch] DM FAILED: $(echo "$DM_RESULT" | jq -r '.error')"
+              exit 1
+            fi
+          fi
+
+      - name: "Record durable brief-sent receipt"
+        if: ${{ steps.check.outputs.brief_sent == 'true' }}
+        run: |
+          echo "${{ steps.check.outputs.receipt_date }}" > brief-sent-receipt.txt
+          echo "Daily Brief was sent on ${{ steps.check.outputs.receipt_date }} — verified by brief-watch watchdog at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> brief-sent-receipt.txt
+
+      - name: "Upload brief-sent receipt artifact"
+        if: ${{ steps.check.outputs.brief_sent == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: brief-sent-receipt-${{ steps.check.outputs.receipt_date }}
+          path: brief-sent-receipt.txt
+          retention-days: 90
+
+      - name: "Terminal status"
+        if: ${{ !cancelled() }}
+        run: echo "brief-watch finished with job status ${{ job.status }}"
