@@ -1,0 +1,5 @@
+{
+  "repos": [
+    { "repo": "studio-b-ai/toto", "live": false, "shadow": true }
+  ]
+}
