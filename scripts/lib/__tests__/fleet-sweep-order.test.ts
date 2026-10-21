@@ -33,6 +33,18 @@ function mkBugsq(repo: string, pr: string): FleetSweepEntry {
   };
 }
 
+function mkFi(repo: string, pr: string): FleetSweepEntry {
+  return {
+    repo,
+    pr_number: pr,
+    train_ready: false,
+    enabled_classes: "docs-comment,code-fix,fleet-internal",
+    sensitive_path_patterns: "",
+    safe_path_globs: "",
+    required_checks: "run-tests.sh (python + shell)",
+  };
+}
+
 describe("orderFleetSweepEntries (ops#327)", () => {
   it("planted (queued starvation): a queued PR at fleet position 28 of 30 is evaluated in the first cycle, ahead of every bugsquasher", () => {
     // Reproduces the Dispatcher finding shape: five repos with many
@@ -48,7 +60,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
       mkTrain("studio-b-ai/radio", "915"),
     ];
 
-    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 5, runOffset: 0 });
+    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 5, fleetInternalPerRepoCap: 0, runOffset: 0 });
 
     // #915 must be present, and at position 0 (queued-first, fleet-wide).
     expect(ordered[0]).toEqual(mkTrain("studio-b-ai/radio", "915"));
@@ -75,7 +87,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
 
     const covered = new Set<string>();
     for (let offset = 0; offset < 3; offset++) {
-      const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 5, runOffset: offset });
+      const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 5, fleetInternalPerRepoCap: 0, runOffset: offset });
       // Each run gets at most 5 per repo (global fanout is 20 but only one repo).
       expect(ordered.length).toBeLessThanOrEqual(5);
       for (const e of ordered) covered.add(e.pr_number);
@@ -93,7 +105,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
       mkTrain("studio-b-ai/radio", "800"),
     ];
 
-    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 5, runOffset: 0 });
+    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 5, fleetInternalPerRepoCap: 0, runOffset: 0 });
 
     expect(ordered).toEqual([
       mkTrain("studio-b-ai/bolt-wms", "600"),
@@ -104,7 +116,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
   });
 
   it("control: an empty input returns an empty array (no throw)", () => {
-    expect(orderFleetSweepEntries([], { maxFanout: 20, perRepoCap: 5, runOffset: 0 })).toEqual([]);
+    expect(orderFleetSweepEntries([], { maxFanout: 20, perRepoCap: 5, fleetInternalPerRepoCap: 0, runOffset: 0 })).toEqual([]);
   });
 
   it("control: perRepoCap keeps first-appearance order inside each capped repo group", () => {
@@ -118,7 +130,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
       mkBugsq("studio-b-ai/bolt-wms", "7"),
     ];
 
-    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 3, runOffset: 0 });
+    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 3, fleetInternalPerRepoCap: 0, runOffset: 0 });
 
     expect(ordered.map((e) => e.pr_number)).toEqual(["1", "2", "3"]);
   });
@@ -126,8 +138,8 @@ describe("orderFleetSweepEntries (ops#327)", () => {
   it("control: rotation is a no-op when runOffset % length === 0", () => {
     const entries: FleetSweepEntry[] = Array.from({ length: 4 }, (_, i) => mkBugsq("studio-b-ai/repo-a", `${i}`));
 
-    const zero = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 10, runOffset: 0 });
-    const wrap = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 10, runOffset: 8 });
+    const zero = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 10, fleetInternalPerRepoCap: 0, runOffset: 0 });
+    const wrap = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 10, fleetInternalPerRepoCap: 0, runOffset: 8 });
 
     expect(zero.map((e) => e.pr_number)).toEqual(["0", "1", "2", "3"]);
     expect(wrap.map((e) => e.pr_number)).toEqual(["0", "1", "2", "3"]);
@@ -136,7 +148,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
   it("control: rotation handles negative runOffset (defensive — the workflow passes a non-negative run_number)", () => {
     const entries: FleetSweepEntry[] = Array.from({ length: 4 }, (_, i) => mkBugsq("studio-b-ai/repo-a", `${i}`));
 
-    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 10, runOffset: -1 });
+    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 10, fleetInternalPerRepoCap: 0, runOffset: -1 });
 
     // -1 * 10 = -10, -10 mod 4 → 2, so element at index 2 becomes head.
     expect(ordered.map((e) => e.pr_number)).toEqual(["2", "3", "0", "1"]);
@@ -145,7 +157,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
   it("control: perRepoCap of 0 evaluates only train entries — the bugsquasher group is empty (P2: train exempt from per-repo cap)", () => {
     const entries: FleetSweepEntry[] = [mkBugsq("studio-b-ai/bolt-wms", "1"), mkTrain("studio-b-ai/bolt-wms", "2")];
 
-    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 0, runOffset: 0 });
+    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 0, fleetInternalPerRepoCap: 0, runOffset: 0 });
 
     // Train entries survive perRepoCap=0 (Kevin's door word is never dropped).
     // Bugsquasher entries are 0-capped.
@@ -159,7 +171,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
       ...Array.from({ length: 5 }, (_, i) => mkBugsq("studio-b-ai/repo-c", `b${i}`)),
     ];
 
-    const ordered = orderFleetSweepEntries(entries, { maxFanout: 5, perRepoCap: 5, runOffset: 0 });
+    const ordered = orderFleetSweepEntries(entries, { maxFanout: 5, perRepoCap: 5, fleetInternalPerRepoCap: 0, runOffset: 0 });
 
     // Queued fills first (8 queued, capped to 5).
     expect(ordered.length).toBe(5);
@@ -173,7 +185,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
     // maxFanout=5, perRepoCap=2 — the old shape would cap at 2 per repo
     // and silently drop Kevin's door word for t2..t7. With P2, all 8 train
     // entries flow through and the global fanout takes the first 5.
-    const ordered = orderFleetSweepEntries(entries, { maxFanout: 5, perRepoCap: 2, runOffset: 0 });
+    const ordered = orderFleetSweepEntries(entries, { maxFanout: 5, perRepoCap: 2, fleetInternalPerRepoCap: 0, runOffset: 0 });
     expect(ordered.map((e) => e.pr_number)).toEqual(["t0", "t1", "t2", "t3", "t4"]);
     expect(ordered.every((e) => e.train_ready)).toBe(true);
   });
@@ -185,7 +197,7 @@ describe("orderFleetSweepEntries (ops#327)", () => {
       mkTrain("studio-b-ai/repo-c", "3"),
     ];
 
-    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 5, runOffset: 2 });
+    const ordered = orderFleetSweepEntries(entries, { maxFanout: 20, perRepoCap: 5, fleetInternalPerRepoCap: 0, runOffset: 2 });
 
     expect(ordered.map((e) => e.pr_number)).toEqual(["1", "2", "3"]);
   });
@@ -206,8 +218,52 @@ describe("orderFleetSweepEntries (ops#327)", () => {
       required_checks: "Client — TypeScript + Build,Server — TypeScript + Tests",
     };
 
-    const ordered = orderFleetSweepEntries([entry], { maxFanout: 20, perRepoCap: 5, runOffset: 0 });
+    const ordered = orderFleetSweepEntries([entry], { maxFanout: 20, perRepoCap: 5, fleetInternalPerRepoCap: 0, runOffset: 0 });
 
     expect(ordered).toEqual([entry]);
+  });
+
+  it("control (ops#836 fleet-internal lane): fleet-internal entries get their own cap, separate from bugsquasher", () => {
+    // 10 fleet-internal PRs on power-unit, perRepoCap=3 for bugsquasher, FI cap=0 (no limit).
+    // All 10 FI entries should pass through, even with bugsquasher capped at 3.
+    const entries: FleetSweepEntry[] = [
+      ...Array.from({ length: 3 }, (_, i) => mkBugsq("studio-b-ai/power-unit", `b${i}`)),
+      ...Array.from({ length: 10 }, (_, i) => mkFi("studio-b-ai/power-unit", `fi${i}`)),
+    ];
+
+    const ordered = orderFleetSweepEntries(entries, { maxFanout: 50, perRepoCap: 3, fleetInternalPerRepoCap: 0, runOffset: 0 });
+
+    const fiCount = ordered.filter((e) => e.enabled_classes.includes("fleet-internal")).length;
+    const bugsqCount = ordered.filter((e) => !e.enabled_classes.includes("fleet-internal") && !e.train_ready).length;
+
+    expect(fiCount).toBe(10);
+    expect(bugsqCount).toBe(3);
+    // Bugsquasher PRs come before fleet-internal
+    const firstFiIdx = ordered.findIndex((e) => e.enabled_classes.includes("fleet-internal"));
+    const firstBugsqIdx = ordered.findIndex((e) => !e.enabled_classes.includes("fleet-internal") && !e.train_ready);
+    expect(firstBugsqIdx).toBeLessThan(firstFiIdx);
+  });
+
+  it("control (ops#836 FI cap=5): fleet-internal per-repo cap limits per-repo FI entries", () => {
+    const entries: FleetSweepEntry[] = [
+      ...Array.from({ length: 10 }, (_, i) => mkFi("studio-b-ai/power-unit", `fi${i}`)),
+    ];
+
+    const ordered = orderFleetSweepEntries(entries, { maxFanout: 50, perRepoCap: 5, fleetInternalPerRepoCap: 5, runOffset: 0 });
+
+    expect(ordered.length).toBe(5);
+  });
+
+  it("planted (ops#836 FI rotation): fleet-internal entries rotate by runOffset when capped", () => {
+    const entries: FleetSweepEntry[] = Array.from({ length: 13 }, (_, i) => mkFi("studio-b-ai/power-unit", `fi${i}`));
+
+    const covered = new Set<string>();
+    for (let offset = 0; offset < 3; offset++) {
+      const ordered = orderFleetSweepEntries(entries, { maxFanout: 50, perRepoCap: 5, fleetInternalPerRepoCap: 5, runOffset: offset });
+      expect(ordered.length).toBeLessThanOrEqual(5);
+      for (const e of ordered) covered.add(e.pr_number);
+    }
+
+    for (let i = 0; i < 13; i++) expect(covered.has(`fi${i}`)).toBe(true);
   });
 });
