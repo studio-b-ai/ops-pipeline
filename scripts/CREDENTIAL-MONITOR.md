@@ -22,6 +22,7 @@ Daily (GitHub Actions cron, 14:00 UTC), for each item in [`credentials.manifest.
    | `cloudflare-api-token` | `api.cloudflare.com/client/v4/user/tokens/verify` → `status` alive/dead (countdown from `recorded_expiry`; verify returns no expiry) |
    | `tls-cert` | `node:tls` peer cert `notAfter` |
    | `shipengine-api-key` | `api.shipengine.com/v1/carriers` (header `API-Key`) → 200 alive / 401 DEAD; non-expiring by design (rung 2) — aliveness-shaped, never returns an expiry |
+   | `claude-code-oauth-token` | **none — value-free by design.** The token lives only on the host that consumes it (e.g. the Mac Studio's ssh `claude -p` env file), out of the monitor's reach and never copied to 1P. The countdown on `recorded_expiry` is the 14/7/1 signal. Liveness (an early revoke) is NOT covered — it needs a host-side one-turn model round-trip (`claude auth status` reports `loggedIn` for any token string, so it can't prove liveness). A set `op_ref` or a missing `recorded_expiry` → PROBE_FAILED |
 3. Classifies → `OK | WARN(≤14/7/1) | DEAD | NO_EXPIRY | PROBE_FAILED`.
 4. **v2 (2026-07-31, Kevin directive): alerts are GitHub issues, not Slack** — one issue per
    credential (label `credential-monitor`, title `[credential-monitor] <name> — <status>`), open =
@@ -82,7 +83,8 @@ Then live-verify (Rule #234): `gh workflow run "Credential Expiry Monitor" --rep
 
 Append an item to `credentials.manifest.yaml` (op:// ref + metadata only — never a value). Pick the
 `type` whose probe matches, set `owner` + `keyless_alternative` (Rule #302 ladder), and `recorded_expiry`
-where the probe can't read it live (npm, 1P SA).
+where the probe can't read it live (npm, 1P SA). A `claude-code-oauth-token` item takes NO `op_ref` —
+its value never leaves the consuming host — and REQUIRES `recorded_expiry` (mint date + 1 year).
 
 ## Inventory follow-ups (2026-06-10 fleet audit)
 
