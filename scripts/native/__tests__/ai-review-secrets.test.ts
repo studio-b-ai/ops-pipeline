@@ -108,9 +108,20 @@ describe("token shapes: found in an added line, labelled by kind and file", () =
       expect(sanitizeReasons(`found ${s.token} in a.ts`)).not.toContain(s.token.slice(8));
     });
   }
-  it("the private-key shape is also redacted from reasons", () => {
-    const text = j(pemBegin(), "\n", pemLine(1), "\n", pemEnd());
-    expect(sanitizeReasons(text)).not.toContain(pemLine(1));
+  it("the private-key shape is also redacted from reasons, for every header flavor the scan detects (PGP `… KEY BLOCK` included)", () => {
+    for (const [begin, end] of [
+      [pemBegin(), pemEnd()],
+      [pemBegin(""), pemEnd("")],
+      [pemBegin("OPENSSH "), pemEnd("OPENSSH ")],
+      [pemBegin("ENCRYPTED "), pemEnd("ENCRYPTED ")],
+      [j("-----BEGIN PGP PRIV", "ATE KEY BLOCK-----"), j("-----END PGP PRIV", "ATE KEY BLOCK-----")],
+    ]) {
+      // narrow lines (under the 40-character opaque-run rule), so only the private-key rule of the sanitizer can remove them
+      const narrow = [body(30, 1), body(30, 2)];
+      const text = j("found ", begin, "\n", narrow.join("\n"), "\n", end, " in k");
+      expect(kindsOf(diffFor("k", [begin, ...narrow, end])), begin).toEqual(["private-key"]);
+      for (const line of narrow) expect(sanitizeReasons(text), begin).not.toContain(line);
+    }
   });
 });
 
