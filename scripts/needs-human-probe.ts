@@ -39,6 +39,7 @@ import {
   PROBE_MARKER,
   renderComment,
   type ProbeContext,
+  type ProbeSource,
 } from "./lib/needs-human-probe-lib.js";
 
 const PROBE_MODEL = "claude-sonnet-5";
@@ -51,12 +52,14 @@ function gh(args: string[]): string {
 interface IssueView {
   title: string;
   body: string;
+  createdAt: string;
+  updatedAt: string;
   labels: Array<{ name: string }>;
-  comments: Array<{ author: { login: string }; body: string }>;
+  comments: Array<{ author: { login: string }; body: string; createdAt: string }>;
 }
 
 function fetchIssue(repo: string, num: number): IssueView {
-  return JSON.parse(gh(["issue", "view", String(num), "--repo", repo, "--json", "title,body,labels,comments"])) as IssueView;
+  return JSON.parse(gh(["issue", "view", String(num), "--repo", repo, "--json", "title,body,createdAt,updatedAt,labels,comments"])) as IssueView;
 }
 
 /** Fetch a repo file's current content via the contents API; null when absent (paths in prose drift). */
@@ -64,6 +67,15 @@ function fetchFile(repo: string, path: string): string | null {
   try {
     const raw = gh(["api", `repos/${repo}/contents/${path}`, "--jq", ".content"]);
     return Buffer.from(raw.trim(), "base64").toString("utf-8");
+  } catch {
+    return null;
+  }
+}
+
+/** Fetch the last-commit timestamp for a file path via the commits API; null when absent. */
+function fetchFileTimestamp(repo: string, path: string): string | null {
+  try {
+    return gh(["api", `repos/${repo}/commits?path=${encodeURIComponent(path)}&per_page=1`, "--jq", ".[0].commit.committer.date"]).trim() || null;
   } catch {
     return null;
   }
@@ -130,7 +142,19 @@ async function main(): Promise<void> {
     .join("\n");
   if (!diagnosis.trim()) throw new Error("model returned an empty diagnosis — not posting an empty comment");
 
-  const comment = renderComment(diagnosis, PROBE_MODEL);
+  const sources: ProbeSource[] = [];
+  sources.push({ type: "issue", label: `#${issueNumber}`, timestamp: issue.updatedAt });
+  for (const c of issue.comments) {
+    const author = c.author.login;
+    const preview = c.body.slice(0, 80).replace(/\n/g, " ");
+    sources.push({ type: "comment", label: `by @${author}: "${preview}${c.body.length > 80 ? "…" : ""}"`, timestamp: c.createdAt });
+  }
+  for (const f of files) {
+    const ts = f.content ? fetchFileTimestamp(repo, f.path) : null;
+    sources.push({ type: "file", label: f.path, timestamp: ts, note: f.note });
+  }
+
+  const comment = renderComment(diagnosis, PROBE_MODEL, sources);
   gh(["issue", "comment", String(issueNumber), "--repo", repo, "--body", comment]);
   console.log(`[probe] posted findings comment on ${repo}#${issueNumber} (${diagnosis.length} chars).`);
 }
