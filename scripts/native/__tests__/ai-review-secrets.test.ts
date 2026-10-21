@@ -206,6 +206,22 @@ describe("known-good controls through the same instrument", () => {
     scanDiffForSecrets(diffFor("p.txt", ["sk-".repeat(1_000_000)]));
     expect(Date.now() - started).toBeLessThan(3000);
   });
+  it("pathological lines built to defeat every pattern (header, GitHub, AWS, Slack, `sk-` look-alikes, base64 runs) stay linear: ~12 MB scan in under 5 seconds", () => {
+    const lines = [
+      "-----BEGIN ".repeat(300_000),
+      "ghp_".repeat(500_000),
+      "github_pat_".repeat(200_000),
+      "AKIA".repeat(500_000),
+      "xoxb-".repeat(400_000),
+      "sk-1".repeat(500_000),
+      "A".repeat(2_000_000),
+    ];
+    const started = Date.now();
+    const found = scanDiffForSecrets(diffFor("p.txt", lines));
+    expect(Date.now() - started).toBeLessThan(5000);
+    // some of these repeats ARE token-shaped (a 30+ character run after `github_pat_`, `xoxb-` or `sk-1` is what those patterns mean), so only the time and the bound are asserted
+    expect(found.length).toBeLessThanOrEqual(10);
+  });
   it("the reviewer's own source (regex literals, a redaction table, comments about keys) has no findings — it can ship through its own scan", () => {
     const here = dirname(fileURLToPath(import.meta.url));
     const scripts = join(here, "..", "..");
