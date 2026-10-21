@@ -64,6 +64,8 @@ export interface World {
   checkRuns: Record<string, CheckRunFixture[]>;
   /** return an HTTP status to make a request fail like GitHub would */
   failOn?: (req: GhRequest) => number | null;
+  /** last check-run id handed out. Per WORLD, not per gh instance: ids are monotonic across the sweeps that share a world, as on GitHub. */
+  lastRunId?: number;
 }
 
 export function makeWorld(repo: string = REPO, fixture: RepoFixture = { prs: [] }): World {
@@ -75,7 +77,6 @@ export const CLEAN_DIFF = "diff --git a/docs/x.md b/docs/x.md\n--- a/docs/x.md\n
 export function makeGh(world: World, postAs: { id: number; slug: string } = REVIEWER): { gh: GhApi; calls: GhRequest[]; posts: GhRequest[] } {
   const calls: GhRequest[] = [];
   const posts: GhRequest[] = [];
-  let nextRunId = 9000;
   const gh: GhApi = async (req) => {
     calls.push(req);
     const status = world.failOn?.(req) ?? null;
@@ -161,8 +162,9 @@ export function makeGh(world: World, postAs: { id: number; slug: string } = REVI
       posts.push(req);
       const body = req.body as { head_sha: string; name: string; conclusion: string; external_id: string };
       const key = `${m[1]}@${body.head_sha}`;
-      (world.checkRuns[key] ??= []).push({ id: ++nextRunId, name: body.name, status: "completed", conclusion: body.conclusion, external_id: body.external_id, app: postAs });
-      return { id: nextRunId };
+      const id = (world.lastRunId = Math.max(world.lastRunId ?? 9000, ...Object.values(world.checkRuns).flat().map((r) => r.id)) + 1);
+      (world.checkRuns[key] ??= []).push({ id, name: body.name, status: "completed", conclusion: body.conclusion, external_id: body.external_id, app: postAs });
+      return { id };
     }
     throw new Error(`unplanned request: ${method} ${path}`);
   };

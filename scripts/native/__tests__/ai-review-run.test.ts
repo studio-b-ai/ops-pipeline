@@ -13,9 +13,10 @@ import { format } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_REVIEWER_SLUG, main, MAX_PRS_PER_RUN, runPost, runReview } from "../../ai-review.js";
 import { openHandoff, sealHandoff, sealWithinLimit, type Handoff, type HandoffEntry } from "../../lib/ai-review-handoff.js";
-import { installAiReviewLog, toPublicLine } from "../../lib/ai-review-log.js";
+import { formatLogEvent, installAiReviewLog, toPublicLine } from "../../lib/ai-review-log.js";
+import { CATEGORY_ORDER } from "../../lib/ai-review-verdict.js";
 import { loadManifest, parseManifest } from "../../lib/ai-review-manifest.js";
-import { HEAD, MB1, PASS, REPO, REVIEWER, block, makeClient, makeGh, makeWorld, noSleep, sha, type PrFixture, type World } from "./helpers.js";
+import { HEAD, MB1, MB2, PASS, REPO, REVIEWER, block, makeClient, makeGh, makeWorld, noSleep, sha, type PrFixture, type World } from "./helpers.js";
 
 const PASS_ID = `v1:pass::${MB1}`;
 
@@ -176,6 +177,79 @@ describe("post: the exact check run, reasons only in output.summary", () => {
     const r = await runPost({ gh: post.gh, manifest: SHADOW, handoff: { v: 1, entries: [entry()] }, reviewerAppId: REVIEWER.id });
     expect(r).toEqual({ posted: 0, skipped: 0, failed: 1 });
     expect(world.checkRuns[`${REPO}@${HEAD}`] ?? []).toHaveLength(0);
+  });
+});
+
+describe("a retarget, through the whole sweep (runReview → runPost): a verdict never outlives the base it was computed against", () => {
+  const MAINDIFF = "diff --git a/qa/qa.mjs b/qa/qa.mjs\n--- a/qa/qa.mjs\n+++ b/qa/qa.mjs\n@@ -1 +1 @@\n-assert(x)\n+// assert(x) disabled\n";
+  const sweep = async (world: World, model: Parameters<typeof makeClient>[0]) => {
+    const { d, c } = deps(world, model);
+    const { handoff } = await runReview(d);
+    const post = makeGh(world); // the post half: the reviewer App's identity, same world
+    const r = await runPost({ gh: post.gh, manifest: SHADOW, handoff, reviewerAppId: REVIEWER.id });
+    return { handoff, r, posts: post.posts, requests: c.requests };
+  };
+
+  it("stacked → B posted and no model spend; retargeted to main → ONE fresh review against main; unchanged afterwards → nothing posted, nothing spent", async () => {
+    const world = makeWorld(REPO, { prs: [{ number: 5, sha: HEAD, baseRef: "stack-a", mergeBase: MB1 }] });
+
+    const s1 = await sweep(world, [PASS, PASS, PASS]);
+    expect(s1.r).toEqual({ posted: 1, skipped: 0, failed: 0 });
+    expect(s1.requests).toHaveLength(0);
+    expect((s1.posts[0].body as { external_id: string; conclusion: string }).external_id).toBe("v1:block:B");
+
+    // the crew retargets the PR to main (same head, a different merge base and diff); the model now sees what main would receive
+    const pr = world.repos[REPO].prs[0];
+    pr.baseRef = "main";
+    pr.mergeBase = MB2;
+    pr.diff = MAINDIFF;
+    const s2 = await sweep(world, [block("D"), block("D"), block("D")]);
+    expect(s2.requests).toHaveLength(3);
+    expect(s2.r).toEqual({ posted: 1, skipped: 0, failed: 0 });
+    expect(s2.posts[0].body).toMatchObject({ conclusion: "failure", external_id: `v1:block:D:${MB2}` });
+
+    // nothing moved: the verdict stands, is not re-posted, and costs nothing
+    const s3 = await sweep(world, [PASS, PASS, PASS]);
+    expect(s3.requests).toHaveLength(0);
+    expect(s3.r).toEqual({ posted: 0, skipped: 0, failed: 0 });
+    expect(s3.handoff.entries).toHaveLength(0);
+  });
+
+  it("a PR that PASSED on main and then moved to a stacked base fails B on the next sweep; back on main with the SAME merge base the earlier PASS is reused (no spend)", async () => {
+    const world = makeWorld(REPO, { prs: [{ number: 5, sha: HEAD, mergeBase: MB1 }] });
+    const s1 = await sweep(world, [PASS, PASS, PASS]);
+    expect(s1.posts[0].body).toMatchObject({ conclusion: "success", external_id: PASS_ID });
+
+    const pr = world.repos[REPO].prs[0];
+    pr.baseRef = "stack-a";
+    const s2 = await sweep(world, [PASS, PASS, PASS]);
+    expect(s2.posts[0].body).toMatchObject({ conclusion: "failure", external_id: "v1:block:B" });
+    expect(s2.requests).toHaveLength(0);
+
+    pr.baseRef = "main";
+    const s3 = await sweep(world, [block("D")]);
+    expect(s3.requests).toHaveLength(0); // the PASS for this exact merge base is still valid
+    expect(s3.posts[0].body).toMatchObject({ conclusion: "success", external_id: PASS_ID });
+  });
+
+  it("runPost dedupe is by the whole external_id, merge base included: the same verdict for ANOTHER merge base is posted, the identical one is skipped", async () => {
+    const world = makeWorld(REPO, { prs: [{ number: 5, sha: HEAD }] });
+    world.checkRuns[`${REPO}@${HEAD}`] = [{ id: 1, status: "completed", conclusion: "success", external_id: PASS_ID, app: REVIEWER }];
+    const post = makeGh(world);
+    const other = await runPost({ gh: post.gh, manifest: SHADOW, handoff: { v: 1, entries: [entry({ externalId: `v1:pass::${MB2}` })] }, reviewerAppId: REVIEWER.id });
+    expect(other).toEqual({ posted: 1, skipped: 0, failed: 0 });
+    const same = await runPost({ gh: post.gh, manifest: SHADOW, handoff: { v: 1, entries: [entry({ externalId: `v1:pass::${MB2}` })] }, reviewerAppId: REVIEWER.id });
+    expect(same).toEqual({ posted: 0, skipped: 1, failed: 0 });
+  });
+
+  it("the sealed handoff refuses a model verdict with no merge base, and a gate verdict that carries one", () => {
+    for (const externalId of ["v1:pass:", "v1:block:D", `v1:block:H:${MB1}`, `v1:waived::${MB1}`, `v1:pass::${"1".repeat(12)}`]) {
+      const conclusion = externalId.startsWith("v1:block") ? "failure" : "success";
+      expect(() => openHandoff(sealHandoff({ v: 1, entries: [entry({ externalId, conclusion })] }, KEY, CTX), KEY, CTX), externalId).toThrow("handoff: cannot open");
+    }
+    // known-good through the same instrument
+    expect(() => openHandoff(sealHandoff({ v: 1, entries: [entry({ externalId: PASS_ID, conclusion: "success" })] }, KEY, CTX), KEY, CTX)).not.toThrow();
+    expect(() => openHandoff(sealHandoff({ v: 1, entries: [entry({ externalId: "v1:block:B", conclusion: "failure" })] }, KEY, CTX), KEY, CTX)).not.toThrow();
   });
 });
 
@@ -432,6 +506,16 @@ describe("public-log hygiene — no reason text, and nothing outside the grammar
     for (const canary of CANARIES) expect(log).not.toContain(canary);
     expect(cap.out.length).toBeGreaterThan(5);
     for (const line of cap.out) expect(toPublicLine(line), line).toBe(line);
+  });
+
+  it("every category letter of the closed vocabulary (all ten, B included) survives the log grammar — it never collapses to `-`", () => {
+    const all = CATEGORY_ORDER.join("");
+    const line = formatLogEvent({ e: "verdict", repo: REPO, pr: 1, sha: HEAD, verdict: "block", categories: all, source: "gate", action: "post" });
+    expect(line).toContain(`categories=${all} `);
+    expect(toPublicLine(line)).toBe(line);
+    expect(formatLogEvent({ e: "verdict", repo: REPO, pr: 1, sha: HEAD, verdict: "block", categories: "B", source: "gate", action: "post" })).toContain("categories=B ");
+    // known-bad: a category string outside the closed letters is still replaced, not printed
+    expect(formatLogEvent({ e: "verdict", repo: REPO, pr: 1, sha: HEAD, verdict: "block", categories: "K reason=x", source: "gate", action: "post" })).toContain("categories=- ");
   });
 
   it("the grammar refuses free text even when it is shaped like a log line", () => {

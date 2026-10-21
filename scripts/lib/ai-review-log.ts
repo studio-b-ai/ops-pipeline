@@ -45,7 +45,7 @@ const safeRepo = (r: string): string => (new RegExp(`^${REPO}$`).test(r) ? r : "
 const safeEnum = (s: string): string => (new RegExp(`^${ENUM}$`).test(s) ? s : "other");
 const safeSha = (s: string): string => (new RegExp(`^${SHA}$`).test(s) ? s : "0".repeat(40));
 const safeInt = (n: number): number => (Number.isInteger(n) && n >= 0 ? n : 0);
-const safeCats = (c: string): string => (c === "" ? "-" : /^[A-Z]{1,9}$/.test(c) ? c : "-");
+const safeCats = (c: string): string => (c === "" ? "-" : /^[A-Z]{1,10}$/.test(c) ? c : "-");
 
 export function formatLogEvent(ev: LogEvent): string {
   switch (ev.e) {
@@ -76,7 +76,7 @@ export function formatLogEvent(ev: LogEvent): string {
 
 const LINE_RES: RegExp[] = [
   /^\[ai-review\] sweep repos=\d+ prs=\d+ post=\d+ unchanged=\d+ skipped=\d+ errors=\d+$/,
-  new RegExp(`^\\[ai-review\\] ${REPO}#\\d+ sha=${SHA} verdict=(pass|block|waived) categories=([A-Z]{1,9}|-) source=${ENUM} action=(post|unchanged)$`),
+  new RegExp(`^\\[ai-review\\] ${REPO}#\\d+ sha=${SHA} verdict=(pass|block|waived) categories=([A-Z]{1,10}|-) source=${ENUM} action=(post|unchanged)$`),
   new RegExp(`^\\[ai-review\\] ${REPO}#\\d+ verdict=none leg=${ENUM}$`),
   new RegExp(`^\\[ai-review\\] ${REPO}#\\d+ skip=(draft|closed)$`),
   new RegExp(`^\\[ai-review\\] ${REPO} list-failed$`),
