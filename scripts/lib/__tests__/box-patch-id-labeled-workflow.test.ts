@@ -12,12 +12,18 @@ import { mintBoxPatchId } from "../box-patch-id.js";
 // The hole (native-plan §5/§6, lead-found L1): on `pull_request: [labeled]` the job minted a full-scope fleet App installation token,
 // checked out the PR HEAD, then ran that head's `npm ci` (install scripts) and `scripts/box-patch-id-labeled.ts` with GH_TOKEN set. Any
 // identity with `issues:write` can apply `box`, so any branch author could run code as the fleet App. The fix: the labeled path checks
-// out the BASE sha and fetches the head as an object only.
+// out the DEFAULT BRANCH tip and fetches the head as an object only.
+//
+// Review finding (high) on the first fix, which checked out `pull_request.base.sha`: the trigger has no `branches:` filter, so a PR can
+// name ANY pushed branch as its base, and `base.sha` is then that branch's tip — an attacker-controlled tree running with the fleet
+// token (contents:write is enough: push main + a hostile scripts/box-patch-id-labeled.ts; no workflow file changes). So the trusted
+// checkout is pinned to the repo's default branch BY NAME, and the lint below treats any base- or head-derived ref as a violation.
 //
 // Two kinds of evidence (#223, #322/#471):
 //   1. a workflow lint over the REAL file, with known-bad controls built from the pre-change shape — the lint must FIRE on those;
-//   2. a REAL-git check that "checkout BASE + git fetch <head sha>" (a) leaves the head's code out of the working tree and (b) mints the
-//      SAME patch-id the old head checkout did, via the real `mintBoxPatchId` and its real git runner.
+//   2. a REAL-git check that "checkout the default branch + git fetch <head sha>" (a) leaves the head's code out of the working tree and
+//      (b) mints the SAME patch-id the old head checkout did, via the real `mintBoxPatchId` and its real git runner; and (c) the real
+//      workflow `ref:` value, resolved against a PR event whose base is an attacker-pushed branch, never lands on that branch.
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const WORKFLOW = join(HERE, "..", "..", "..", ".github", "workflows", "box-patch-id-labeled.yml");
@@ -26,7 +32,10 @@ type Step = { name?: string; id?: string; uses?: string; run?: string; if?: stri
 type Workflow = { on: Record<string, unknown>; jobs: Record<string, { steps: Step[] }> };
 
 const loadWorkflow = (): Workflow => parse(readFileSync(WORKFLOW, "utf-8")) as Workflow;
-const BASE_REF = "${{ github.event.pull_request.base.sha }}";
+/** The ONLY ref the pull_request:labeled path may check out: the repo's default branch, by name, fully qualified (no tag/branch ambiguity). */
+const TRUSTED_REF = "refs/heads/${{ github.event.repository.default_branch }}";
+/** What the first fix checked out. Attacker-chosen whenever a PR names a pushed branch as its base — kept only to build known-bad controls. */
+const BASE_SHA_REF = "${{ github.event.pull_request.base.sha }}";
 
 /** A step is dispatch-only when its `if` requires workflow_dispatch and offers no other way in. Everything else can run on pull_request:labeled. */
 const dispatchOnly = (s: Step): boolean => !!s.if && /github\.event_name == 'workflow_dispatch'/.test(s.if) && !/\|\||pull_request|label/.test(s.if);
@@ -40,32 +49,33 @@ function headExecutionViolations(wf: Workflow): string[] {
   const out: string[] = [];
   const steps = Object.values(wf.jobs).flatMap((j) => j.steps);
   const onPr = steps.filter((s) => !dispatchOnly(s));
-  let baseCheckedOut = false;
+  let trustedCheckedOut = false;
   for (const s of onPr) {
     const label = s.name ?? s.id ?? s.uses ?? "(unnamed step)";
     if ((s.uses ?? "").startsWith("actions/checkout@")) {
-      if (s.with?.ref === BASE_REF && !s.with?.repository) baseCheckedOut = true;
-      else out.push(`checkout step "${label}" on the pull_request path does not check out exactly ${BASE_REF} (ref=${JSON.stringify(s.with?.ref)}, repository=${JSON.stringify(s.with?.repository)})`);
+      if (s.with?.ref === TRUSTED_REF && !s.with?.repository) trustedCheckedOut = true;
+      else out.push(`checkout step "${label}" on the pull_request path does not check out exactly ${TRUSTED_REF} (ref=${JSON.stringify(s.with?.ref)}, repository=${JSON.stringify(s.with?.repository)})`);
     }
     if (s.with && /pull_request\.head|\.head\./.test(JSON.stringify(s.with))) out.push(`step "${label}" feeds a head-derived value into with: ${JSON.stringify(s.with)}`);
+    if (s.with && /pull_request\.base\b/.test(JSON.stringify(s.with))) out.push(`step "${label}" feeds a PR-base-derived value into with: ${JSON.stringify(s.with)} (a PR may name any pushed branch as its base)`);
     if (s.run && /\bgit\s+(checkout|switch|reset|merge|cherry-pick|pull|restore|read-tree|am|apply|stash|worktree)\b|\bgh\s+pr\s+checkout\b/.test(s.run)) {
       out.push(`step "${label}" moves the working tree (${s.run.trim().split("\n")[0]})`);
     }
-    if (runsRepoCode(s) && !baseCheckedOut) out.push(`step "${label}" runs repository code before the BASE checkout on the pull_request path`);
+    if (runsRepoCode(s) && !trustedCheckedOut) out.push(`step "${label}" runs repository code before the default-branch checkout on the pull_request path`);
   }
-  if (!baseCheckedOut) out.push("no BASE-sha checkout exists on the pull_request path");
+  if (!trustedCheckedOut) out.push("no default-branch checkout exists on the pull_request path");
   return out;
 }
 
 describe("box-patch-id-labeled.yml — the real file", () => {
-  it("known-good: no step on the pull_request:labeled path checks out the head ref, moves the tree to it, or runs code before the BASE checkout", () => {
+  it("known-good: no step on the pull_request:labeled path checks out the head ref or the PR's base, moves the tree to the head, or runs code before the default-branch checkout", () => {
     expect(headExecutionViolations(loadWorkflow())).toEqual([]);
   });
 
-  it("the labeled path is ordered: BASE checkout → head fetched as data → deps → mint+record (which is the only step holding the fleet token for code)", () => {
+  it("the labeled path is ordered: default-branch checkout → head fetched as data → deps → mint+record (which is the only step holding the fleet token for code)", () => {
     const steps = loadWorkflow().jobs.mint.steps;
     const idx = (pred: (s: Step) => boolean) => steps.findIndex(pred);
-    const base = idx((s) => s.with?.ref === BASE_REF);
+    const base = idx((s) => s.with?.ref === TRUSTED_REF);
     const fetchHead = idx((s) => /git fetch --no-tags origin "\$HEAD_SHA"/.test(s.run ?? ""));
     const deps = idx((s) => s.name === "Install deps");
     const mint = idx((s) => /box-patch-id-labeled\.ts/.test(s.run ?? ""));
@@ -124,33 +134,90 @@ describe("headExecutionViolations — KNOWN-BAD controls (the lint must fire on 
   });
 
   it("a checkout with NO ref (the default is the PR merge ref, which contains the head) is flagged", () => {
-    const v = headExecutionViolations(withSteps((steps) => steps.map((s) => (s.with?.ref === BASE_REF ? { ...s, with: { "fetch-depth": "0" } } : s))));
+    const v = headExecutionViolations(withSteps((steps) => steps.map((s) => (s.with?.ref === TRUSTED_REF ? { ...s, with: { "fetch-depth": "0" } } : s))));
     expect(v.join("\n")).toMatch(/does not check out exactly/);
   });
 
-  it("a head fetched into the working tree by a later `git checkout` is flagged even though the checkout step itself is BASE", () => {
+  // The review finding, as a lint control: the FIRST fix (checkout `pull_request.base.sha`) must be flagged, because a PR may name any
+  // pushed branch as its base. (The real-git test below shows the same shape actually running attacker code.)
+  it("KNOWN-BAD (review finding): checking out `pull_request.base.sha` — the first fix — is flagged as PR-base-derived", () => {
+    const v = headExecutionViolations(withSteps((steps) => steps.map((s) => (s.with?.ref === TRUSTED_REF ? { ...s, with: { ...s.with, ref: BASE_SHA_REF } } : s))));
+    expect(v.join("\n")).toMatch(/does not check out exactly/);
+    expect(v.join("\n")).toMatch(/feeds a PR-base-derived value into with:/);
+  });
+
+  it("KNOWN-BAD: checking out `pull_request.base.ref` (the base branch by name — the same attacker-chosen tree) is flagged", () => {
+    const v = headExecutionViolations(withSteps((steps) => steps.map((s) => (s.with?.ref === TRUSTED_REF ? { ...s, with: { ...s.with, ref: "${{ github.event.pull_request.base.ref }}" } } : s))));
+    expect(v.join("\n")).toMatch(/feeds a PR-base-derived value into with:/);
+  });
+
+  it("KNOWN-BAD: a hardcoded sha or a different repository on the pull_request path is flagged (only the default branch is trusted)", () => {
+    const sha = headExecutionViolations(withSteps((steps) => steps.map((s) => (s.with?.ref === TRUSTED_REF ? { ...s, with: { ...s.with, ref: "0".repeat(40) } } : s))));
+    expect(sha.join("\n")).toMatch(/does not check out exactly/);
+    const repo = headExecutionViolations(withSteps((steps) => steps.map((s) => (s.with?.ref === TRUSTED_REF ? { ...s, with: { ...s.with, repository: "someone/fork" } } : s))));
+    expect(repo.join("\n")).toMatch(/does not check out exactly/);
+  });
+
+  it("a head fetched into the working tree by a later `git checkout` is flagged even though the checkout step itself is the default branch", () => {
     const v = headExecutionViolations(
       withSteps((steps) => steps.flatMap((s) => (s.name === "Install deps" ? [{ name: "Switch to head", if: "github.event_name == 'pull_request'", run: 'git checkout "$HEAD_SHA"' }, s] : [s]))),
     );
     expect(v.join("\n")).toMatch(/moves the working tree/);
   });
 
-  it("deps/script steps with the BASE checkout removed (they would run on the default merge ref) are flagged", () => {
+  it("deps/script steps with the trusted checkout removed (they would run on the default merge ref) are flagged", () => {
     const v = headExecutionViolations(withSteps((steps) => steps.filter((s) => !isNewCheckout(s) || dispatchOnly(s))));
-    expect(v.join("\n")).toMatch(/runs repository code before the BASE checkout|no BASE-sha checkout exists/);
+    expect(v.join("\n")).toMatch(/runs repository code before the default-branch checkout|no default-branch checkout exists/);
   });
 
-  it("a local action invoked before the BASE checkout is flagged", () => {
+  it("a local action invoked before the trusted checkout is flagged", () => {
     const v = headExecutionViolations(
       withSteps((steps) => [{ name: "local action", if: "github.event_name == 'pull_request'", uses: "./.github/actions/anything" }, ...steps]),
     );
-    expect(v.join("\n")).toMatch(/runs repository code before the BASE checkout/);
+    expect(v.join("\n")).toMatch(/runs repository code before the default-branch checkout/);
   });
 });
 
 // ───────────────────────────── real git ─────────────────────────────
 
-describe("real git — BASE checkout + `git fetch <head sha>` keeps the head's code out of the tree and mints the SAME patch-id", () => {
+/** The webhook context the workflow's `${{ … }}` expressions read, for a pull_request:labeled event. */
+const labeledEvent = (o: { defaultBranch: string; baseRef: string; baseSha: string; headSha: string }) => ({
+  github: { event: { repository: { default_branch: o.defaultBranch }, pull_request: { base: { ref: o.baseRef, sha: o.baseSha }, head: { sha: o.headSha } } } },
+});
+
+/** Resolve `${{ a.b.c }}` against a context. Anything but a plain dotted path throws — a fancier expression must be taught to this test, never skipped. */
+function interpolate(expr: string, ctx: object): string {
+  return expr.replace(/\$\{\{\s*([^}]*?)\s*\}\}/g, (_m, path: string) => {
+    if (!/^[A-Za-z_][\w]*(\.[A-Za-z_][\w]*)*$/.test(path)) throw new Error(`unsupported expression in a checkout ref: ${path}`);
+    let v: unknown = ctx;
+    for (const k of path.split(".")) v = (v as Record<string, unknown> | undefined)?.[k];
+    if (typeof v !== "string") throw new Error(`context ${path} does not resolve to a string`);
+    return v;
+  });
+}
+
+/** The `ref:` the REAL workflow gives its (single) pull_request:labeled checkout, before interpolation. */
+function labeledCheckoutRef(wf: Workflow): string {
+  const checkouts = Object.values(wf.jobs).flatMap((j) => j.steps).filter((s) => (s.uses ?? "").startsWith("actions/checkout@") && !dispatchOnly(s));
+  expect(checkouts, "the pull_request:labeled path must have exactly one checkout").toHaveLength(1);
+  const ref = checkouts[0].with?.ref;
+  if (typeof ref !== "string") throw new Error("the labeled-path checkout has no ref");
+  return ref;
+}
+
+describe("interpolate — the instrument for the real-git tests below can resolve, and cannot be fooled by an expression it does not understand", () => {
+  const ctx = labeledEvent({ defaultBranch: "main", baseRef: "x", baseSha: "b".repeat(40), headSha: "c".repeat(40) });
+  it("resolves the real workflow's ref and the first fix's ref against an event", () => {
+    expect(interpolate(TRUSTED_REF, ctx)).toBe("refs/heads/main");
+    expect(interpolate(BASE_SHA_REF, ctx)).toBe("b".repeat(40));
+  });
+  it("throws on an expression with an operator or a missing context rather than guessing", () => {
+    expect(() => interpolate("${{ github.event.pull_request.base.sha || github.sha }}", ctx)).toThrow(/unsupported expression/);
+    expect(() => interpolate("${{ github.event.nope }}", ctx)).toThrow(/does not resolve/);
+  });
+});
+
+describe("real git — default-branch checkout + `git fetch <head sha>` keeps the head's code out of the tree and mints the SAME patch-id", () => {
   const git = (cwd: string, ...args: string[]) =>
     execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "commit.gpgsign=false", ...args], {
       encoding: "utf-8",
@@ -194,13 +261,21 @@ describe("real git — BASE checkout + `git fetch <head sha>` keeps the head's c
     return { root, origin, headSha, baseSha };
   }
 
-  function mint(repoDir: string, headSha: string) {
+  /** `actions/checkout@v5 { ref, fetch-depth: 0 }` on a fresh clone: every branch is fetched; a 40-hex ref is checked out detached, a `refs/heads/<n>` ref
+   *  resolves to origin's branch `<n>` (the action prefers the branch over a same-named tag). Anything else must be taught here, not guessed. */
+  function checkoutLikeAction(dir: string, ref: string) {
+    if (/^[0-9a-f]{40}$/.test(ref)) git(dir, "checkout", "-q", "--detach", ref);
+    else if (ref.startsWith("refs/heads/")) git(dir, "checkout", "-q", "--detach", `refs/remotes/origin/${ref.slice("refs/heads/".length)}`);
+    else throw new Error(`checkoutLikeAction: unsupported ref form ${ref}`);
+  }
+
+  function mint(repoDir: string, headSha: string, baseRef = "main") {
     return mintBoxPatchId({
       repo: "studio-b-ai/ops-pipeline",
       prNumber: 700,
       headRepo: "studio-b-ai/ops-pipeline",
       headSha,
-      baseRef: "main",
+      baseRef,
       labelEventDbId: 4242,
       changedPaths: ["src/app.ts", "scripts/box-patch-id-labeled.ts", "scripts/package-lock.json"],
       repoDir,
@@ -219,16 +294,18 @@ describe("real git — BASE checkout + `git fetch <head sha>` keeps the head's c
     return hits;
   }
 
-  it("NEW layout: working tree = BASE sha with no head file anywhere, head present as an object, and the minted patch-id EQUALS the old head-checkout layout's", () => {
+  it("NEW layout: working tree = the default-branch tip with no head file anywhere, head present as an object, and the minted patch-id EQUALS the old head-checkout layout's", () => {
     const { root, origin, headSha, baseSha } = fixture();
 
-    // what `actions/checkout@v5 { ref: base.sha, fetch-depth: 0 }` + `git fetch --no-tags origin "$HEAD_SHA"` leaves on the runner
+    // what the REAL workflow's labeled-path checkout (its `ref:` resolved against a main-based PR event) + `git fetch --no-tags origin "$HEAD_SHA"` leaves on the runner
+    const ref = interpolate(labeledCheckoutRef(loadWorkflow()), labeledEvent({ defaultBranch: "main", baseRef: "main", baseSha, headSha }));
+    expect(ref).toBe("refs/heads/main");
     const next = join(root, "new-layout");
     execFileSync("git", ["clone", "-q", "--no-tags", origin, next], { stdio: "pipe" });
-    git(next, "checkout", "-q", "--detach", baseSha);
+    checkoutLikeAction(next, ref);
     git(next, "fetch", "--no-tags", "-q", "origin", headSha);
 
-    expect(git(next, "rev-parse", "HEAD")).toBe(baseSha);
+    expect(git(next, "rev-parse", "HEAD")).toBe(baseSha); // for a PR based on main the default-branch tip IS base.sha — the normal path is unchanged
     expect(git(next, "status", "--porcelain")).toBe("");
     expect(git(next, "cat-file", "-t", headSha)).toBe("commit"); // the head is available as DATA…
     expect(readFileSync(join(next, "scripts/box-patch-id-labeled.ts"), "utf-8")).toBe("// trusted base script\n"); // …and is NOT what would run
@@ -261,5 +338,70 @@ describe("real git — BASE checkout + `git fetch <head sha>` keeps the head's c
     const absent = "d".repeat(40);
     const verdict = mint(next, absent);
     expect(verdict.ok).toBe(false);
+  }, 60000);
+  // ── the review finding: a PR whose BASE is an attacker-pushed branch ──
+
+  function attackerBaseFixture() {
+    const root = mkdtempSync(join(tmpdir(), "bpid-attacker-base-"));
+    const origin = join(root, "origin.git");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+    const seed = join(root, "seed");
+    execFileSync("git", ["clone", "-q", origin, seed], { stdio: "pipe" });
+    git(seed, "checkout", "-q", "-b", "main");
+    write(seed, "scripts/box-patch-id-labeled.ts", "// trusted default-branch script\n");
+    write(seed, "scripts/package-lock.json", '{"name":"trusted-default-branch"}\n');
+    write(seed, "src/app.ts", "export const a = 1;\n");
+    git(seed, "add", "-A");
+    git(seed, "commit", "-q", "-m", "A: main");
+    git(seed, "push", "-q", "origin", "main");
+    const mainSha = git(seed, "rev-parse", "HEAD");
+    // an attacker with contents:write (and NOT workflows) pushes branch X = main + hostile files where the labeled path would run them…
+    git(seed, "checkout", "-q", "-b", "attacker-base");
+    write(seed, "scripts/box-patch-id-labeled.ts", "// PWNED-BY-ATTACKER-BASE: would run with the fleet token\n");
+    write(seed, "scripts/package-lock.json", '{"name":"PWNED-BY-ATTACKER-BASE"}\n');
+    git(seed, "add", "-A");
+    git(seed, "commit", "-q", "-m", "X: hostile base branch");
+    git(seed, "push", "-q", "origin", "attacker-base");
+    const baseSha = git(seed, "rev-parse", "HEAD");
+    // …then opens a PR with base X (the PR head itself is innocent) and applies `box`
+    git(seed, "checkout", "-q", "-b", "pr");
+    write(seed, "src/app.ts", "export const a = 2;\n");
+    git(seed, "add", "-A");
+    git(seed, "commit", "-q", "-m", "B: innocent head");
+    git(seed, "push", "-q", "origin", "pr");
+    const headSha = git(seed, "rev-parse", "HEAD");
+    return { root, origin, mainSha, baseSha, headSha };
+  }
+  const HOSTILE = "PWNED-BY-ATTACKER-BASE";
+
+  it("REVIEW FINDING, known-good: a PR whose base is an attacker-pushed branch — the real workflow's checkout resolves to the DEFAULT branch, no hostile file reaches the tree, and the patch-id is still minted against that base", () => {
+    const { root, origin, mainSha, baseSha, headSha } = attackerBaseFixture();
+    const ref = interpolate(labeledCheckoutRef(loadWorkflow()), labeledEvent({ defaultBranch: "main", baseRef: "attacker-base", baseSha, headSha }));
+    expect(ref).toBe("refs/heads/main");
+
+    const next = join(root, "run");
+    execFileSync("git", ["clone", "-q", "--no-tags", origin, next], { stdio: "pipe" });
+    checkoutLikeAction(next, ref);
+    git(next, "fetch", "--no-tags", "-q", "origin", headSha);
+
+    expect(git(next, "rev-parse", "HEAD")).toBe(mainSha);
+    expect(git(next, "rev-parse", "HEAD")).not.toBe(baseSha);
+    expect(readFileSync(join(next, "scripts/box-patch-id-labeled.ts"), "utf-8")).toBe("// trusted default-branch script\n");
+    expect(filesContaining(next, HOSTILE)).toEqual([]);
+    // a stacked / non-default-base PR is not silently dropped: the base ref is DATA (origin/attacker-base is a fetched branch), so the mint still works
+    const verdict = mint(next, headSha, "attacker-base");
+    expect(verdict.ok).toBe(true);
+    if (verdict.ok) expect(verdict.record.baseSha).toBe(baseSha); // merge-base(origin/attacker-base, head) = X
+  }, 60000);
+
+  it("REVIEW FINDING, known-bad control (same instrument): the FIRST fix's ref (`base.sha`) resolved against the SAME event lands on the attacker's tree — the hostile files ARE there", () => {
+    const { root, origin, baseSha, headSha } = attackerBaseFixture();
+    const ref = interpolate(BASE_SHA_REF, labeledEvent({ defaultBranch: "main", baseRef: "attacker-base", baseSha, headSha }));
+    expect(ref).toBe(baseSha);
+
+    const next = join(root, "first-fix");
+    execFileSync("git", ["clone", "-q", "--no-tags", origin, next], { stdio: "pipe" });
+    checkoutLikeAction(next, ref);
+    expect(filesContaining(next, HOSTILE).sort()).toEqual(["scripts/box-patch-id-labeled.ts", "scripts/package-lock.json"]);
   }, 60000);
 });
