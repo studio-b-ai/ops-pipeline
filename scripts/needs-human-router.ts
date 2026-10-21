@@ -26,7 +26,16 @@
  * next hourly run. `--dry-run`: identical reads (real `gh` calls throughout — Rule #376, a dry
  * run that reads nothing proves nothing), zero mutations, one preview line per issue.
  *
- * Usage: tsx needs-human-router.ts --repo <owner/repo> [--dry-run]
+ * Third leg (stint #690, Kevin ruling 2026-09-18: "needs-human becomes a routed seat card
+ * with a clock; anything unrouted for seven days closes"): every issue the main pass leaves
+ * UNROUTED gets a one-time first-pass seat card (the clock starts at that comment's
+ * created_at, never the filing date); a card-aged issue still unrouted at 7 days CLOSES —
+ * but only under `--close-unrouted`, which is OFF by default. The first closing pass is a
+ * manual `--close-unrouted --dry-run` dispatch whose planned-close list lands on stint row
+ * #690 for review before any issue is closed (Rule #279: deterministic trigger; #376: the
+ * dry run proves real reads).
+ *
+ * Usage: tsx needs-human-router.ts --repo <owner/repo> [--dry-run] [--close-unrouted]
  */
 
 import {
@@ -45,8 +54,10 @@ import { railHold, type HoldRail } from "./lib/hold-rail.js";
 import { createAuthorizedReactorChecker } from "./lib/needs-human-authorization.js";
 import { PROBE_MARKER } from "./lib/needs-human-probe-lib.js";
 import {
+  FIRST_PASS_MARKER,
   HOLD_RECEIPT_MARKER,
   ROUTE_RECEIPT_MARKER,
+  UNROUTED_CLOSE_WINDOW_MS,
   hasAnyRouterReceipt,
   hasAuthorizedDisapproval,
   hasHoldReceipt,
@@ -55,6 +66,7 @@ import {
   recallDisposition,
   routeDisposition,
   summarizeDispositions,
+  unroutedClockDisposition,
   type Reactor,
   type RouterDisposition,
   laneLabelFor,
@@ -100,19 +112,34 @@ function addKevinDecisionLabel(repo: string, num: number): void {
 // v1 covered repos = the cross-repo allowlist too (design comment: "Cross-repo allowlist = the
 // same set" as the repos where needs-human issues exist today). Static per v1 — no fleet
 // discovery, matching the design's explicit static-list scope.
+// 2026-09-19 (stint #690): the three newly-callered repos (ops-pipeline, client-asthetik,
+// asthetik-portal) + asthetik-website added so the allowlist matches the true covered set
+// (a cross-repo hold targeting any of them no longer reads as an off-allowlist target).
 const ALLOWLIST = new Set(
-  ["bolt-wms", "studiob", "studiob-price-sync", "radio", "asthetik-trade-theme"].map((r) => `${ORG}/${r}`),
+  [
+    "bolt-wms",
+    "studiob",
+    "studiob-price-sync",
+    "radio",
+    "asthetik-trade-theme",
+    "asthetik-website",
+    "ops-pipeline",
+    "client-asthetik",
+    "asthetik-portal",
+  ].map((r) => `${ORG}/${r}`),
 );
 
-function parseArgs(argv: string[]): { repo: string; dryRun: boolean } {
+function parseArgs(argv: string[]): { repo: string; dryRun: boolean; closeUnrouted: boolean } {
   let repo: string | undefined;
   let dryRun = false;
+  let closeUnrouted = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--repo") repo = argv[++i];
     else if (argv[i] === "--dry-run") dryRun = true;
+    else if (argv[i] === "--close-unrouted") closeUnrouted = true;
   }
   if (!repo) throw new Error("--repo <owner/repo> is required");
-  return { repo, dryRun };
+  return { repo, dryRun, closeUnrouted };
 }
 
 // ───────────────────────────── reactor authorization (per run) ─────────────────────────────
@@ -154,6 +181,34 @@ function closeRejectedReceipt(): string {
 
 function recallCloseRejectedReceipt(): string {
   return "🚫 Closed as rejected — an authorized 👎 arrived after this issue was already auto-routed (found via the recall sweep, since routing removes the `needs-human` label). Reopen if this was a mistake. _(ops-pipeline#66 router, recall pass)_";
+}
+
+/**
+ * The stint #690 "routed seat card with a clock" — posted ONCE on the first routing pass
+ * that leaves an issue unrouted. Names the accountable seat (laneLabelFor's repo→seat map)
+ * and the exact due instant; the comment's created_at IS the clock start (first routing
+ * pass, never the filing date — so the pre-existing backlog gets one full window first).
+ */
+function firstPassCard(seat: string | null, dueAt: Date): string {
+  const seatLine = seat
+    ? `Accountable seat: **${seat}** (this repo's lane manager).`
+    : "Accountable seat: _unmapped for this repo_ — the Dispatcher lane owns it until REPO_LANE_MANAGER learns it.";
+  return [
+    FIRST_PASS_MARKER,
+    `⏱️ **First routing pass — this issue is on the clock.** ${seatLine}`,
+    "",
+    `If it is still unrouted (no route receipt) at **${dueAt.toISOString()}** (7 days from now), the router closes it with a comment naming board row #690 — needs-human means a named seat and a clock, never a parking lot.`,
+    "",
+    "_(ops-pipeline stint #690 — Kevin ruling 2026-09-18. The first closing pass runs dry-run-gated; the planned-close list is reviewed on the row before any issue is closed.)_",
+  ].join("\n");
+}
+
+function closeUnroutedReceipt(firstPassAt: Date): string {
+  return [
+    `🚫 **Closed — unrouted 7 days after its first routing pass (${firstPassAt.toISOString()}).** The seat card above started the clock; no route receipt ever landed.`,
+    "",
+    "Reopen if this was a mistake — reopening re-escalates it into the next sweep. _(ops-pipeline stint #690 — board row #690: \"anything unrouted for seven days closes\")_",
+  ].join("\n");
 }
 
 // hold-needs-kevin fires for two distinct reasons (codex review pass 2 P2, 2026-08-14: a
@@ -253,7 +308,64 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
 }
 
-async function runMainPass(repo: string, dryRun: boolean, actionedThisRun: Set<number>): Promise<RouterDisposition[]> {
+/**
+ * The stint #690 clock leg, evaluated for every main-pass issue that LEAVES the pass
+ * unrouted (no-probe, or either hold kind — those keep the `needs-human` label and never
+ * get a route receipt this run). Routed/skipped/closed-this-run dispositions never reach
+ * here. Stamping and closing are both metered through the shared #331 ACTION_CAP; the
+ * actual close additionally requires --close-unrouted (off by default — the first closing
+ * pass is a manual dry-run dispatch whose planned-close list is reviewed on stint row #690
+ * before any issue is closed, Rule #279/#376).
+ */
+function runUnroutedClock(
+  repo: string,
+  issue: IssueRow,
+  trusted: IssueComment[],
+  hasRouteReceiptMarker: boolean,
+  dryRun: boolean,
+  closeUnrouted: boolean,
+  actionedThisRun: Set<number>,
+): void {
+  const head = `  #${issue.number} "${truncate(issue.title, 70)}"`;
+  const cardComment = findLast(trusted, FIRST_PASS_MARKER);
+  const firstPassAt = cardComment ? new Date(cardComment.createdAt) : null;
+  const decision = unroutedClockDisposition({
+    hasRouteReceipt: hasRouteReceiptMarker,
+    firstPassAt,
+    now: new Date(),
+  });
+
+  switch (decision.kind) {
+    case "routed":
+      return; // a route receipt retires the clock — nothing to stamp, nothing to close
+    case "waiting": {
+      const hours = Math.ceil(decision.remainingMs / 3_600_000);
+      console.log(`${head}  clock: waiting (${hours}h left of the 7-day unrouted window)`);
+      return;
+    }
+    case "stamp-card": {
+      const seat = laneLabelFor(repo)?.slice("lane:".length) ?? null;
+      const result = tryApply(() => commentIssue(repo, issue.number, firstPassCard(seat, decision.dueAt)), dryRun);
+      logResult(head, `clock: stamp first-pass card (due ${decision.dueAt.toISOString()})`, result);
+      if (result !== "capped") actionedThisRun.add(issue.number);
+      return;
+    }
+    case "close-unrouted": {
+      const days = Math.floor(decision.ageMs / 86_400_000);
+      if (!closeUnrouted) {
+        console.log(`${head}  clock: ELIGIBLE to close (${days}d unrouted) — gated off (pass --close-unrouted; first closing pass is a dry-run dispatch, stint #690)`);
+        return;
+      }
+      const firstPassIso = firstPassAt ? firstPassAt.toISOString() : "unknown";
+      const result = tryApply(() => closeIssue(repo, issue.number, closeUnroutedReceipt(new Date(firstPassIso))), dryRun);
+      logResult(head, `clock: close-unrouted (${days}d since first pass ≥ 7d)`, result);
+      if (result !== "capped") actionedThisRun.add(issue.number);
+      return;
+    }
+  }
+}
+
+async function runMainPass(repo: string, dryRun: boolean, closeUnrouted: boolean, actionedThisRun: Set<number>): Promise<RouterDisposition[]> {
   // ops-pipeline#320: `includeLabels: true` so the hold-rail leg can enumerate every
   // `lane:<seat>` label on a held issue and rail that seat too (in addition to Dispatcher).
   // Existing consumers of `IssueRef` are unaffected — the `labels` field is optional.
@@ -283,6 +395,13 @@ async function runMainPass(repo: string, dryRun: boolean, actionedThisRun: Set<n
     const row: IssueRow = { number: issue.number, title: truncate(issue.title, 70) };
     const labelNames = (issue.labels ?? []).map((l) => l.name);
     await logMainOutcome(row, disposition, holdReceiptPresent, dryRun, actionedThisRun, repo, labelNames);
+
+    // The stint #690 clock leg: only for dispositions that leave the issue UNROUTED
+    // (still labeled, no route receipt). route-same-repo / close-rejected resolved the
+    // issue this run; skip-already-routed already carries a route receipt.
+    if (disposition.kind === "no-probe" || disposition.kind === "hold-needs-kevin" || disposition.kind === "hold-cross-repo") {
+      runUnroutedClock(repo, row, trusted, routeReceiptPresent, dryRun, closeUnrouted, actionedThisRun);
+    }
   }
 
   return dispositions;
@@ -483,12 +602,12 @@ function runRecallPass(repo: string, dryRun: boolean, actionedThisRun: Set<numbe
 // ───────────────────────────── main ─────────────────────────────
 
 async function main(): Promise<void> {
-  const { repo, dryRun } = parseArgs(process.argv.slice(2));
+  const { repo, dryRun, closeUnrouted } = parseArgs(process.argv.slice(2));
 
-  console.log(`=== needs-human-router — ${repo}${dryRun ? " --dry-run (real reads, zero mutations)" : ""} ===`);
+  console.log(`=== needs-human-router — ${repo}${dryRun ? " --dry-run (real reads, zero mutations)" : ""}${closeUnrouted ? " --close-unrouted (7-day unrouted clock closes ENABLED)" : " (7-day clock: stamp/observe only — closes gated off, stint #690)"} ===`);
 
   const actionedThisRun = new Set<number>();
-  const mainDispositions = await runMainPass(repo, dryRun, actionedThisRun);
+  const mainDispositions = await runMainPass(repo, dryRun, closeUnrouted, actionedThisRun);
   const recallDispositions = runRecallPass(repo, dryRun, actionedThisRun);
 
   const allDispositions = [...mainDispositions, ...recallDispositions];

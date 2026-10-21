@@ -31,6 +31,26 @@ export const ROUTE_RECEIPT_MARKER = "<!-- needs-human-router:v1 -->";
  * and is re-evaluated every run; only the RECEIPT COMMENT itself is deduped by this marker). */
 export const HOLD_RECEIPT_MARKER = "<!-- needs-human-router:hold:v1 -->";
 
+/**
+ * ops-pipeline stint #690 (Kevin ruling 2026-09-18: "needs-human becomes a routed seat card
+ * with a clock; anything unrouted for seven days closes") — posted ONCE on the first routing
+ * pass that sees an issue leave the pass STILL UNROUTED (no ROUTE_RECEIPT_MARKER). The card
+ * names the accountable seat and the 7-day due date; its comment `created_at` IS the clock
+ * start. The contract keys the clock on the FIRST ROUTING PASS, never the issue's filing
+ * date, so a years-old backlog item gets one full window from first sight before any close.
+ */
+export const FIRST_PASS_MARKER = "<!-- needs-human-router:first-pass:v1 -->";
+
+/** The clock window: an issue still unrouted this long after its first routing pass closes
+ * (with a comment naming stint row #690). The first closing pass runs dry-run-gated at the
+ * CALLER (`--close-unrouted` off by default; fired manually with --dry-run first) so the
+ * planned-close list is reviewed on the row before any issue is closed (Rule #279/#376). */
+export const UNROUTED_CLOSE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+export function hasFirstPassMarker(commentBodies: string[]): boolean {
+  return commentBodies.some((b) => b.includes(FIRST_PASS_MARKER));
+}
+
 export function hasRouteReceipt(commentBodies: string[]): boolean {
   return commentBodies.some((b) => b.includes(ROUTE_RECEIPT_MARKER));
 }
@@ -237,6 +257,50 @@ export interface RecallDecisionInput {
 
 export type RecallDisposition = { kind: "close-rejected" } | { kind: "none" };
 
+// ───────────────────────────── the unrouted clock (stint #690) ─────────────────────────────
+
+export type UnroutedClockDisposition =
+  /** The issue already carries a ROUTE_RECEIPT — it is routed, so no clock exists (a
+   * lingering label after a partial-failure route is the skip-already-routed case, NOT an
+   * unrouted item; closing it would punish a human's deliberate re-escalation). */
+  | { kind: "routed" }
+  /** Seen this pass, still unrouted, no first-pass card yet — post the card (the clock
+   * starts at the CARD's created_at, i.e. this first routing pass). `dueAt` is precomputed
+   * for the card text so the I/O half never does date math. */
+  | { kind: "stamp-card"; dueAt: Date }
+  /** Card exists, window not yet elapsed — nothing to do but say how long remains. */
+  | { kind: "waiting"; remainingMs: number }
+  /** Card exists and the window HAS elapsed — eligible to close. The CALLER gates the
+   * actual close behind `--close-unrouted` (off by default; first pass runs dry so the
+   * planned-close list lands on stint row #690 before any issue is closed). */
+  | { kind: "close-unrouted"; ageMs: number };
+
+/**
+ * The 7-day unrouted clock decision (stint #690, Kevin ruling 2026-09-18). Pure — the
+ * caller resolves `firstPassAt` from the trusted FIRST_PASS_MARKER comment's created_at
+ * (I/O) and passes `now` so tests pin the clock (Rule #256).
+ *
+ * Order is load-bearing: routed first (a route receipt retires the clock unconditionally),
+ * then stamp (no card = first sight = the clock has not started, so nothing can be due),
+ * then the window compare. Boundary: ageMs >= windowMs closes — an item exactly 7 days old
+ * at its pass has had its full window.
+ */
+export function unroutedClockDisposition(input: {
+  hasRouteReceipt: boolean;
+  firstPassAt: Date | null;
+  now: Date;
+  windowMs?: number;
+}): UnroutedClockDisposition {
+  const windowMs = input.windowMs ?? UNROUTED_CLOSE_WINDOW_MS;
+  if (input.hasRouteReceipt) return { kind: "routed" };
+  if (input.firstPassAt === null) {
+    return { kind: "stamp-card", dueAt: new Date(input.now.getTime() + windowMs) };
+  }
+  const ageMs = input.now.getTime() - input.firstPassAt.getTime();
+  if (ageMs >= windowMs) return { kind: "close-unrouted", ageMs };
+  return { kind: "waiting", remainingMs: windowMs - ageMs };
+}
+
 /**
  * The RECALL pass (design comment step 5): "👎 recalls after the fact." Evaluated only for
  * issues the caller found via reaction search (NOT the label-based enumeration a same-repo route
@@ -266,6 +330,11 @@ export const REPO_LANE_MANAGER: Readonly<Record<string, string>> = {
   "studio-b-ai/client-asthetik": "mechanic",
   "studio-b-ai/acuops-pipeline": "mechanic",
   "studio-b-ai/radio": "engineer",
+  // 2026-09-19 (stint #690): asthetik-website added — the repo exists under that name now
+  // (asthetik-trade-theme redirects to it). Its caller still routes the OLD name (board row
+  // #681's in-flight fix, asthetik-website#611); trade-theme stays mapped for exactly as
+  // long as that caller does, so both names resolve to the same seat either way.
+  "studio-b-ai/asthetik-website": "engineer",
   "studio-b-ai/bolt-wms": "engineer",
   "studio-b-ai/studiob": "engineer",
   "studio-b-ai/studiob-price-sync": "engineer",

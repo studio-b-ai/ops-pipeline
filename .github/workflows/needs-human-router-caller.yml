@@ -1,0 +1,64 @@
+name: Needs-human router
+
+# ops-pipeline#66 chip B — per-repo hourly cron caller for the centralized
+# needs-human router (ops-pipeline#66 chip A, merged to main as PR #89).
+# Kevin's ruling 2026-08-14 ("auto-route immediately" — the 👎 reaction is a
+# BRAKE, never a gate) — design comment:
+# https://github.com/studio-b-ai/ops-pipeline/issues/66#issuecomment-5289224655
+#
+# This file is a THIN caller — all routing logic lives in ops-pipeline's
+# reusable .github/workflows/needs-human-router.yml (house pattern, mirrors
+# needs-human-probe.yml / squasher-automerge.yml). No fleet-wide GitHub App
+# exists (verified in the design comment), so this caller runs entirely
+# against ITS OWN repo using its own ambient GITHUB_TOKEN — zero new
+# credentials.
+#
+# stint #690 (2026-09-19): this caller closes the coverage gap — ops-pipeline
+# itself held 24 open needs-human issues with NO caller (the reusable workflow
+# lived here but nothing ever invoked it against this repo).
+#
+# permissions: issues:write is REQUIRED HERE at the caller, not only in the
+# reusable workflow — a called reusable workflow's effective token
+# permissions are the INTERSECTION of the caller's and the callee's declared
+# grants (GitHub Actions semantics), so omitting issues:write in THIS file
+# would 403 every mutation even though the reusable workflow itself declares
+# it.
+
+on:
+  schedule:
+    # Hourly, UTC (Rule #94 — UTC-only). Minute staggered per repo (:09) to
+    # avoid a synchronized API burst across the fleet's callers (Rule #298
+    # jitter spirit). Taken minutes: :05 bolt-wms, :17 studiob, :29
+    # studiob-price-sync, :33 asthetik-portal, :41 radio, :53 asthetik-website.
+    - cron: "9 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real gh reads throughout, zero mutations — preview only"
+        required: false
+        type: boolean
+        default: false
+      close_unrouted:
+        description: "stint #690: close issues still unrouted 7d after their first-pass card. First closing pass MUST be dry_run=true — the planned-close list is reviewed on the row before any issue closes"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: needs-human-router-caller
+  cancel-in-progress: false
+
+jobs:
+  route:
+    name: "Route needs-human issues"
+    uses: studio-b-ai/ops-pipeline/.github/workflows/needs-human-router.yml@main
+    with:
+      repo: studio-b-ai/ops-pipeline
+      dry_run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+      close_unrouted: ${{ github.event_name == 'workflow_dispatch' && inputs.close_unrouted || false }}
+    secrets:
+      SEAT_INBOX_TOKEN: ${{ secrets.SEAT_INBOX_TOKEN }}
