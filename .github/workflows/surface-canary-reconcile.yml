@@ -1,0 +1,89 @@
+name: Surface canary reconcile
+
+# Turns the surface-canary sweep's results artifact into auto-reconciled issues on
+# the owning repos (surface canary program, stint #461). Lives HERE — not in
+# surface-canary — because the studiob-fleet-bot App PEM lives ONLY in this repo's
+# secrets (locked D3, ops#250): a workflow in any other repo can never mint the
+# cross-repo issue writer. The sweep (private surface-canary repo) only emits the
+# artifact; this workflow reads it with the App token and reconciles.
+
+on:
+  schedule:
+    - cron: "9-59/10 * * * *" # every 10 min at :09 — two minutes behind the sweep's :07
+  workflow_dispatch:
+    inputs:
+      sweep_run_id:
+        description: "Reconcile THIS surface-canary run id now (default: latest completed sweep run)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: surface-canary-reconcile
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    name: Reconcile issues from the latest sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install script deps
+        run: npm ci --prefix scripts
+
+      - name: Mint the fleet App token
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: Fail loud if the mint returned nothing
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::Fleet App token mint returned an empty token — refusing to reconcile (ops#250; a github.token fallback could not write the owning repos anyway)."
+          exit 1
+
+      - name: Resolve the sweep run
+        id: run
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          WANT: ${{ inputs.sweep_run_id }}
+        run: |
+          set -euo pipefail
+          if [ -n "$WANT" ]; then
+            echo "id=$WANT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rid=$(gh api "repos/studio-b-ai/surface-canary/actions/workflows/surface-sweep.yml/runs?status=completed&per_page=1" --jq '.workflow_runs[0].id')
+          [ -n "$rid" ] && [ "$rid" != "null" ] || { echo "::error::no completed surface-sweep run found"; exit 1; }
+          echo "id=$rid" >> "$GITHUB_OUTPUT"
+
+      - name: Download the results artifact
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ steps.run.outputs.id }}" -R studio-b-ai/surface-canary -n surface-sweep-results
+          test -s surface-sweep-results.json
+
+      - name: Reconcile issues on the owning repos
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          RUN_URL: https://github.com/studio-b-ai/surface-canary/actions/runs/${{ steps.run.outputs.id }}
+        run: scripts/node_modules/.bin/tsx scripts/surface-canary-reconcile.ts
+
+      - name: Terminal status
+        if: always()
+        run: |
+          echo "result=${{ job.status }}"
