@@ -350,7 +350,12 @@ jobs:
           # receipt line to stderr. The state file lives in the GitHub Actions cache
           # (fleet-sweep-state-* key).
           # PR-A2 item 3: the gate's own sha is no longer in the fingerprint (every ops-pipeline merge used to re-evaluate every labeled PR).
-          entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-changed.ts /tmp/fleet-sweep-state.json --record)
+          # PR-A2 review finding (medium): fingerprints are only STAGED here (the state file is untouched) and COMMITTED after the order step,
+          # for exactly the entries it lets through. Recording at this point — what `--record` did — marked every changed PR "evaluated"
+          # before the per-repo cap below dropped some; with the gate sha gone (it used to change on every ops-pipeline merge and flush
+          # everything) a capped-out PR then stayed "unchanged" forever. Now a capped-out PR stays changed and is re-offered next tick.
+          STAGED=/tmp/fleet-sweep-staged.json
+          entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-changed.ts /tmp/fleet-sweep-state.json --stage "$STAGED")
           changed_count=$(jq length <<<"$entries")
           if [ "$changed_count" -lt "$count" ]; then
             echo "Change-driven filter: $changed_count of $count labeled PRs have new fingerprints (fleet-sweep-changed.ts, ops#836). Skipped entries printed to stderr above."
@@ -361,12 +366,15 @@ jobs:
           # bugsquasher group by run_number, global fanout applied last. The
           # ordering logic (pure) + tests live in scripts/lib/fleet-sweep-order.ts.
           # With the change-driven filter above (ops#836), the fanout cap is a safety
-          # measure — unchanged PRs aren't re-evaluated each cycle.
+          # measure — unchanged PRs aren't re-evaluated each cycle. A PR the cap skips is NOT
+          # recorded (the --commit below), so the cap defers it; it never strands it.
           entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-order.ts "$MAX_FANOUT" "$PER_REPO_CAP" "$RUN_OFFSET")
           ordered_count=$(jq length <<<"$entries")
           if [ "$ordered_count" -lt "$changed_count" ]; then
-            echo "::warning::Fanout applied: $changed_count changed PRs found, $ordered_count evaluated this cycle (per-repo cap=$PER_REPO_CAP, global cap=$MAX_FANOUT, run_offset=$RUN_OFFSET; #327 — train-first, round-robin rotation of the bugsquasher group)."
+            echo "::warning::Fanout applied: $changed_count changed PRs found, $ordered_count evaluated this cycle (per-repo cap=$PER_REPO_CAP, global cap=$MAX_FANOUT, run_offset=$RUN_OFFSET; #327 — train-first, round-robin rotation of the bugsquasher group). The other $((changed_count - ordered_count)) stay changed and are offered again next tick."
           fi
+          # Record exactly what goes to the gate (and nothing else). Prunes PRs that left the enumeration.
+          printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-changed.ts /tmp/fleet-sweep-state.json --commit "$STAGED"
           echo "entries=$entries" >> "$GITHUB_OUTPUT"
 
       - name: Save sweep state

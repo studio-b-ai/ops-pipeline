@@ -1,30 +1,15 @@
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
-import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 import { NATIVE_RULESET_NAME } from "../native-exclusion.js";
-import { makeGhStub, type GhStubRule } from "./fixtures/gate-gh-stub.js";
+import { type GhStubRule } from "./fixtures/gate-gh-stub.js";
+import { prListCalls, runSweep, writeCalls } from "./fixtures/gate-fleet-sweep-harness.js";
 
-// Go-native Phase A, PR-A2 item 2 — the WIRING half, on the real thing (#223): this test extracts the `run:` script of the
-// "List target (repo, PR, mode) entries" step straight out of .github/workflows/squasher-fleet-sweep.yml and runs it in bash,
-// exactly as Actions does (`bash --noprofile --norc -e -o pipefail`), with the REAL native-exclusion CLI + fleet-sweep-changed +
-// fleet-sweep-order under tsx, against a fake `gh` that answers GitHub. The only edit to the script is /tmp/ → a per-test dir.
+// Go-native Phase A, PR-A2 item 2 — the WIRING half, on the real thing (#223): this test runs the `run:` script of the
+// "List target (repo, PR, mode) entries" step straight out of .github/workflows/squasher-fleet-sweep.yml in bash, exactly as Actions does
+// (`bash --noprofile --norc -e -o pipefail`), with the REAL native-exclusion CLI + fleet-sweep-changed + fleet-sweep-order under tsx,
+// against a fake `gh` that answers GitHub (the harness: fixtures/gate-fleet-sweep-harness.ts). The only edit to the script is /tmp/ → a
+// per-test dir.
 // Both directions (#322/#471): a native repo is skipped with no PR read and no write; a non-native repo is NOT (same instrument,
 // positive control); an unreadable ruleset list excludes (fail closed); the org-wide leg skips a native repo and keeps the rest.
-
-const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const ROOT = join(SCRIPTS, "..");
-const WORKFLOW = join(ROOT, ".github", "workflows", "squasher-fleet-sweep.yml");
-
-function listStepScript(): string {
-  const wf = parse(readFileSync(WORKFLOW, "utf-8")) as { jobs: Record<string, { steps: Array<{ id?: string; run?: string }> }> };
-  const step = wf.jobs["determine-prs"].steps.find((s) => s.id === "list");
-  if (!step?.run) throw new Error("the `list` step of determine-prs was not found — the workflow was restructured; update this test deliberately");
-  return step.run;
-}
 
 const nativeRow = { id: 4242, name: NATIVE_RULESET_NAME, target: "branch", enforcement: "active", source_type: "Repository" };
 const nativeDetail = { ...nativeRow, conditions: { ref_name: { include: ["~DEFAULT_BRANCH"], exclude: [] } } };
@@ -41,44 +26,6 @@ const NO_LABELED_PRS: GhStubRule[] = [
   { match: /^pr list --repo /, out: "[]" },
   { match: /^api -X GET search\/issues/, out: "[]" },
 ];
-
-function runSweep(env: Record<string, string>, rules: GhStubRule[]) {
-  const dir = mkdtempSync(join(tmpdir(), "fleet-sweep-"));
-  const stub = makeGhStub(dir, rules);
-  const scriptPath = join(dir, "list-step.sh");
-  writeFileSync(scriptPath, listStepScript().replaceAll("/tmp/", `${dir}/`));
-  const ghOutput = join(dir, "github-output");
-  writeFileSync(ghOutput, "");
-  const r = spawnSync("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", scriptPath], {
-    cwd: ROOT,
-    env: {
-      PATH: stub.path,
-      HOME: process.env.HOME ?? "",
-      GH_STUB_LOG: stub.logPath,
-      GH_TOKEN: "stub-not-a-secret",
-      PATCH_ID_WINS: "config",
-      MAX_FANOUT: "100",
-      PER_REPO_CAP: "5",
-      RUN_OFFSET: "1",
-      GITHUB_OUTPUT: ghOutput,
-      ONLY_REPO: "",
-      ONLY_PR: "",
-      ...env,
-    },
-    encoding: "utf-8",
-  });
-  const calls = readFileSync(stub.logPath, "utf-8").split("\n").filter(Boolean);
-  const out = readFileSync(ghOutput, "utf-8");
-  const entriesLine = out.split("\n").find((l) => l.startsWith("entries="));
-  return {
-    status: r.status,
-    log: `${r.stdout}\n${r.stderr}`,
-    calls,
-    entries: entriesLine ? (JSON.parse(entriesLine.slice("entries=".length)) as Array<{ repo: string; pr_number: string }>) : null,
-  };
-}
-const prListCalls = (calls: string[]) => calls.filter((c) => c.startsWith("pr list "));
-const writeCalls = (calls: string[]) => calls.filter((c) => /update-branch|pr edit|issues\/\d+\/labels|--add-label|-X (POST|PUT|PATCH|DELETE)/.test(c));
 
 describe("squasher-fleet-sweep.yml `list` step — native exclusion (registry leg), run for real", () => {
   it("dispatch ONLY_REPO=<native registered repo> logs exactly `excluded: native <repo>`, makes NO PR read and NO write, evaluates nothing", () => {

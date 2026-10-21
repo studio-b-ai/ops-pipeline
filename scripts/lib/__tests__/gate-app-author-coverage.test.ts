@@ -96,9 +96,11 @@ const A2_DOOR_TESTS = [
   "gate-log-enum.test.ts",
   "gate-public-log.test.ts",
   "fleet-sweep-native-exclusion.test.ts",
+  "fleet-sweep-liveness.test.ts",
   "automerge-sweep-native-exclusion.test.ts",
   "box-patch-id-labeled-workflow.test.ts",
   "fixtures/gate-gh-stub.ts",
+  "fixtures/gate-fleet-sweep-harness.ts",
 ].map((t) => `scripts/lib/__tests__/${t}`);
 
 // Credential-bearing paths per repo, one inside each row's safe_path_globs. These are the rows #611's H2 hardens; radio already
