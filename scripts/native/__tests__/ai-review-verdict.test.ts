@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CATEGORY_ORDER,
+  VERDICT_ID_VERSION,
   WAIVABLE,
   cachedModelOutcome,
   conclusionAgrees,
@@ -108,6 +109,17 @@ describe("external_id `v1:<verdict>:<categories>[:<mergebase>]`", () => {
     expect(parseExternalId("v1:block:HB")).toStrictEqual({ kind: "block", categories: ["H", "B"] });
     expect(parseExternalId("v1:waived:Z")).toStrictEqual({ kind: "waived", categories: ["Z"] });
     expect(parseExternalId("v1:waived:")).toStrictEqual({ kind: "waived", categories: [] });
+  });
+
+  it("the id version is the FIRST field of every id, and an id of another version never parses (bumping it re-evaluates every cached verdict: a guard that tightens is not forward-only)", () => {
+    expect(VERDICT_ID_VERSION).toBe("v1");
+    const ids = [encodeExternalId({ kind: "pass", categories: [], mergeBase: MB }), encodeExternalId({ kind: "block", categories: ["H"] }), encodeExternalId({ kind: "waived", categories: ["Z"] })];
+    for (const id of ids) {
+      expect(id.startsWith(`${VERDICT_ID_VERSION}:`)).toBe(true);
+      expect(parseExternalId(id)).not.toBeNull();
+      expect(parseExternalId(id.replace(/^v1/, "v2")), id).toBeNull(); // a future version, as after a bump
+      expect(parseExternalId(id.replace(/^v1/, "v0")), id).toBeNull();
+    }
   });
 
   it("sortCategories is the canonical order and de-duplicates", () => {

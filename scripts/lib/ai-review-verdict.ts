@@ -68,7 +68,14 @@ export function sortCategories(cats: Iterable<Category>): Category[] {
   return CATEGORY_ORDER.filter((c) => set.has(c));
 }
 
-const EXTERNAL_ID_RE = /^v1:(pass|block|waived):([SIKDHFBCZU]*)(?::([0-9a-f]{40}))?$/;
+/**
+ * The version of the verdict algorithm, the first field of every external_id. A cached model verdict is trusted without re-reading the diff
+ * (it was computed by the scan-then-model order), so TIGHTENING a guard that feeds the cache — a broader secret pattern set in
+ * ai-review-secrets.ts, a stricter rubric — does not reach verdicts already posted. Bump this when you do (#381): every earlier external_id
+ * then fails to parse, is never a cache hit, and every open PR is re-evaluated once with the new guard.
+ */
+export const VERDICT_ID_VERSION = "v1";
+const EXTERNAL_ID_RE = new RegExp(`^${VERDICT_ID_VERSION}:(pass|block|waived):([SIKDHFBCZU]*)(?::([0-9a-f]{40}))?$`);
 const SHA40 = /^[0-9a-f]{40}$/;
 /** What a waiver can have overridden when it records MODEL categories (Z is waivable too, but it is a size gate, not a model verdict). */
 const MODEL_WAIVED: ReadonlySet<Category> = new Set<Category>(["I", "K", "D"]);
@@ -93,10 +100,10 @@ export function encodeExternalId(v: Verdict): string {
   if (v.kind === "block" && canonical.length === 0) throw new Error("external_id: a block carries at least one category");
   if (isModelVerdict(v)) {
     if (typeof v.mergeBase !== "string" || !SHA40.test(v.mergeBase)) throw new Error("external_id: a model verdict carries the full 40-hex merge base it was computed against");
-    return `v1:${v.kind}:${canonical.join("")}:${v.mergeBase}`;
+    return `${VERDICT_ID_VERSION}:${v.kind}:${canonical.join("")}:${v.mergeBase}`;
   }
   if (v.mergeBase !== undefined) throw new Error("external_id: a deterministic verdict carries no merge base");
-  return `v1:${v.kind}:${canonical.join("")}`;
+  return `${VERDICT_ID_VERSION}:${v.kind}:${canonical.join("")}`;
 }
 
 /** Exact inverse of encodeExternalId; null for anything that is not a canonical v1 verdict (including another version, a model verdict

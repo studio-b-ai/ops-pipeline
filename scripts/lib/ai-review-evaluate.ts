@@ -18,7 +18,8 @@
  * (ai-review-secrets.ts), BEFORE any waiver is consulted. An S hit is an unwaivable failure, and it never costs a model call. The scan needs
  * the diff, so a path that would post a success without having read the diff (a Z waiver, a model-down waiver) reads it first; when it cannot
  * be read there is no verdict, never a success. A cached model verdict is trusted without a re-read because only this scan-then-model order
- * ever writes one.
+ * ever writes one; tightening the scan later therefore means bumping VERDICT_ID_VERSION (ai-review-verdict.ts, #381), which makes every earlier
+ * verdict a cache miss.
  *
  * Legs, cheapest first (everything is re-derived from the API, never from a dispatch payload — #398):
  *   1  fork PR (head repo ≠ base repo, or head repo gone)       → block F        never waived

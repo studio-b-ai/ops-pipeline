@@ -26,6 +26,10 @@
  * Output is ENUMS and sanitized file paths only. The matched text never leaves this function: a finding cannot carry the secret into a
  * check run, a log, or a handoff.
  *
+ * Tightening later. A cached model verdict is reused without re-reading the diff, so broadening the patterns below does not reach verdicts
+ * already posted. Bump VERDICT_ID_VERSION (ai-review-verdict.ts) in the same change: earlier external_ids stop parsing, are never a cache
+ * hit, and each open PR is re-scanned once (#381).
+ *
  * Cost. Every pattern is linear: the one look-ahead is bounded (120 characters), and no pattern nests an unbounded quantifier inside
  * another. A multi-megabyte diff is a few linear passes.
  */
