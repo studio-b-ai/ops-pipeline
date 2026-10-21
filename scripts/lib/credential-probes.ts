@@ -327,8 +327,9 @@ export async function probeShipEngineApiKey(apiKey: string): Promise<ProbeResult
  * OFF-1P on the host that consumes it (e.g. the Mac Studio's ssh `claude -p` env file). The monitor
  * cannot reach that host and must never hold a copy of the value, so this probe reads NOTHING and
  * touches no network: the countdown on `recorded_expiry` is the expiry signal. Liveness (an early
- * revoke) is out of this monitor's reach — it needs a host-side model round-trip; `claude auth
- * status` reports `loggedIn` for any token string, so it is a presence check, not an aliveness oracle.
+ * revoke) is out of this monitor's reach — it needs a host-side model round-trip, which the Studio
+ * doctor's `claude_oauth` check runs (claude-config-plane#929); `claude auth status` reports
+ * `loggedIn` for any token string, so it is a presence check, not an aliveness oracle.
  *   - op_ref set           → PROBE_FAILED (manifest contradiction — the value is never read)
  *   - no recorded_expiry   → PROBE_FAILED (no expiry signal at all — a monitoring gap)
  *   - else                 → alive, expiry left to `recorded_expiry` (expirySource "recorded")
