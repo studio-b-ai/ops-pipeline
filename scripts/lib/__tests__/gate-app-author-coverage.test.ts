@@ -41,7 +41,11 @@ const rowFor = (repo: string): Row => {
   return row;
 };
 const splitList = (s?: string): string[] => (s ?? "").split(",").map((x) => x.trim()).filter(Boolean);
-const blanked = (row: Row): Row => ({ ...row, sensitive_path_patterns: "" });
+// PR-A1 (#611) also turns code-fix OFF on six rows (ops-pipeline, bolt-wms, studiob, price-sync, theme, portal) until they go
+// native. The controls and the pattern-level guard therefore force code-fix ON, so they keep proving the patterns themselves hold
+// if a later registry edit re-enables the class; the real rows are still checked as-is.
+const withCodeFix = (row: Row): Row => ({ ...row, enabled_classes: [...new Set([...splitList(row.enabled_classes), "code-fix"])].join(",") });
+const blanked = (row: Row): Row => withCodeFix({ ...row, sensitive_path_patterns: "" });
 
 /** Would a PR authored by the App that changes only `path`, with a green rollup and a CLEAN review, merge with NO human key? */
 function mergesUnattended(row: Row, path: string): boolean {
@@ -149,9 +153,9 @@ describe("App author × door registry — the instrument can say yes (Rule #322/
     }
   });
 
-  it("KNOWN-GOOD: a non-door script (drift-check) is NOT in the derived door closure and IS still admitted on the real ops-pipeline row", () => {
+  it("KNOWN-GOOD: a non-door script (drift-check) is NOT in the derived door closure and IS admitted by the real ops-pipeline patterns when code-fix is on", () => {
     expect(DOOR_CODE).not.toContain("scripts/drift-check.ts");
-    expect(mergesUnattended(rowFor(OPS), "scripts/drift-check.ts")).toBe(true);
+    expect(mergesUnattended(withCodeFix(rowFor(OPS)), "scripts/drift-check.ts")).toBe(true);
   });
 
   it("an author outside the eligible list never merges, whatever the registry says (the guard is about the App, not about everyone)", () => {
@@ -173,5 +177,14 @@ describe("App author × door registry — THE GUARD: the real registry refuses a
 
   it.each(CREDENTIAL_PATHS)("%s refuses credential-bearing path %s", (repo, path) => {
     expect(mergesUnattended(rowFor(repo), path), `${repo} ${path}: ${BLOCKED_BY}`).toBe(false);
+  });
+
+  it("the real ops-pipeline patterns alone refuse every door file and door test, even with code-fix forced on", () => {
+    const bad = offenders(withCodeFix(rowFor(OPS)), [...DOOR_CODE, ...A2_DOOR_TESTS]);
+    expect(bad, `${BLOCKED_BY}\n  admitted with code-fix on:\n  ${bad.join("\n  ")}`).toEqual([]);
+  });
+
+  it.each(CREDENTIAL_PATHS)("%s patterns alone refuse credential-bearing path %s, even with code-fix forced on", (repo, path) => {
+    expect(mergesUnattended(withCodeFix(rowFor(repo)), path), `${repo} ${path}: ${BLOCKED_BY}`).toBe(false);
   });
 });
