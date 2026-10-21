@@ -4,7 +4,7 @@
     {
       "repo": "studio-b-ai/bolt-wms",
       "enabled_classes": "docs-comment,test-only,code-fix",
-      "sensitive_path_patterns": "^\\.github/actions/,^(?!.*__tests__/).*([Tt]ier|[Cc]ustomer-?[Cc]lass|trade-rung|trade-application|[Ww]orksheet|[Pp]romotion|[Dd]iscount|msrp|map-floor|rail-audit),^(?!.*__tests__/).*([Ss]ecret|[Tt]oken|[Cc]redential|[Pp]assword|[Pp]ermission|msal|ApiKey|[Ll]ogin),^(?!.*__tests__/)(?!docs/).*([Aa]pi[-_]?[Kk]ey|stock-api-admin|seed-admin|UserAdmin|[Ii]dentity|sas-agents|bootstrap-users|create-workers|provision-cs-rep|order-embed),(^|/)node_modules/",
+      "sensitive_path_patterns": "^\\.github/actions/,^(?!.*__tests__/).*([Tt]ier|[Cc]ustomer-?[Cc]lass|trade-rung|trade-application|[Ww]orksheet|[Pp]romotion|[Dd]iscount|msrp|map-floor|rail-audit),^(?!.*__tests__/).*([Ss]ecret|[Tt]oken|[Cc]redential|[Pp]assword|[Pp]ermission|msal|ApiKey|[Ll]ogin),^(?!.*__tests__/)(?!docs/).*([Aa]pi[-_]?[Kk]ey|stock-api-admin|seed-admin|UserAdmin|[Ii]dentity|sas-agents|bootstrap-users|create-workers|provision-cs-rep|order-embed),(^|/)node_modules/,^(?!.*__tests__/)(?!docs/).*(sas-bridge|cs-intake-embed|entra-sync|user-capabilit)",
       "safe_path_globs": "src/**,client/src/**,hubspot/src/**,scripts/**,docs/**",
       "required_checks": "Client — TypeScript + Build,Server — TypeScript + Tests",
       "train": true
@@ -12,7 +12,7 @@
     {
       "repo": "studio-b-ai/studiob",
       "enabled_classes": "docs-comment,test-only,code-fix",
-      "sensitive_path_patterns": "^packages/api/src/routes/(shopify|acumatica),^(?!.*__tests__/).*([Ss]ecret|[Tt]oken|[Cc]redential|[Pp]assword|[Pp]ermission|session-(pool|gate|manager|bridge)|soap-login|[Ll]ogin),^(?!.*__tests__/)(?!docs/).*(view-as|[Ii]mpersonat|[Ii]dentity|[Ll]icens|seed-heritage|zoom-app-context),(^|/)node_modules/",
+      "sensitive_path_patterns": "^packages/api/src/routes/(shopify|acumatica),^(?!.*__tests__/).*([Ss]ecret|[Tt]oken|[Cc]redential|[Pp]assword|[Pp]ermission|session-(pool|gate|manager|bridge)|soap-login|[Ll]ogin),^(?!.*__tests__/)(?!docs/).*(view-as|[Ii]mpersonat|[Ii]dentity|[Ll]icens|seed-heritage|zoom-app-context),(^|/)node_modules/,^(?!.*__tests__/)(?!docs/).*(embed-bridge|sas-link|routes/desk[.]ts$)",
       "safe_path_globs": "packages/*/src/**,scripts/**,docs/**",
       "required_checks": "Build + boot + probe,tsc --noEmit (SDK drift guard) (api),turbo run test (all workspace suites)",
       "required_checks_path_deps": "tsc --noEmit (SDK drift guard) (api)=packages/**",
