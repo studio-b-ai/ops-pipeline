@@ -863,6 +863,7 @@ async function evaluate(
   safePathGlobs: string[],
   requiredChecks: string[],
   requiredChecksPathDeps: string[],
+  sanctionedSkips: string[],
 ): Promise<void> {
   // ops#190 B1 misconfiguration tripwire (loud, non-fatal): 'code-fix' enabled with
   // no safe_path_globs is a VALID but INERT configuration (allowlist-primary,
@@ -875,6 +876,15 @@ async function evaluate(
     );
   }
 
+  // Union fleet-registry sanctioned skips (from the caller workflow) with the
+  // committed YAML allowlist — both sources independently declare check names
+  // whose SKIPPED conclusion counts as clean in the CI-rollup leg. The YAML is
+  // the standing set (reviewed per PR); the fleet registry carries per-repo
+  // additions seeded from the same data file so both paths stay coherent.
+  const yamlSkipped = loadSanctionedSkips(repo);
+  const skipped: ReadonlySet<string> =
+    sanctionedSkips.length > 0 ? new Set([...yamlSkipped, ...sanctionedSkips]) : yamlSkipped;
+
   let prJson = fetchPr(repo, pr);
   // 2026-09-06 / hardened 2026-09-08: UNKNOWN is transient — GitHub recomputes
   // mergeability after main moves. A single 5s retry proved insufficient at scale
@@ -883,7 +893,7 @@ async function evaluate(
   // (GitHub's recompute is seconds; CI-red PRs are not mergeable regardless).
   // Still fail-closed if it stays UNKNOWN after all retries.
   if (prJson.mergeStateStatus === "UNKNOWN") {
-    const unkCiClean = isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo));
+    const unkCiClean = isRollupClean(prJson.statusCheckRollup, skipped);
     if (unkCiClean) {
       for (let attempt = 1; attempt <= 3; attempt++) {
         execFileSync("sleep", ["20"]);
@@ -938,7 +948,7 @@ async function evaluate(
   const totalChangedLines = prJson.additions + prJson.deletions;
   // 2026-09-09 Kevin 'widen': the code-fix cap counts additions only (deletions of dead code are not risk).
   const codeFixLines = prJson.additions;
-  const ciClean = isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo));
+  const ciClean = isRollupClean(prJson.statusCheckRollup, skipped);
 
   // ── Leg "ci-rollup" (cheap, no diff fetch, no API spend): state + non-draft + CI +
   //    merge readiness. isDraft is checked here because GitHub reports
@@ -1350,7 +1360,7 @@ async function evaluate(
         mergeStateStatus: fresh.mergeStateStatus,
         statusCheckRollup: fresh.statusCheckRollup,
       },
-      { mergeLabel: CODE_FIX_MERGE_LABEL, sanctionedSkips: loadSanctionedSkips(repo), requiredChecks },
+      { mergeLabel: CODE_FIX_MERGE_LABEL, sanctionedSkips: skipped, requiredChecks },
     );
     if (revalidateDeltas.length > 0) {
       console.log(
@@ -2123,7 +2133,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
  * misconfiguration/bug worth a red CI run), not swallowed into a silent "wait".
  */
 async function main(): Promise<void> {
-  const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps, trainReady } = parseArgs(process.argv.slice(2));
+  const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps, sanctionedSkips, trainReady } = parseArgs(process.argv.slice(2));
   // ops#190 rung A2: `--train-ready` routes to the A-side label-authority gate.
   // `evaluateTrainReady` NEVER throws (its wrapper is the fail-closed catch-all —
   // every outcome, including unexpected errors, resolves to a refusal with its own
@@ -2140,7 +2150,7 @@ async function main(): Promise<void> {
     return;
   }
   try {
-    await evaluate(repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps);
+    await evaluate(repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps, sanctionedSkips);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.log(

@@ -92,6 +92,11 @@ on:
         required: false
         type: string
         default: ""
+      sanctioned_skips:
+        description: "Comma-separated check names the repo's fleet registry sanctions as skip-by-design — a SKIPPED conclusion on one of these names counts as clean in the CI-rollup leg (union with the committed YAML allowlist). Default empty = no additional sanctioned skips."
+        required: false
+        type: string
+        default: ""
       train_ready:
         description: "ops#190 rung A2: when true, evaluate the A-side `box` label-authority gate (evaluateTrainReady — human-labeled PRs, GraphQL-attributed authority) instead of the B-side squasher diff-classification gate. The squasher inputs above (enabled_classes / sensitive_path_patterns / safe_path_globs / required_checks) are IGNORED in this mode — the run step passes only --train-ready. Default false: every existing caller keeps exactly its current squasher behavior."
         required: false
@@ -176,6 +181,7 @@ jobs:
           GATE_SAFE_PATH_GLOBS: ${{ inputs.safe_path_globs }}
           GATE_REQUIRED_CHECKS: ${{ inputs.required_checks }}
           GATE_REQUIRED_CHECKS_PATH_DEPS: ${{ inputs.required_checks_path_deps }}
+          GATE_SANCTIONED_SKIPS: ${{ inputs.sanctioned_skips }}
           GATE_TRAIN_READY: ${{ inputs.train_ready }}
           # ops#260 leg 3 — refusal → Kevin's decision block via webhook-router's
           # enroll door. `vars.` resolves in the CALLER's repo (ops-pipeline).
@@ -234,6 +240,13 @@ jobs:
               for d in "${deps[@]}"; do
                 trimmed="$(echo -n "$d" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
                 [ -n "$trimmed" ] && args+=(--required-check-path-dep "$trimmed")
+              done
+            fi
+            if [ -n "$GATE_SANCTIONED_SKIPS" ]; then
+              IFS=',' read -ra skips <<< "$GATE_SANCTIONED_SKIPS"
+              for s in "${skips[@]}"; do
+                trimmed="$(echo -n "$s" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                [ -n "$trimmed" ] && args+=(--sanctioned-skip "$trimmed")
               done
             fi
           fi
