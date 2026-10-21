@@ -69,15 +69,53 @@ jobs:
     outputs:
       prs: ${{ steps.list.outputs.prs }}
     steps:
+      # go-native (PR-A2, Kevin 2026-10-21): if THIS repo has gone native (an active `main - native merge v1` ruleset on its default
+      # branch), GitHub merges it and this self-sweep must not enumerate, label, or update-branch anything. The ruleset read needs
+      # administration:read, which github.token never carries — the fleet App token does (lib/native-exclusion.ts; FAIL CLOSED).
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Mint fleet App installation token (native-exclusion ruleset read only)
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: Fail loud if the mint returned nothing
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::Fleet App token mint returned an empty token — refusing to sweep (the native-exclusion ruleset read cannot run without it; fail closed)."
+          exit 1
+
       - name: List target PR number(s)
         id: list
         env:
           GH_TOKEN: ${{ github.token }}
+          NATIVE_GH_TOKEN: ${{ steps.mint.outputs.token }}
           REPO: ${{ github.repository }}
           ONLY_PR: ${{ inputs.pr_number }}
           MAX_FANOUT: "20"
         run: |
           set -euo pipefail
+          # go-native: checked FIRST — before the dispatch short-circuit below, so a dispatch against a native repo is excluded too.
+          # The scan prints `excluded: native <repo>` itself (stderr); if the scan ITSELF breaks (no JSON array back) the sweep aborts.
+          native_excluded=$(GH_TOKEN="$NATIVE_GH_TOKEN" scripts/node_modules/.bin/tsx scripts/lib/native-exclusion.ts scan "$REPO") \
+            || { echo "::error::native-exclusion scan failed — refusing to sweep (fail closed; ops PR-A2)."; exit 1; }
+          jq -e 'type == "array"' <<<"$native_excluded" >/dev/null \
+            || { echo "::error::native-exclusion scan returned no JSON array — refusing to sweep (fail closed; ops PR-A2)."; exit 1; }
+          if jq -e --arg r "$REPO" 'index($r) != null' <<<"$native_excluded" >/dev/null; then
+            echo "prs=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ -n "${ONLY_PR:-}" ]; then
             # Validate before interpolating into the matrix JSON (codex P3, A2
             # review pass 1): "1,2" would silently fan out to two PRs and any

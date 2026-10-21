@@ -39,7 +39,7 @@
  *      EXACTLY the original #279 gate's scope, unchanged; opting into ci-infra/
  *      test-only/vault-doc/code-fix is an explicit per-repo choice, not a side
  *      effect of this file changing).
- *   4. author === kbibelhausen
+ *   4. author is kbibelhausen or the studiob-fleet-bot App (`isEligiblePrAuthor` — scripts/lib/automerge-classify.ts)
  *   5. label `bugsquasher` present
  *   6. independent review: the ENTIRE raw diff is sent to Claude Sonnet 5, with a
  *      class-aware system prompt (`reviewSystemPromptFor` — test-only adds an extra
@@ -121,6 +121,8 @@ import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 import { enrollGateRefusal, resolveGateRefusals } from "./lib/gate-enroll.js";
+import { reposForDoor } from "./lib/native-exclusion.js";
+import { installPublicGateLog } from "./lib/gate-log-enum.js";
 import { buildFlagCard, flagCardMarkersFor, isCardLeg, type CardLeg } from "./lib/gate-flag-card.js";
 import { mergeDoorFrom, formatTrainMergeReceipt, type MergeDoor } from "./lib/merge-door.js";
 import {
@@ -1411,7 +1413,7 @@ async function evaluate(
     "| Leg | Result |",
     "|---|---|",
     `| diff class | ✅ \`${prClass}\` |`,
-    `| author === kbibelhausen | ✅ (${author}) |`,
+    `| author is an eligible PR author | ✅ (${author}) |`,
     `| label \`bugsquasher\` present | ✅ (${labels.join(", ")}) |`,
     `| totalChangedLines | ✅ (${totalChangedLines}) |`,
     ...(prClass === "code-fix"
@@ -2122,8 +2124,21 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
  * merged the PR. The loud non-zero exit is preserved (this is a genuine
  * misconfiguration/bug worth a red CI run), not swallowed into a silent "wait".
  */
-async function main(): Promise<void> {
-  const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps, trainReady } = parseArgs(process.argv.slice(2));
+export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+  // PR-A2 item 5: this process's stdout is a PUBLIC Actions log (ops-pipeline is public) — from here on every console line, from this file
+  // or any lib it calls, is reduced to repo, PR, SHA and a verdict enum (lib/gate-log-enum.ts). Installed FIRST so even a bad-args
+  // failure and the crash handler below print through it. Refusal reasons live on the PR (private repo), not here.
+  installPublicGateLog();
+  const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps, trainReady } = parseArgs(argv);
+  // go-native backstop (PR-A2, Kevin 2026-10-21): a repo with an active `main - native merge v1` ruleset is GitHub's to merge. The
+  // sweeps already skip it at enumeration; THIS makes "no label write, no update-branch, no merge on a native repo" structural for
+  // every way the gate can be reached (a manual dispatch of squasher-automerge.yml, a future caller). It runs before the first PR read.
+  // FAIL CLOSED: an unreadable ruleset list excludes the repo too (lib/native-exclusion.ts). Exits 0 — an exclusion is not a failure.
+  const door = reposForDoor([repo]);
+  if (door.active.length === 0) {
+    for (const line of door.log) console.log(line);
+    return;
+  }
   // ops#190 rung A2: `--train-ready` routes to the A-side label-authority gate.
   // `evaluateTrainReady` NEVER throws (its wrapper is the fail-closed catch-all —
   // every outcome, including unexpected errors, resolves to a refusal with its own

@@ -200,8 +200,11 @@ import {
 import { isRollupClean, evaluateMergeReadiness, type RollupItem } from "./lib/automerge-classify.js";
 import { loadTrainSanctionedSkips } from "./lib/automerge-skip-allowlist.js";
 import { parseArgs, parseTarget, CALENDAR_REPO, CALENDAR_ISSUE, type Flags } from "./lib/restart-train-args.js";
+import { reposForDoor, type NativeCache } from "./lib/native-exclusion.js";
 
 const TICKET_REPOS = ["studio-b-ai/studiob", "studio-b-ai/client-asthetik"] as const;
+/** go-native (PR-A2): one ruleset read per repo per run — see lib/native-exclusion.ts. */
+const NATIVE_CACHE: NativeCache = new Map();
 const CLIENT_ASTHETIK_WORKFLOW_ID = "262954027"; // "AcuOps (Heritage Fabrics)" — live-verified 2026-08-19
 const DEPLOY_JOB_NAME = "deploy / Deploy to production"; // NOT bare "deploy" — see file header
 const STUDIOB_PLATFORM_PROJECT_ID = "433dec0e-6963-4b66-bdd2-6049ba189b81";
@@ -455,7 +458,12 @@ async function fetchCalendarComments(): Promise<RestartTrainComment[]> {
 async function fetchTickets(nowIso: string, post: boolean): Promise<Ticket[]> {
   const tickets: Ticket[] = [];
   const authorityLogins = resolveAuthorityLogins();
-  for (const repo of TICKET_REPOS) {
+  // go-native (PR-A2, Kevin 2026-10-21): a repo with an active `main - native merge v1` ruleset is GitHub's to merge — the train
+  // neither lists its box PRs nor strips a label / merges / marks one in flight there (FAIL CLOSED: an unreadable ruleset list
+  // excludes the repo too, and says so). Every write below (stale-label strip, merge, in-flight label) hangs off a ticket built here.
+  const door = reposForDoor(TICKET_REPOS, undefined, NATIVE_CACHE);
+  for (const line of door.log) console.log(`[restart-train] ${line}`);
+  for (const repo of door.active) {
     // 2026-09-15 ("Box is the one key"; 05:5xZ: no alias — `queued`/`box` retired):
     // enumerate the one spelling, `box`. The per-spelling list shape stays so a future
     // rename can ride it without touching the merge below.
