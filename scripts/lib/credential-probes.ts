@@ -326,9 +326,9 @@ export async function probeShipEngineApiKey(apiKey: string): Promise<ProbeResult
  * https://code.claude.com/docs/en/authentication#generate-a-long-lived-token) whose value lives
  * OFF-1P on the host that consumes it (e.g. the Mac Studio's ssh `claude -p` env file). The monitor
  * cannot reach that host and must never hold a copy of the value, so this probe reads NOTHING and
- * touches no network: the countdown on `recorded_expiry` is the expiry signal, and liveness is the
- * host-side check named in the manifest entry (a real round-trip — `claude auth status` reports
- * `loggedIn` for any token string, so it is a presence check, not an aliveness oracle).
+ * touches no network: the countdown on `recorded_expiry` is the expiry signal. Liveness (an early
+ * revoke) is out of this monitor's reach — it needs a host-side model round-trip; `claude auth
+ * status` reports `loggedIn` for any token string, so it is a presence check, not an aliveness oracle.
  *   - op_ref set           → PROBE_FAILED (manifest contradiction — the value is never read)
  *   - no recorded_expiry   → PROBE_FAILED (no expiry signal at all — a monitoring gap)
  *   - else                 → alive, expiry left to `recorded_expiry` (expirySource "recorded")
@@ -340,7 +340,7 @@ export function probeClaudeCodeOAuthToken(recordedExpiry: string | null, opRef: 
   if (!recordedExpiry) {
     return { alive: true, expiry: null, source: "recorded", error: "claude-code-oauth-token needs recorded_expiry — the recorded countdown is its only expiry signal" };
   }
-  return { alive: true, expiry: null, source: "recorded", note: "value off-1P (never read); liveness = host-side check" };
+  return { alive: true, expiry: null, source: "recorded", note: "value off-1P (never read); liveness not probed here" };
 }
 
 export interface EntraProbeCreds {

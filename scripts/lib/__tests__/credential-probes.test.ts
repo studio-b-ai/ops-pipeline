@@ -356,7 +356,7 @@ describe("real credentials.manifest.yaml — shipengine entries (registered, not
 //
 // The Studio's ssh `claude -p` OAuth token (`claude setup-token`, one-year validity) lives only in a
 // mode-600 env file on the Mac Studio. The monitor can't reach it and must never hold a copy, so the
-// probe reads nothing: the recorded countdown is the 14/7/1 signal, liveness is the host-side doctor leg.
+// probe reads nothing: the recorded countdown is the 14/7/1 signal; liveness is out of the monitor's reach.
 
 describe("probeClaudeCodeOAuthToken (value-free — never reads the token)", () => {
   it("a set op_ref is a manifest contradiction → PROBE_FAILED shape (the value is never read)", () => {
@@ -373,7 +373,7 @@ describe("probeClaudeCodeOAuthToken (value-free — never reads the token)", () 
 
   it("recorded_expiry + no op_ref → alive, expiry left to the recorded date, no error", () => {
     const r = probeClaudeCodeOAuthToken("2027-10-21", undefined);
-    expect(r).toEqual({ alive: true, expiry: null, source: "recorded", note: "value off-1P (never read); liveness = host-side check" });
+    expect(r).toEqual({ alive: true, expiry: null, source: "recorded", note: "value off-1P (never read); liveness not probed here" });
   });
 
   it("touches no network", () => {
