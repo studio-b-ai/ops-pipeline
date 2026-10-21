@@ -118,6 +118,8 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
           AI_REVIEW_HANDOFF_KEY: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          # the reviewer App's slug (default studiob-reviewer when unset): a pre-filter for the verdict cache only; the post job matches the numeric id
+          REVIEWER_APP_SLUG: ${{ vars.REVIEWER_APP_SLUG }}
         run: npx tsx ai-review.ts review
 
   post:

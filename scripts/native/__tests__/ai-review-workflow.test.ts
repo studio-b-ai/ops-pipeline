@@ -59,7 +59,8 @@ export function lintWorkflow(wf: Workflow): string[] {
     // ── review ──
     if (review.environment !== undefined) v.push("review job must have no environment (its OIDC sub must stay the branch form)");
     if (JSON.stringify(review.permissions) !== '{"contents":"read","id-token":"write"}') v.push("review job permissions must be exactly contents: read, id-token: write");
-    if (/REVIEWER_APP/.test(text(review))) v.push("reviewer credentials must never appear in the review job");
+    // the credentials (id + PEM). REVIEWER_APP_SLUG is a public name, used only to pre-filter the verdict cache.
+    if (/REVIEWER_APP_(ID|PRIVATE_KEY)/.test(text(review))) v.push("reviewer credentials must never appear in the review job");
     if (Object.keys(review.outputs ?? {}).join(",") !== "handoff") v.push("review outputs must be exactly handoff");
     const wif = review.steps.find((s) => s.uses === "./.github/actions/anthropic-federated-token");
     if (!wif) v.push("review job must reuse ./.github/actions/anthropic-federated-token");
@@ -117,6 +118,10 @@ describe("ai-review-sweep.yml — the real file", () => {
     const after = post.steps.slice(post.steps.findIndex((s) => s.id === "cfg") + 1);
     expect(after.length).toBeGreaterThan(3);
     for (const s of after) expect(s.if ?? "", s.name ?? s.uses).toContain("steps.cfg.outputs.configured == 'true'");
+  });
+  it("the sweep step lets a repo variable align the reviewer App slug (the verdict-cache pre-filter), and a mismatch cannot change who may post", () => {
+    const step = loadWorkflow().jobs.review.steps.find((s) => /ai-review\.ts review/.test(s.run ?? ""))!;
+    expect(step.env?.REVIEWER_APP_SLUG).toBe("${{ vars.REVIEWER_APP_SLUG }}");
   });
   it("the sealed handoff is passed to the post step through env and nowhere else", () => {
     const post = loadWorkflow().jobs.post;

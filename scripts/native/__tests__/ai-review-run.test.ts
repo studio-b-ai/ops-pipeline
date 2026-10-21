@@ -72,6 +72,21 @@ describe("shadow cap and live mode", () => {
     expect(r.counts).toMatchObject({ prs: 2, skipped: 3 });
     expect(MAX_PRS_PER_RUN).toBeGreaterThan(3);
   });
+  it("PRs whose verdict is already posted do not use up the work budget — they cannot starve the older PRs that still need one", async () => {
+    const world = six();
+    for (const n of [9, 8, 7]) world.checkRuns[`${REPO}@${sha(String(n))}`] = [{ id: 1, status: "completed", conclusion: "success", external_id: "v1:pass:", app: REVIEWER }];
+    const { g, d } = deps(world, [PASS, PASS, PASS], LIVE);
+    const r = await runReview({ ...d, maxPrs: 2 });
+    expect(prReads(g.calls)).toEqual([59, 58, 57, 56, 55]);
+    expect(r.counts).toMatchObject({ prs: 5, unchanged: 3, post: 2, skipped: 0 });
+    expect(r.handoff.entries.map((e) => e.pr)).toEqual([56, 55]);
+  });
+  it("the evaluation ceiling bounds the API reads of one sweep", async () => {
+    const { g, d } = deps(six(), [PASS, PASS, PASS], LIVE);
+    const r = await runReview({ ...d, maxEvaluated: 3 });
+    expect(prReads(g.calls)).toEqual([59, 58, 57]);
+    expect(r.counts).toMatchObject({ prs: 3, skipped: 2 });
+  });
   it("a repo that is listed but neither live nor shadow is not touched", async () => {
     const m = manifestOf({ repo: REPO, live: false, shadow: false });
     const { g, d } = deps(six(), [PASS], m);

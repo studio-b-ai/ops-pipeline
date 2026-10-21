@@ -26,9 +26,13 @@ import { loadManifest, modeFor, SHADOW_PR_CAP, type Manifest } from "./lib/ai-re
 
 /** slug of the reviewer GitHub App; overridable with REVIEWER_APP_SLUG. A cache pre-filter only — the post job matches the numeric id. */
 export const DEFAULT_REVIEWER_SLUG = "studiob-reviewer";
-/** At most this many PRs are evaluated per sweep across all repos (newest first); the rest wait for the next sweep. Bounds spend, the
- *  handoff size, and the env-var size the post job receives it in. */
+/** At most this many PRs may PRODUCE WORK per sweep across all repos (a new verdict to post, or an error): newest first, the rest wait for
+ *  the next sweep. Bounds model spend, the handoff size, and the env-var size the post job receives it in. PRs whose verdict is already
+ *  posted (`unchanged`) or that get no check (`skip`) cost no work and do NOT count — otherwise a live repo with more open PRs than this
+ *  would starve its oldest PRs of a verdict forever. */
 export const MAX_PRS_PER_RUN = 30;
+/** Hard ceiling on PRs evaluated per sweep (each costs a few API reads, no model call when cached). */
+export const MAX_EVALUATED_PER_RUN = 200;
 
 export interface ReviewCounts {
   repos: number;
@@ -45,13 +49,17 @@ export interface ReviewDeps {
   manifest: Manifest;
   reviewerSlug: string;
   sleep?: (ms: number) => Promise<void>;
+  /** work budget: PRs that may produce a verdict to post or an error this sweep (default MAX_PRS_PER_RUN) */
   maxPrs?: number;
+  /** evaluation ceiling (default MAX_EVALUATED_PER_RUN) */
+  maxEvaluated?: number;
 }
 
 export async function runReview(deps: ReviewDeps): Promise<{ handoff: Handoff; counts: ReviewCounts }> {
   const counts: ReviewCounts = { repos: 0, prs: 0, post: 0, unchanged: 0, skipped: 0, errors: 0 };
   const entries: HandoffEntry[] = [];
-  let budget = deps.maxPrs ?? MAX_PRS_PER_RUN;
+  let work = deps.maxPrs ?? MAX_PRS_PER_RUN;
+  let evaluated = deps.maxEvaluated ?? MAX_EVALUATED_PER_RUN;
 
   for (const entry of deps.manifest.repos) {
     const mode = modeFor(entry);
@@ -71,11 +79,11 @@ export async function runReview(deps: ReviewDeps): Promise<{ handoff: Handoff; c
     const selected = mode === "shadow" ? candidates.slice(0, SHADOW_PR_CAP) : candidates;
 
     for (const pr of selected) {
-      if (budget <= 0) {
+      if (work <= 0 || evaluated <= 0) {
         counts.skipped++;
         continue;
       }
-      budget--;
+      evaluated--;
       counts.prs++;
       const r = await evaluatePr({ gh: deps.gh, client: deps.client, reviewerSlug: deps.reviewerSlug, sleep: deps.sleep }, entry.repo, mode, pr.number);
       switch (r.kind) {
@@ -84,6 +92,7 @@ export async function runReview(deps: ReviewDeps): Promise<{ handoff: Handoff; c
           logEvent({ e: "skip", repo: entry.repo, pr: pr.number, reason: r.reason });
           break;
         case "error":
+          work--;
           counts.errors++;
           logEvent({ e: "no-verdict", repo: entry.repo, pr: pr.number, leg: r.leg });
           break;
@@ -92,6 +101,7 @@ export async function runReview(deps: ReviewDeps): Promise<{ handoff: Handoff; c
           logEvent({ e: "verdict", repo: entry.repo, pr: pr.number, sha: r.headSha, verdict: r.verdict.kind, categories: r.verdict.categories.join(""), source: r.source, action: "unchanged" });
           break;
         case "post":
+          work--;
           counts.post++;
           entries.push({ repo: entry.repo, pr: pr.number, headSha: r.headSha, conclusion: r.conclusion, externalId: r.externalId, title: r.title, summary: r.summary });
           logEvent({ e: "verdict", repo: entry.repo, pr: pr.number, sha: r.headSha, verdict: r.verdict.kind, categories: r.verdict.categories.join(""), source: r.source, action: "post" });
