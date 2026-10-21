@@ -15,7 +15,7 @@ import {
   type NativeCache,
   type RulesetReader,
 } from "../native-exclusion.js";
-import { makeGhStub } from "./fixtures/gh-stub.js";
+import { makeGhStub } from "./fixtures/gate-gh-stub.js";
 
 // Go-native Phase A, PR-A2 item 2 — detection half. Rule #223: every case calls the REAL detectNative / scanNative / runCli (and,
 // for the process cases, the REAL CLI file under a fake `gh`). Rule #322/#471: known-good (a native repo is excluded) AND

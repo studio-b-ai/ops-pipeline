@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 import { NATIVE_RULESET_NAME } from "../native-exclusion.js";
-import { makeGhStub, type GhStubRule } from "./fixtures/gh-stub.js";
+import { makeGhStub, type GhStubRule } from "./fixtures/gate-gh-stub.js";
 
 // Go-native Phase A, PR-A2 item 2 — automerge-sweep.yml leg (ops-pipeline's own self-sweep). Same method as
 // fleet-sweep-native-exclusion.test.ts (#223): the REAL `list` step script out of the workflow, run in bash as Actions runs it,

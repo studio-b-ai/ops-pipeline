@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect } from "vitest";
 import { fingerprintOf, splitChanged } from "../fleet-sweep-changed.js";
-import { makeGhStub } from "./fixtures/gh-stub.js";
+import { makeGhStub } from "./fixtures/gate-gh-stub.js";
 
 const pr = (over: Partial<Parameters<typeof fingerprintOf>[0]> = {}) => ({
   headRefOid: "abc123", statusCheckRollup: [{ name: "ci", conclusion: "SUCCESS" }], labels: [{ name: "fleet-internal" }], mergeStateStatus: "CLEAN", isDraft: false, ...over,

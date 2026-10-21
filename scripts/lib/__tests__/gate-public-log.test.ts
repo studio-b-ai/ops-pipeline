@@ -64,7 +64,7 @@ const TIMELINE = JSON.stringify({
 
 /** words that only appear in the gate's refusal REASONS — if one reaches the log, a reason did */
 const REASON_TEXT = /mergeStateStatus|isDraft|ciClean|short-circuit|not merge-ready|No diff fetch|Could not resolve|private-secret/;
-/** the only shapes the public log may carry (a superset of the grammar in lib/public-gate-log.ts, as regexes) */
+/** the only shapes the public log may carry (a superset of the grammar in lib/gate-log-enum.ts, as regexes) */
 const PUBLIC_SHAPES = [
   /^\[gate-receipt\] repo=\S+ pr=\d+ class=\S+ verdict=(qualified|missed|candidate)( leg=[a-z-]+)?$/,
   /^\[train-gate-receipt\] repo=\S+ pr=\d+ outcome=(merged|stale-label-removed|refused|merge-attempt-failed)$/,

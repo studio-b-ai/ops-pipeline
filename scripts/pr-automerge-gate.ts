@@ -122,7 +122,7 @@ import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 import { enrollGateRefusal, resolveGateRefusals } from "./lib/gate-enroll.js";
 import { reposForDoor } from "./lib/native-exclusion.js";
-import { installPublicGateLog } from "./lib/public-gate-log.js";
+import { installPublicGateLog } from "./lib/gate-log-enum.js";
 import { buildFlagCard, flagCardMarkersFor, isCardLeg, type CardLeg } from "./lib/gate-flag-card.js";
 import { mergeDoorFrom, formatTrainMergeReceipt, type MergeDoor } from "./lib/merge-door.js";
 import {
@@ -2126,7 +2126,7 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
  */
 export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   // PR-A2 item 5: this process's stdout is a PUBLIC Actions log (ops-pipeline is public) — from here on every console line, from this file
-  // or any lib it calls, is reduced to repo, PR, SHA and a verdict enum (lib/public-gate-log.ts). Installed FIRST so even a bad-args
+  // or any lib it calls, is reduced to repo, PR, SHA and a verdict enum (lib/gate-log-enum.ts). Installed FIRST so even a bad-args
   // failure and the crash handler below print through it. Refusal reasons live on the PR (private repo), not here.
   installPublicGateLog();
   const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps, trainReady } = parseArgs(argv);

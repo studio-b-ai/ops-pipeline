@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { installPublicGateLog, toPublicGateLine } from "../public-gate-log.js";
+import { installPublicGateLog, toPublicGateLine } from "../gate-log-enum.js";
 import { parseReceipts } from "../squasher-health-classify.js";
 
 // Go-native Phase A, PR-A2 item 5 — gate logs carry only repo, PR, SHA and a verdict enum.

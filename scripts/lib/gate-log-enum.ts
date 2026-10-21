@@ -1,5 +1,5 @@
 /**
- * public-gate-log.ts — the gate's stdout is a PUBLIC log (go-native Phase A, PR-A2 item 5).
+ * gate-log-enum.ts — the gate's stdout is a PUBLIC log (go-native Phase A, PR-A2 item 5).
  *
  * ops-pipeline is a public repo, so its Actions logs are public — and the gate used to print private-repo review content there:
  * the refusal reasons (`finalCheck.reasons`, the review's own detail text), the PR classification verdict text, free-text

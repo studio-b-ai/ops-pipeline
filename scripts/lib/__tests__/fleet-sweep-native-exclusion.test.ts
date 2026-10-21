@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 import { NATIVE_RULESET_NAME } from "../native-exclusion.js";
-import { makeGhStub, type GhStubRule } from "./fixtures/gh-stub.js";
+import { makeGhStub, type GhStubRule } from "./fixtures/gate-gh-stub.js";
 
 // Go-native Phase A, PR-A2 item 2 — the WIRING half, on the real thing (#223): this test extracts the `run:` script of the
 // "List target (repo, PR, mode) entries" step straight out of .github/workflows/squasher-fleet-sweep.yml and runs it in bash,
