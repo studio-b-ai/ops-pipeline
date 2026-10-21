@@ -44,6 +44,7 @@ on:
 permissions:
   contents: read
   issues: write
+  actions: write   # ops-pipeline#575: router dispatches probe workflows for no-probe issues
 
 # One router run at a time per repo: an hourly cron racing a slow prior run (or a
 # manual workflow_dispatch) must not double-process the same issues.
