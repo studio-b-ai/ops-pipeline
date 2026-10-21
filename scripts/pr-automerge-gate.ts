@@ -39,7 +39,7 @@
  *      EXACTLY the original #279 gate's scope, unchanged; opting into ci-infra/
  *      test-only/vault-doc/code-fix is an explicit per-repo choice, not a side
  *      effect of this file changing).
- *   4. author === kbibelhausen
+ *   4. author is kbibelhausen or the studiob-fleet-bot App (`isEligiblePrAuthor` — scripts/lib/automerge-classify.ts)
  *   5. label `bugsquasher` present
  *   6. independent review: the ENTIRE raw diff is sent to Claude Sonnet 5, with a
  *      class-aware system prompt (`reviewSystemPromptFor` — test-only adds an extra
@@ -1411,7 +1411,7 @@ async function evaluate(
     "| Leg | Result |",
     "|---|---|",
     `| diff class | ✅ \`${prClass}\` |`,
-    `| author === kbibelhausen | ✅ (${author}) |`,
+    `| author is an eligible PR author | ✅ (${author}) |`,
     `| label \`bugsquasher\` present | ✅ (${labels.join(", ")}) |`,
     `| totalChangedLines | ✅ (${totalChangedLines}) |`,
     ...(prClass === "code-fix"

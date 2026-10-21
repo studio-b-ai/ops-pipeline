@@ -36,7 +36,16 @@ export interface GateResult {
   reasons: string[];
 }
 
-const BUGSQUASHER_AUTHOR = "kbibelhausen";
+// Go-native Phase A (PR-A2, Kevin 2026-10-21 "go native"): the studiob-fleet-bot App (id 4595770) is an eligible PR author alongside
+// kbibelhausen — fleet PRs are App-authored from here on and the old door must keep merging them until their repo migrates.
+// The gate reads `author.login` from `gh pr view --json author`, which renders an App as `app/<slug>`. All three forms were probed
+// live on chassis#977 (gh 2.100.0): CLI → "app/studiob-fleet-bot", REST pulls API → "studiob-fleet-bot[bot]", GraphQL →
+// "studiob-fleet-bot" with __typename Bot. The CLI form (what this gate reads) and the REST form are accepted. The BARE form is
+// NOT: "studiob-fleet-bot" with no marker is a legal USER login someone could register — only the `app/` prefix and the `[bot]`
+// suffix are unregistrable. Exact match only, never a prefix/suffix test. (label-authority.ts's MERGE_AUTHORITY_LOGINS is the
+// ACTOR who may apply `box` — a different question; the bot is deliberately NOT added there.)
+export const ELIGIBLE_PR_AUTHORS: readonly string[] = ["kbibelhausen", "app/studiob-fleet-bot", "studiob-fleet-bot[bot]"];
+export const isEligiblePrAuthor = (login: string): boolean => ELIGIBLE_PR_AUTHORS.includes(login);
 const BUGSQUASHER_LABEL = "bugsquasher";
 // 2026-09-13 (Kevin "door fix", Principal sitting): `fleet-internal` is a first-class eligibility label — the seats' own PRs
 // (runner-labeled at box, lib/fleet-internal-label.sh: green, in-registry, no live path) ride the same door as bugsquasher's.
@@ -334,8 +343,8 @@ export function reconcileFileClasses(authoritativePaths: string[], parsedFiles: 
 export function gateDecision(input: GateInput): GateResult {
   const reasons: string[] = [];
 
-  if (input.author !== BUGSQUASHER_AUTHOR) {
-    reasons.push(`author '${input.author}' !== '${BUGSQUASHER_AUTHOR}'`);
+  if (!isEligiblePrAuthor(input.author)) {
+    reasons.push(`author '${input.author}' !== any of ${ELIGIBLE_PR_AUTHORS.map((a) => `'${a}'`).join(", ")}`);
   }
   if (!hasEligibleLabel(input.labels)) {
     reasons.push(`missing an eligibility label (${ELIGIBLE_LABELS.map((l) => `'${l}'`).join(" or ")}; has: ${input.labels.length ? input.labels.join(", ") : "none"})`);
@@ -1012,8 +1021,8 @@ export function gateDecisionForClass(input: GateInputV2): GateResult {
     reasons.push(`prClass '${input.prClass}' is not a recognized diff class (valid: ${ALL_PR_DIFF_CLASSES.join(", ")})`);
   }
 
-  if (input.author !== BUGSQUASHER_AUTHOR) {
-    reasons.push(`author '${input.author}' !== '${BUGSQUASHER_AUTHOR}'`);
+  if (!isEligiblePrAuthor(input.author)) {
+    reasons.push(`author '${input.author}' !== any of ${ELIGIBLE_PR_AUTHORS.map((a) => `'${a}'`).join(", ")}`);
   }
   if (!hasEligibleLabel(input.labels)) {
     reasons.push(`missing an eligibility label (${ELIGIBLE_LABELS.map((l) => `'${l}'`).join(" or ")}; has: ${input.labels.length ? input.labels.join(", ") : "none"})`);
