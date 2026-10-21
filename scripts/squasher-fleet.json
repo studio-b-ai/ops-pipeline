@@ -3,7 +3,7 @@
   "repos": [
     {
       "repo": "studio-b-ai/bolt-wms",
-      "enabled_classes": "docs-comment,test-only,code-fix",
+      "enabled_classes": "docs-comment,test-only",
       "sensitive_path_patterns": "^\\.github/actions/,^(?!.*__tests__/).*([Tt]ier|[Cc]ustomer-?[Cc]lass|trade-rung|trade-application|[Ww]orksheet|[Pp]romotion|[Dd]iscount|msrp|map-floor|rail-audit),^(?!.*__tests__/).*([Ss]ecret|[Tt]oken|[Cc]redential|[Pp]assword|[Pp]ermission|msal|ApiKey|[Ll]ogin),^(?!.*__tests__/)(?!docs/).*([Aa]pi[-_]?[Kk]ey|stock-api-admin|seed-admin|UserAdmin|[Ii]dentity|sas-agents|bootstrap-users|create-workers|provision-cs-rep|order-embed),(^|/)node_modules/,^(?!.*__tests__/)(?!docs/).*(sas-bridge|cs-intake-embed|entra-sync|user-capabilit)",
       "safe_path_globs": "src/**,client/src/**,hubspot/src/**,scripts/**,docs/**",
       "required_checks": "Client — TypeScript + Build,Server — TypeScript + Tests",
@@ -11,7 +11,7 @@
     },
     {
       "repo": "studio-b-ai/studiob",
-      "enabled_classes": "docs-comment,test-only,code-fix",
+      "enabled_classes": "docs-comment,test-only",
       "sensitive_path_patterns": "^packages/api/src/routes/(shopify|acumatica),^(?!.*__tests__/).*([Ss]ecret|[Tt]oken|[Cc]redential|[Pp]assword|[Pp]ermission|session-(pool|gate|manager|bridge)|soap-login|[Ll]ogin),^(?!.*__tests__/)(?!docs/).*(view-as|[Ii]mpersonat|[Ii]dentity|[Ll]icens|seed-heritage|zoom-app-context),(^|/)node_modules/,^(?!.*__tests__/)(?!docs/).*(embed-bridge|sas-link|routes/desk[.]ts$)",
       "safe_path_globs": "packages/*/src/**,scripts/**,docs/**",
       "required_checks": "Build + boot + probe,tsc --noEmit (SDK drift guard) (api),turbo run test (all workspace suites)",
@@ -20,7 +20,7 @@
     },
     {
       "repo": "studio-b-ai/studiob-price-sync",
-      "enabled_classes": "docs-comment,test-only,code-fix",
+      "enabled_classes": "docs-comment,test-only",
       "sensitive_path_patterns": "^scripts/,(^|/)node_modules/",
       "safe_path_globs": "src/**,scripts/**,docs/**",
       "required_checks": "Extension bundle + type baseline",
@@ -28,7 +28,7 @@
     },
     {
       "repo": "studio-b-ai/asthetik-trade-theme",
-      "enabled_classes": "docs-comment,test-only,code-fix",
+      "enabled_classes": "docs-comment,test-only",
       "sensitive_path_patterns": "^(sections|blocks|snippets|templates|locales|layout|config)/,(^|/)node_modules/",
       "safe_path_globs": "sections/**,snippets/**,assets/**,templates/**,layout/**,locales/**",
       "required_checks": "Theme check + schema limits",
@@ -36,7 +36,7 @@
     },
     {
       "repo": "studio-b-ai/asthetik-portal",
-      "enabled_classes": "docs-comment,test-only,code-fix",
+      "enabled_classes": "docs-comment,test-only",
       "sensitive_path_patterns": "^(src|client|scripts)/(?!.*__tests__/),^(Dockerfile|railway[.]json|package[.]json|package-lock[.]json)$",
       "safe_path_globs": "src/**,scripts/**,.github/workflows/**",
       "required_checks": "build-and-test",
@@ -52,7 +52,7 @@
     },
     {
       "repo": "studio-b-ai/ops-pipeline",
-      "enabled_classes": "docs-comment,test-only,code-fix",
+      "enabled_classes": "docs-comment,test-only",
       "sensitive_path_patterns": "(^|/)squasher-fleet\\.json$|(^|/)label-authority\\.ts$|(^|/)\\.github/workflows/,^scripts/(pr-automerge-gate|post-merge-tripwire|restart-train|squasher-|box-patch-id|automerge-skip-allowlist|door-watch|needs-human-),^scripts/lib/(automerge-|gate-|fleet-sweep-|merge-door|needs-human-|box-patch-id|restart-train|timetable-gate|train-liveness|tripwire-|hold-rail|squasher-|door-watch|label-authority|github-issues|anthropic-credentials|railway-deployment-probes|railway-volume-probes),^scripts/lib/__tests__/.*(automerge|gate-|label-authority|merge-door|tripwire|restart-train|squasher|fleet-sweep|door-|needs-human|box-patch-id|timetable|hold-rail|eligibility|github-issues|anthropic-credentials),^scripts/(credential|grants|gateway-token|cloudflare-token|provision-railway|CREDENTIAL)|^scripts/lib/(credential-|gateway-token|grants-drift),^[.]github/,^scripts/(ai-review|native|merge-window|arm-backstop),^scripts/lib/(ai-review|native|merge-window),^scripts/package,^scripts/(tsconfig[^/]*[.]json$|[.]npmrc$|vitest[.]config),^scripts/(stale-pr-sweep|backlog-|repo-hygiene|dead-cron|required-checks-drift|shipped-ledger|train-liveness|railway-volume),^scripts/lib/(config[.]ts$|severity-issue-reconcile|stale-pr-|backlog-|repo-hygiene|dead-cron|required-checks-drift|shipped-ledger|railway-volume-|arm-backstop),^scripts/cfo-brief/,(^|/)node_modules/",
       "safe_path_globs": "scripts/**",
       "required_checks": "Scripts — typecheck + tests",
