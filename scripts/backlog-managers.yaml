@@ -81,6 +81,13 @@ repos:
   - repo: "studio-b-ai/toto"
     manager: "Mechanic"
     note: "the cockpit glass — RELEASE leg on via ops#411; nothing live yet (#97 applies the moment it renders)"
+  # 2026-09-21 (Mechanic crew, stint #861): amplify enrolled in squasher-fleet.json
+  # (RELEASE leg on — box now gates there), so the door/watch coherence check
+  # requires this row. manager per kits/studio-b.yaml `radio: {technical: mechanic}`
+  # (cited, not invented — Rule #294).
+  - repo: "studio-b-ai/amplify"
+    manager: "Mechanic"
+    note: "the LinkedIn marketing engine — RELEASE leg on via stint #861 (fleet-registry enrollment)"
 
 thresholds:
   p0p1_days: 2
