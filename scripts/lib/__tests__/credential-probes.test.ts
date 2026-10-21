@@ -12,6 +12,7 @@ import {
   cloudflareResultFromVerify,
   cloudflareResultFromZones,
   probeShipEngineApiKey,
+  probeClaudeCodeOAuthToken,
   type CloudflareVerifyResponse,
   type CloudflareZonesResponse,
   type EntraUserGraphResponse,
@@ -348,5 +349,109 @@ describe("real credentials.manifest.yaml — shipengine entries (registered, not
     expect(raw).toMatch(/#\s+- name:\s+shipengine-sandbox/);
     expect(raw).toContain('op://Studio B Infrastructure/shipengine/production_key');
     expect(raw).toContain('op://Studio B Infrastructure/shipengine/sandbox_key');
+  });
+});
+
+// ── claude-code-oauth-token — value-free countdown on recorded_expiry (Rule #302) ──
+//
+// The Studio's ssh `claude -p` OAuth token (`claude setup-token`, one-year validity) lives only in a
+// mode-600 env file on the Mac Studio. The monitor can't reach it and must never hold a copy, so the
+// probe reads nothing: the recorded countdown is the 14/7/1 signal, liveness is the host-side doctor leg.
+
+describe("probeClaudeCodeOAuthToken (value-free — never reads the token)", () => {
+  it("a set op_ref is a manifest contradiction → PROBE_FAILED shape (the value is never read)", () => {
+    const r = probeClaudeCodeOAuthToken("2027-10-21", "op://Studio B Infrastructure/claude/token");
+    expect(r.alive).toBe(true);
+    expect(r.expiry).toBeNull();
+    expect(r.error).toContain("must not carry op_ref");
+  });
+
+  it("no recorded_expiry → PROBE_FAILED shape (no expiry signal at all is a monitoring gap)", () => {
+    const r = probeClaudeCodeOAuthToken(null, undefined);
+    expect(r.error).toContain("needs recorded_expiry");
+  });
+
+  it("recorded_expiry + no op_ref → alive, expiry left to the recorded date, no error", () => {
+    const r = probeClaudeCodeOAuthToken("2027-10-21", undefined);
+    expect(r).toEqual({ alive: true, expiry: null, source: "recorded", note: "value off-1P (never read); liveness = host-side check" });
+  });
+
+  it("touches no network", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    probeClaudeCodeOAuthToken("2027-10-21", undefined);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("claude-code-oauth-token — planted near-expiry drives the real escalation path (chains probe → classify() → reconcileSeverity())", () => {
+  // Mirrors credential-expiry-monitor.ts evaluate() (non-dry-run): runProbe → classify({ recordedExpiry,
+  // probe, declaredNonExpiring }); statusKey() splits WARN into WARN-<threshold> for the issue title.
+  const RECORDED = "2027-10-21";
+  const run = (nowIso: string) => {
+    const probe = probeClaudeCodeOAuthToken(RECORDED, undefined);
+    const c = classify({ recordedExpiry: RECORDED, probe, declaredNonExpiring: false }, new Date(nowIso));
+    const key = c.status === "WARN" ? `WARN-${c.threshold}` : c.status;
+    return { c, key };
+  };
+
+  it.each([
+    ["2027-10-07T14:00:00Z", 14, 14],
+    ["2027-10-14T14:00:00Z", 7, 7],
+    ["2027-10-20T14:00:00Z", 1, 1],
+  ])("cron at %s → WARN-%i (expiry from recorded_expiry) → opens an issue", (now, threshold, days) => {
+    const { c, key } = run(now);
+    expect(c.status).toBe("WARN");
+    expect(c.threshold).toBe(threshold);
+    expect(c.daysToExpiry).toBe(days);
+    expect(c.expirySource).toBe("recorded");
+    expect(reconcileSeverity(key, null)).toBe("open");
+  });
+
+  it("a band tightening retitles the open issue in place (WARN-14 → WARN-7 → WARN-1)", () => {
+    expect(reconcileSeverity(run("2027-10-14T14:00:00Z").key, "WARN-14")).toBe("retitle");
+    expect(reconcileSeverity(run("2027-10-20T14:00:00Z").key, "WARN-7")).toBe("retitle");
+  });
+
+  it("past the expiry date stays alert-worthy (overdue collapses to WARN-1), never silently OK", () => {
+    const { c, key } = run("2027-10-23T14:00:00Z");
+    expect(c.status).toBe("WARN");
+    expect(c.daysToExpiry).toBe(-2);
+    expect(key).toBe("WARN-1");
+  });
+
+  it("known-good: the day after mint and one day outside the 14d band both classify OK → no issue", () => {
+    for (const now of ["2026-10-21T14:00:00Z", "2027-10-06T14:00:00Z"]) {
+      const { c } = run(now);
+      expect(c.status).toBe("OK");
+      expect(reconcileSeverity(c.status, null)).toBe("none");
+    }
+  });
+
+  it("a manifest contradiction (op_ref set) classifies PROBE_FAILED → opens an issue, not a silent OK", () => {
+    const probe = probeClaudeCodeOAuthToken(RECORDED, "op://x/y/z");
+    const c = classify({ recordedExpiry: RECORDED, probe, declaredNonExpiring: false }, new Date("2026-10-21T14:00:00Z"));
+    expect(c.status).toBe("PROBE_FAILED");
+    expect(reconcileSeverity(c.status, null)).toBe("open");
+  });
+});
+
+describe("real credentials.manifest.yaml — the Studio ssh Claude OAuth token is registered", () => {
+  const manifestPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "credentials.manifest.yaml");
+  const items = ((parseYaml(readFileSync(manifestPath, "utf-8")) as { credentials?: Array<Record<string, unknown>> }).credentials ?? []);
+  const entry = items.find((i) => i.name === "claude-oauth-token-studio-ssh");
+
+  it("is an ACTIVE entry of type claude-code-oauth-token with a recorded expiry and NO op_ref (value stays off-1P)", () => {
+    expect(entry).toBeDefined();
+    expect(entry?.type).toBe("claude-code-oauth-token");
+    expect(entry?.recorded_expiry).toBe("2027-10-21");
+    expect(entry?.op_ref).toBeUndefined();
+    expect(entry?.non_expiring).toBeUndefined();
+    expect(entry?.owner).toBe("cto");
+    expect(entry?.target_rung).toBe(3);
+  });
+
+  it("its own probe accepts it (no manifest contradiction)", () => {
+    const probe = probeClaudeCodeOAuthToken((entry?.recorded_expiry as string) ?? null, entry?.op_ref as string | undefined);
+    expect(probe.error).toBeUndefined();
   });
 });
