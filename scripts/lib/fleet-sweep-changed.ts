@@ -7,11 +7,16 @@
  * the one recorded at its last evaluation. #382: key on the monotonic fact, not the clock. No cap — a sweep with nothing
  * changed evaluates nothing and SAYS so per PR (the skip is a receipt, #465).
  *
- * Fingerprint = headRefOid · every check's name+conclusion (sorted) · labels (sorted) · mergeStateStatus · isDraft · the
- * gate's own sha (a door change re-evaluates everything once — #381, tightening a guard is forward-only).
+ * Fingerprint = headRefOid · every check's name+conclusion (sorted) · labels (sorted) · mergeStateStatus · isDraft.
+ *
+ * The gate's own sha is deliberately NOT part of it (go-native Phase A, PR-A2 item 3): it used to be, so that a door change
+ * re-evaluated everything once (#381), but ops-pipeline merges constantly during the migration and every merge re-evaluated every
+ * labeled PR in the fleet. A PR is now re-evaluated when ITS OWN inputs change. Landing this change is itself a one-time
+ * re-evaluation: cached fingerprints carry the old trailing sha segment and no longer match.
  *
  * stdin: JSON array of enumeration entries, each {repo, pr_number, ...}
- * argv:  <state.json path> <gate-sha> [--record]   (--record: write the new fingerprints for the entries we RETURN;
+ * argv:  <state.json path> [--record]   (a legacy `<gate-sha>` positional between them is ignored;
+ *                                        --record: write the new fingerprints for the entries we RETURN;
  *                                                    the sweep records at ENUMERATION so a crashed gate job is re-tried next tick
  *                                                    only if something changes — deliberate: the receipt of a crash is a GH failure, not silence)
  * stdout: the entries whose fingerprint changed (the ones to evaluate)
@@ -24,10 +29,10 @@ type Entry = { repo: string; pr_number: string; [k: string]: unknown };
 type Fp = { fp: string; at: string; verdict?: string };
 type State = Record<string, Fp>;
 
-export function fingerprintOf(pr: { headRefOid: string; statusCheckRollup: { name?: string; context?: string; conclusion?: string; state?: string }[]; labels: { name: string }[]; mergeStateStatus: string; isDraft: boolean }, gateSha: string): string {
+export function fingerprintOf(pr: { headRefOid: string; statusCheckRollup: { name?: string; context?: string; conclusion?: string; state?: string }[]; labels: { name: string }[]; mergeStateStatus: string; isDraft: boolean }): string {
   const checks = (pr.statusCheckRollup || []).map((c) => `${c.name || c.context || "?"}=${c.conclusion || c.state || "PENDING"}`).sort().join(",");
   const labels = (pr.labels || []).map((l) => l.name).sort().join(",");
-  return [pr.headRefOid, checks, labels, pr.mergeStateStatus, pr.isDraft ? "draft" : "ready", gateSha].join("|");
+  return [pr.headRefOid, checks, labels, pr.mergeStateStatus, pr.isDraft ? "draft" : "ready"].join("|");
 }
 
 /** Pure: given entries + their live fingerprints + prior state, split into changed / unchanged. */
@@ -46,18 +51,19 @@ function ghPr(repo: string, n: string) {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [statePath, gateSha, flag] = process.argv.slice(2);
+  const [statePath, ...flags] = process.argv.slice(2);
+  const record = flags.includes("--record");
   const entries: Entry[] = JSON.parse(readFileSync(0, "utf8") || "[]");
   const state: State = existsSync(statePath) ? JSON.parse(readFileSync(statePath, "utf8")) : {};
   const live: Record<string, string> = {};
   for (const e of entries) {
     const key = `${e.repo}#${e.pr_number}`;
-    try { live[key] = fingerprintOf(ghPr(e.repo, e.pr_number), gateSha); }
+    try { live[key] = fingerprintOf(ghPr(e.repo, e.pr_number)); }
     catch (err) { live[key] = `ERR|${Date.now()}`; process.stderr.write(`probe-failed ${key}: ${(err as Error).message.split("\n")[0]}\n`); }
   }
   const { changed, unchanged } = splitChanged(entries, live, state);
   for (const u of unchanged) process.stderr.write(`skip ${u.key} unchanged since ${u.prior.at}${u.prior.verdict ? ` (last: ${u.prior.verdict})` : ""}\n`);
-  if (flag === "--record") {
+  if (record) {
     const now = new Date().toISOString();
     for (const e of changed) { const key = `${e.repo}#${e.pr_number}`; state[key] = { fp: live[key], at: now, verdict: state[key]?.verdict }; }
     // prune PRs that left the enumeration (closed/merged/unlabeled) — the state never grows past the open labeled set

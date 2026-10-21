@@ -34,6 +34,12 @@ name: Squasher fleet auto-merge sweep
 # PR: the PR filter rides the label enumeration, and the gate re-derives everything
 # per cycle anyway.
 #
+# GO-NATIVE (PR-A2, Kevin 2026-10-21): a repo with an ACTIVE ruleset named `main - native merge v1` on its default branch is
+# GitHub's to merge, so this door skips it on EVERY leg here — the registry leg and the org-wide box leg — with no label write and
+# no update-branch (scripts/lib/native-exclusion.ts: live ruleset GET, one per repo per run, FAIL CLOSED: an unreadable ruleset
+# list excludes the repo and says so). A dispatch with `repo` set to a native repo logs `excluded: native <repo>` and nothing else.
+# The same check backstops the gate itself (pr-automerge-gate.ts main).
+#
 # A PR carrying BOTH labels yields two entries; the reusable gate's per-(repo,PR)
 # concurrency group serializes them and the second evaluation finds the PR already
 # merged (or refuses) — idempotent by construction.
@@ -194,10 +200,32 @@ jobs:
             exit 1
           fi
 
+          # go-native (PR-A2): which repos are GitHub's to merge. The scan logs `excluded: native <repo>` itself (stderr) and treats an
+          # unreadable ruleset list as EXCLUDED (fail closed). ONLY_REPO is always scanned — even when it is unregistered or has no
+          # labeled PR — so a dispatch against a native repo prints the exclusion line. If the scan ITSELF breaks (no JSON array back),
+          # the sweep aborts rather than guessing: an empty answer must never read as "nothing is native".
+          NATIVE_CACHE=/tmp/native-exclusion-cache.json
+          rm -f "$NATIVE_CACHE"
+          native_scan() {
+            local out
+            out=$(scripts/node_modules/.bin/tsx scripts/lib/native-exclusion.ts scan --cache "$NATIVE_CACHE" "$@") || return 1
+            jq -e 'type == "array"' <<<"$out" >/dev/null || return 1
+            printf '%s' "$out"
+          }
+          if [ -n "${ONLY_REPO:-}" ]; then
+            scan_repos=("$ONLY_REPO")
+          else
+            scan_repos=()
+            while IFS= read -r r; do scan_repos+=("$r"); done < <(jq -r '.repos[].repo' "$CONFIG")
+          fi
+          native_excluded=$(native_scan "${scan_repos[@]}") || { echo "::error::native-exclusion scan failed — refusing to sweep (fail closed; ops PR-A2)."; exit 1; }
+
           entries='[]'
           while IFS= read -r repo_json; do
             repo=$(jq -r '.repo' <<<"$repo_json")
             if [ -n "${ONLY_REPO:-}" ] && [ "$repo" != "$ONLY_REPO" ]; then continue; fi
+            # go-native: skipped before ANY read or write on this repo's PRs (no `gh pr list`, no entry, so no label write or update-branch downstream).
+            if jq -e --arg r "$repo" 'index($r) != null' <<<"$native_excluded" >/dev/null; then continue; fi
 
             # 2026-09-13 (Kevin "both fixes approved", ops#409): `fleet-internal` PRs are ENUMERATED with bugsquasher — the runner
             # classified them; the gate (GATE_AUTHORITY_CLASSES) decides. Without this line the class existed but was never evaluated
@@ -295,6 +323,13 @@ jobs:
           if orgbox=$(gh api -X GET search/issues -f q="$orgq" -f per_page=100 --jq '[.items[] | {repo: (.repository_url | sub("^https://api.github.com/repos/"; "")), n: .number}]' 2>/dev/null); then
             extra=$(jq -c --argjson reg "$registered" '[.[] | select((.repo as $r | $reg | index($r)) == null) | select(.repo != "studio-b-ai/studiob")]' <<<"$orgbox")
             if [ -n "${ONLY_PR:-}" ]; then extra=$(jq -c --argjson p "$ONLY_PR" '[.[] | select(.n == $p)]' <<<"$extra"); fi
+            # go-native: the org-wide leg skips native repos too (same cache, so a repo scanned above costs no second GET).
+            extra_scan=()
+            while IFS= read -r r; do extra_scan+=("$r"); done < <(jq -r '[.[].repo] | unique | .[]' <<<"$extra")
+            if [ "${#extra_scan[@]}" -gt 0 ]; then
+              extra_excluded=$(native_scan "${extra_scan[@]}") || { echo "::error::native-exclusion scan failed on the org-wide leg — refusing to sweep (fail closed; ops PR-A2)."; exit 1; }
+              extra=$(jq -c --argjson ex "$extra_excluded" '[.[] | select((.repo as $r | $ex | index($r)) == null)]' <<<"$extra")
+            fi
             echo "org-wide box (repos outside the registry): $(jq length <<<"$extra") — $(jq -r '[.[] | "\(.repo)#\(.n)"] | join(" ")' <<<"$extra")"
             entries=$(jq -c --argjson x "$extra" '. + ($x | map({repo: .repo, pr_number: (.n | tostring), train_ready: true, enabled_classes: "", sensitive_path_patterns: "", safe_path_globs: "", required_checks: "", required_checks_path_deps: ""}))' <<<"$entries")
           else
@@ -314,8 +349,8 @@ jobs:
           # the one recorded at its last evaluation. Unchanged PRs are skipped with a
           # receipt line to stderr. The state file lives in the GitHub Actions cache
           # (fleet-sweep-state-* key).
-          GATE_SHA=$(git rev-parse HEAD 2>/dev/null || echo "0000000")
-          entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-changed.ts /tmp/fleet-sweep-state.json "$GATE_SHA" --record)
+          # PR-A2 item 3: the gate's own sha is no longer in the fingerprint (every ops-pipeline merge used to re-evaluate every labeled PR).
+          entries=$(printf '%s' "$entries" | scripts/node_modules/.bin/tsx scripts/lib/fleet-sweep-changed.ts /tmp/fleet-sweep-state.json --record)
           changed_count=$(jq length <<<"$entries")
           if [ "$changed_count" -lt "$count" ]; then
             echo "Change-driven filter: $changed_count of $count labeled PRs have new fingerprints (fleet-sweep-changed.ts, ops#836). Skipped entries printed to stderr above."
