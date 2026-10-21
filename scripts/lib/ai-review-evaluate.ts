@@ -2,21 +2,25 @@
  * ai-review-evaluate.ts — one PR → one verdict, for the central AI review check (go-native, native-plan §4).
  *
  * Idempotent reconcile, not "review once": every sweep re-derives the cheap, API-only legs (fork, label, CODEOWNERS, size, waiver) for every
- * open non-draft PR, and spends model calls ONLY on a head SHA that has no cached MODEL verdict. The cache is the external_id of the
- * reviewer App's own earlier check runs on that SHA (`v1:<verdict>:<categories>`). That is why a hold label that is removed, or a
- * waiver that is dismissed, flips the check on the next sweep with no new model spend — and why a verdict is only POSTED when it
- * differs from the newest one already there (no check run per PR per 10 minutes).
+ * open non-draft PR, and spends model calls ONLY when there is no cached MODEL verdict for this head SHA AND this merge base. The cache is the
+ * external_id of the reviewer App's own earlier check runs on that SHA (`v1:<verdict>:<categories>[:<mergebase>]`). The head SHA alone does
+ * not pin what the model read: the diff runs from the merge base to the head, and the merge base moves when a PR is retargeted or its parent
+ * lands. So every model verdict records the full merge base it was computed against, and an earlier one is reused only for the same merge
+ * base. That is why a hold label that is removed, or a waiver that is dismissed, flips the check on the next sweep with no new model spend —
+ * and why a verdict is only POSTED when it differs from the newest one already there (no check run per PR per 10 minutes).
  *
  * Legs, cheapest first (everything is re-derived from the API, never from a dispatch payload — #398):
  *   1  fork PR (head repo ≠ base repo, or head repo gone)       → block F        never waived
  *   2  `hold` or `needs-human` label                            → block H        never waived; lifts with the label
+ *   2b base ref ≠ the repo's default branch (a stacked PR)      → block B        never waived; lifts when the PR is retargeted
  *   3  CODEOWNERS errors at the head (GET codeowners/errors)    → block C        never waived. No CODEOWNERS file at all is
  *                                                                                 not an error in a shadow repo (pre-bootstrap) and is
  *                                                                                 block C in a live one.
  *   4  size cap (lines/files from the PR, bytes from the diff)  → block Z        waivable
- *   5  model review (cached by external_id, else 3 votes)       → pass | block S/I/K/D/U
+ *   5  merge base (compare JSON), then the model review: the cached verdict for THIS merge base, else 3 votes on the diff pinned by
+ *      merge base + head                                        → pass | block S/I/K/D/U
  *   6  waiver: kbibelhausen's LATEST review is APPROVED and its commit_id is the head SHA → waives I, K, D, Z.
- *      Deterministic: it needs no model, so it works when WIF or the model is down. S, H, F, C, U are never waived.
+ *      Deterministic: it needs no model, so it works when WIF or the model is down. S, H, F, B, C, U are never waived.
  *
  * Fail closed: an API or model error leaves NO verdict (`error`) — never a success. Two deliberate refinements:
  *   - when the model is unavailable and there is no cache, a Kevin approval on the head still resolves to `waived` (the deadlock the
@@ -27,6 +31,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import {
   codeownersState,
   fetchDiffBySha,
+  fetchMergeBase,
   getPr,
   listReviewCheckRuns,
   listReviews,
@@ -64,7 +69,7 @@ export interface EvalDeps {
   sleep?: (ms: number) => Promise<void>;
 }
 
-export type ErrorLeg = "pr" | "checks" | "codeowners" | "diff" | "model" | "reviews" | "internal";
+export type ErrorLeg = "pr" | "checks" | "codeowners" | "base" | "diff" | "model" | "reviews" | "internal";
 
 export type EvalResult =
   | { kind: "skip"; reason: "draft" | "closed" }
@@ -133,13 +138,6 @@ async function evaluate(deps: EvalDeps, repo: string, mode: "live" | "shadow", p
   const runs = await step("checks", () => listReviewCheckRuns(gh, repo, head));
   const completed: CheckRunRecord[] = runs.filter((r) => r.status === "completed" && r.appSlug === deps.reviewerSlug).sort((a, b) => b.id - a.id);
   const latest = completed[0] ?? null;
-  const cachedModel: ModelOutcome | null = (() => {
-    for (const r of completed) {
-      const m = cachedModelOutcome(parseExternalId(r.externalId));
-      if (m) return m;
-    }
-    return null;
-  })();
 
   let waiverMemo: Promise<Waiver> | null = null;
   const waiver = (): Promise<Waiver> =>
@@ -173,6 +171,13 @@ async function evaluate(deps: EvalDeps, repo: string, mode: "live" | "shadow", p
     gateCats.push("F");
     gateDetail.push("the head repository is not this repository (a fork, or a deleted fork)");
   }
+  if (facts.baseRef !== facts.defaultBranch) {
+    // The diff a verdict covers runs from the merge base with the PR's BASE, so a PR stacked on another branch is reviewed against that
+    // branch and would be reused, unreviewed, the moment it is retargeted. Give it no model verdict at all; it is reviewed once it targets
+    // the default branch. (No branch names in the detail: they are author-controlled text.)
+    gateCats.push("B");
+    gateDetail.push("the base branch is not the repository's default branch");
+  }
   const held = facts.labels.filter((l) => HELD_LABELS.includes(l.toLowerCase()));
   if (held.length > 0) {
     gateCats.push("H");
@@ -196,7 +201,19 @@ async function evaluate(deps: EvalDeps, repo: string, mode: "live" | "shadow", p
     return oversize(`${facts.additions + facts.deletions} changed lines in ${facts.changedFiles} files (cap ${SIZE_CAP.maxChangedLines} lines, ${SIZE_CAP.maxFiles} files)`);
   }
 
-  let model: ModelOutcome | null = cachedModel;
+  // the one fact the head SHA does not pin: where the reviewed diff starts. No merge base → no cache match and no pinned diff (fail closed).
+  let mergeBase: string | null = null;
+  try {
+    mergeBase = await fetchMergeBase(gh, repo, facts.baseRef, head);
+  } catch {
+    mergeBase = null;
+  }
+
+  let model: ModelOutcome | null = null;
+  for (const r of completed) {
+    model = cachedModelOutcome(parseExternalId(r.externalId), mergeBase);
+    if (model) break;
+  }
   let source: Source = "cached";
   let reasons = "";
   let votes: string[] | undefined;
@@ -204,10 +221,14 @@ async function evaluate(deps: EvalDeps, repo: string, mode: "live" | "shadow", p
   if (model === null) {
     source = "model";
     let diff: string | null = null;
-    try {
-      diff = await fetchDiffBySha(gh, repo, facts.baseRef, head);
-    } catch {
-      modelLeg = "diff";
+    if (mergeBase === null) {
+      modelLeg = "base";
+    } else {
+      try {
+        diff = await fetchDiffBySha(gh, repo, mergeBase, head);
+      } catch {
+        modelLeg = "diff";
+      }
     }
     if (diff !== null) {
       if (Buffer.byteLength(diff, "utf-8") > SIZE_CAP.maxDiffBytes) {
@@ -233,13 +254,15 @@ async function evaluate(deps: EvalDeps, repo: string, mode: "live" | "shadow", p
     if (w === "yes") return conclude({ kind: "waived", categories: [] }, "waiver", { votes });
     throw new LegError(w === "unknown" ? "reviews" : modelLeg);
   }
-  if (model.kind === "pass") return conclude({ kind: "pass", categories: [] }, source, { votes });
+  // every path that reaches here holds a model verdict, which needs a merge base (cached → matched it; fresh → pinned the diff by it)
+  if (mergeBase === null) throw new LegError("base");
+  if (model.kind === "pass") return conclude({ kind: "pass", categories: [], mergeBase }, source, { votes });
 
   const cats = model.categories;
   if (cats.every((c) => WAIVABLE.has(c))) {
     const w = await waiver();
     if (w === "unknown") throw new LegError("reviews");
-    if (w === "yes") return conclude({ kind: "waived", categories: cats }, "waiver", { reasons, votes });
+    if (w === "yes") return conclude({ kind: "waived", categories: cats, mergeBase }, "waiver", { reasons, votes });
   }
-  return conclude(block(cats), source, { reasons, votes });
+  return conclude({ ...block(cats), mergeBase }, source, { reasons, votes });
 }

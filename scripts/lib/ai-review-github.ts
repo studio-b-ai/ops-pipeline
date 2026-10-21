@@ -4,12 +4,13 @@
  *
  * Reads (review job, a read-only fleet installation token scoped to the manifest repos):
  *   GET repos/R/pulls                      enumerate open PRs, newest first
- *   GET repos/R/pulls/N                    the facts, re-derived every sweep (#398): head sha, head repo, labels, size
+ *   GET repos/R/pulls/N                    the facts, re-derived every sweep (#398): head sha, base ref + the repo's default branch, head repo, labels, size
  *   GET repos/R/pulls/N/reviews            the waiver
  *   GET repos/R/codeowners/errors?ref=SHA  CODEOWNERS errors at the head (404 when the repo has no CODEOWNERS file — probed live on toto)
  *   GET repos/R/contents/<codeowners path>?ref=SHA   only to tell "no CODEOWNERS" from a blind 404
- *   GET repos/R/compare/BASE...SHA         the diff BY PINNED SHA, as the gate's fetchDiffBySha does (ABA-safe: the bytes reviewed are a
- *                                          pure function of the sha the check is posted on)
+ *   GET repos/R/compare/BASE...SHA         (JSON) the merge base of the PR's base ref and the head: the one fact the head SHA alone does not pin
+ *   GET repos/R/compare/MERGEBASE...SHA    the diff, pinned by TWO SHAs (ABA-safe: the bytes reviewed are a pure function of the merge base and
+ *                                          the head the verdict is bound to — a base ref is a moving name and is never used to fetch the diff)
  *   GET repos/R/commits/SHA/check-runs     the reviewer's earlier verdicts (cache + dedupe)
  * Writes (post job only, the reviewer App installation token):
  *   POST repos/R/check-runs                the verdict
@@ -96,6 +97,8 @@ export interface PrFacts {
   draft: boolean;
   headSha: string;
   baseRef: string;
+  /** the repository's default branch, read from the same response (`base.repo.default_branch`); a PR whose base is anything else is not reviewed */
+  defaultBranch: string;
   baseRepo: string;
   /** null when the head repository is gone (a deleted fork) */
   headRepo: string | null;
@@ -112,7 +115,10 @@ export async function getPr(gh: GhApi, repo: string, number: number): Promise<Pr
   const base = rec(o.base);
   const headSha = head.sha;
   if (typeof headSha !== "string" || !SHA_RE.test(headSha)) throw new Error("unexpected response shape");
-  const baseRepo = rec(base.repo).full_name;
+  const baseRepoObj = rec(base.repo);
+  const baseRepo = baseRepoObj.full_name;
+  const defaultBranch = baseRepoObj.default_branch;
+  if (typeof defaultBranch !== "string" || defaultBranch === "") throw new Error("unexpected response shape");
   const headRepoObj = head.repo === null || head.repo === undefined ? null : rec(head.repo);
   if (typeof baseRepo !== "string" || typeof base.ref !== "string" || typeof o.state !== "string") throw new Error("unexpected response shape");
   const num = (v: unknown): number => {
@@ -125,6 +131,7 @@ export async function getPr(gh: GhApi, repo: string, number: number): Promise<Pr
     draft: o.draft === true,
     headSha,
     baseRef: base.ref,
+    defaultBranch,
     baseRepo,
     headRepo: headRepoObj && typeof headRepoObj.full_name === "string" ? headRepoObj.full_name : null,
     labels: arr(o.labels ?? []).map((l) => {
@@ -166,10 +173,29 @@ export async function listReviews(gh: GhApi, repo: string, number: number): Prom
   throw new Error("review list too long to read completely");
 }
 
-export async function fetchDiffBySha(gh: GhApi, repo: string, baseRef: string, headSha: string): Promise<string> {
+/**
+ * The merge base of `baseRef` and `headSha` — the commit the reviewed diff starts from. `per_page: 1` trims the commit list (the files the
+ * PR's own size caps already bound are still returned; only `merge_base_commit.sha` is read). Probed live: a 40-hex sha.
+ * Throws on any failure, a missing/short sha included; the caller then has no merge base and therefore no verdict it can bind.
+ */
+export async function fetchMergeBase(gh: GhApi, repo: string, baseRef: string, headSha: string): Promise<string> {
   checkRepo(repo);
   checkSha(headSha);
-  const out = await gh({ path: `repos/${repo}/compare/${encodeURIComponent(baseRef)}...${headSha}`, accept: "application/vnd.github.diff" });
+  const o = rec(await gh({ path: `repos/${repo}/compare/${encodeURIComponent(baseRef)}...${headSha}`, query: { per_page: 1 } }));
+  const sha = rec(o.merge_base_commit).sha;
+  if (typeof sha !== "string" || !SHA_RE.test(sha)) throw new Error("unexpected response shape");
+  return sha;
+}
+
+/**
+ * The diff from `mergeBaseSha` to `headSha`, pinned by both SHAs (probed live: byte-identical to the three-dot diff of the base ref, because
+ * the merge base is an ancestor of the head). Never takes a ref name: a branch can move between two reads, a SHA cannot.
+ */
+export async function fetchDiffBySha(gh: GhApi, repo: string, mergeBaseSha: string, headSha: string): Promise<string> {
+  checkRepo(repo);
+  checkSha(mergeBaseSha);
+  checkSha(headSha);
+  const out = await gh({ path: `repos/${repo}/compare/${mergeBaseSha}...${headSha}`, accept: "application/vnd.github.diff" });
   if (typeof out !== "string") throw new Error("unexpected response shape");
   return out;
 }

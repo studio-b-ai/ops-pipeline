@@ -15,7 +15,9 @@ import { DEFAULT_REVIEWER_SLUG, main, MAX_PRS_PER_RUN, runPost, runReview } from
 import { openHandoff, sealHandoff, sealWithinLimit, type Handoff, type HandoffEntry } from "../../lib/ai-review-handoff.js";
 import { installAiReviewLog, toPublicLine } from "../../lib/ai-review-log.js";
 import { loadManifest, parseManifest } from "../../lib/ai-review-manifest.js";
-import { HEAD, PASS, REPO, REVIEWER, block, makeClient, makeGh, makeWorld, noSleep, sha, type PrFixture, type World } from "./helpers.js";
+import { HEAD, MB1, PASS, REPO, REVIEWER, block, makeClient, makeGh, makeWorld, noSleep, sha, type PrFixture, type World } from "./helpers.js";
+
+const PASS_ID = `v1:pass::${MB1}`;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REAL_MANIFEST = join(HERE, "..", "manifest.json");
@@ -74,7 +76,7 @@ describe("shadow cap and live mode", () => {
   });
   it("PRs whose verdict is already posted do not use up the work budget — they cannot starve the older PRs that still need one", async () => {
     const world = six();
-    for (const n of [9, 8, 7]) world.checkRuns[`${REPO}@${sha(String(n))}`] = [{ id: 1, status: "completed", conclusion: "success", external_id: "v1:pass:", app: REVIEWER }];
+    for (const n of [9, 8, 7]) world.checkRuns[`${REPO}@${sha(String(n))}`] = [{ id: 1, status: "completed", conclusion: "success", external_id: PASS_ID, app: REVIEWER }];
     const { g, d } = deps(world, [PASS, PASS, PASS], LIVE);
     const r = await runReview({ ...d, maxPrs: 2 });
     expect(prReads(g.calls)).toEqual([59, 58, 57, 56, 55]);
@@ -133,7 +135,7 @@ describe("post: the exact check run, reasons only in output.summary", () => {
       head_sha: HEAD,
       status: "completed",
       conclusion: "failure",
-      external_id: "v1:block:D",
+      external_id: `v1:block:D:${MB1}`,
       output: { title: "BLOCK (D)", summary: expect.stringContaining("REASON-CANARY-7") },
     });
     const body = req.body as { name: string; head_sha: string; external_id: string; output: { title: string; summary: string } };
@@ -153,8 +155,8 @@ describe("post: the exact check run, reasons only in output.summary", () => {
   });
   it("…but an identical verdict posted by ANOTHER app does not count (numeric app id, the authoritative match)", async () => {
     const world = makeWorld(REPO, { prs: [{ number: 5, sha: HEAD }] });
-    world.checkRuns[`${REPO}@${HEAD}`] = [{ id: 1, status: "completed", conclusion: "success", external_id: "v1:pass:", app: { id: 15368, slug: REVIEWER.slug } }];
-    const handoff: Handoff = { v: 1, entries: [entry({ externalId: "v1:pass:", conclusion: "success" })] };
+    world.checkRuns[`${REPO}@${HEAD}`] = [{ id: 1, status: "completed", conclusion: "success", external_id: PASS_ID, app: { id: 15368, slug: REVIEWER.slug } }];
+    const handoff: Handoff = { v: 1, entries: [entry({ externalId: PASS_ID, conclusion: "success" })] };
     const post = makeGh(world);
     const r = await runPost({ gh: post.gh, manifest: SHADOW, handoff, reviewerAppId: REVIEWER.id });
     expect(r.posted).toBe(1);
@@ -178,7 +180,7 @@ describe("post: the exact check run, reasons only in output.summary", () => {
 });
 
 function entry(over: Partial<HandoffEntry> = {}): HandoffEntry {
-  return { repo: REPO, pr: 5, headSha: HEAD, conclusion: "success", externalId: "v1:pass:", title: "PASS", summary: "ok", ...over };
+  return { repo: REPO, pr: 5, headSha: HEAD, conclusion: "success", externalId: PASS_ID, title: "PASS", summary: "ok", ...over };
 }
 
 describe("main post — the reviewer App is not configured yet", () => {
@@ -266,7 +268,7 @@ describe("the sealed handoff", () => {
     for (const [name, fn] of cases) expect(fn, name).toThrow("handoff: cannot open");
   });
   it("an authenticated payload is still shape-checked: a conclusion that contradicts its external_id, or a non-canonical id, is refused", () => {
-    expect(() => openHandoff(sealHandoff({ v: 1, entries: [entry({ conclusion: "failure", externalId: "v1:pass:" })] }, KEY, CTX), KEY, CTX)).toThrow("handoff: cannot open");
+    expect(() => openHandoff(sealHandoff({ v: 1, entries: [entry({ conclusion: "failure", externalId: PASS_ID })] }, KEY, CTX), KEY, CTX)).toThrow("handoff: cannot open");
     expect(() => openHandoff(sealHandoff({ v: 1, entries: [entry({ conclusion: "failure", externalId: "v1:block:DK" })] }, KEY, CTX), KEY, CTX)).toThrow("handoff: cannot open");
     expect(() => openHandoff(sealHandoff({ v: 1, entries: [entry({ headSha: "abc" })] }, KEY, CTX), KEY, CTX)).toThrow("handoff: cannot open");
     expect(() => openHandoff(sealHandoff({ v: 1, entries: [entry({ repo: "../etc/passwd" })] }, KEY, CTX), KEY, CTX)).toThrow("handoff: cannot open");
@@ -334,7 +336,7 @@ describe("main review", () => {
     expect(blob).not.toContain("REASON-CANARY-review");
     const opened = openHandoff(blob, KEY, CTX);
     expect(opened.entries).toHaveLength(1);
-    expect(opened.entries[0]).toMatchObject({ repo: REPO, pr: 5, headSha: HEAD, conclusion: "failure", externalId: "v1:block:K" });
+    expect(opened.entries[0]).toMatchObject({ repo: REPO, pr: 5, headSha: HEAD, conclusion: "failure", externalId: `v1:block:K:${MB1}` });
     expect(opened.entries[0].summary).toContain("REASON-CANARY-review");
     expect(() => openHandoff(blob, KEY, { ...CTX, runId: "9" })).toThrow();
   });

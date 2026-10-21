@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type Anthropic from "@anthropic-ai/sdk";
-import { HEAD, REPO, makeClient, makeGh, makeWorld, noSleep, sha } from "./helpers.js";
+import { HEAD, MB1, REPO, makeClient, makeGh, makeWorld, noSleep, sha } from "./helpers.js";
 
 const anthropicClientMock = vi.hoisted(() => vi.fn());
 vi.mock("../../lib/anthropic-credentials.js", () => ({ anthropicClient: anthropicClientMock }));
@@ -53,7 +53,7 @@ describe("main review — the Anthropic client", () => {
       throw new Error("must not be called");
     });
     const world = makeWorld(REPO, { prs: [{ number: 1, sha: sha("1"), labels: ["hold"] }, { number: 2, sha: sha("2"), headRepo: "x/y" }, { number: 3, sha: HEAD }] });
-    world.checkRuns[`${REPO}@${HEAD}`] = [{ id: 1, status: "completed", conclusion: "success", external_id: "v1:pass:", app: { id: 1, slug: "studiob-reviewer" } }];
+    world.checkRuns[`${REPO}@${HEAD}`] = [{ id: 1, status: "completed", conclusion: "success", external_id: `v1:pass::${MB1}`, app: { id: 1, slug: "studiob-reviewer" } }];
     const r = await sweep(world);
     expect(r.code).toBe(0);
     expect(r.handoff!.entries.map((e) => e.externalId).sort()).toEqual(["v1:block:F", "v1:block:H"]);

@@ -15,6 +15,9 @@ export const REVIEWER = { id: 777001, slug: "studiob-reviewer" };
 export const sha = (c: string): string => c.repeat(40).slice(0, 40);
 export const HEAD = sha("a");
 export const OLD_HEAD = sha("b");
+/** Two distinct merge bases (full 40-hex): the commit a PR's diff starts from. A PR's merge base moves when it is retargeted or its parent lands. */
+export const MB1 = sha("1");
+export const MB2 = sha("2");
 
 export interface ReviewFixture {
   id: number;
@@ -27,6 +30,10 @@ export interface PrFixture {
   draft?: boolean;
   state?: string;
   sha?: string;
+  /** the PR's base ref; defaults to the repo's default branch. Mutable between sweeps: a retarget. */
+  baseRef?: string;
+  /** what `compare/<base>...<head>` reports as `merge_base_commit.sha`; defaults to MB1. `diff` is the diff FROM this merge base. */
+  mergeBase?: string;
   headRepo?: string | null;
   labels?: string[];
   additions?: number;
@@ -46,6 +53,8 @@ export interface CheckRunFixture {
 export interface RepoFixture {
   /** newest first, as `GET pulls?sort=created&direction=desc` returns them */
   prs: PrFixture[];
+  /** `base.repo.default_branch` on every PR response; defaults to "main" */
+  defaultBranch?: string;
   /** what `GET codeowners/errors` does at any ref */
   codeowners?: "ok" | "errors" | "absent" | "inconsistent" | "down";
 }
@@ -89,7 +98,7 @@ export function makeGh(world: World, postAs: { id: number; slug: string } = REVI
         state: pr.state ?? "open",
         draft: pr.draft === true,
         head: { sha: pr.sha ?? HEAD, repo: pr.headRepo === null ? null : { full_name: pr.headRepo ?? m[1] } },
-        base: { ref: "main", repo: { full_name: m[1] } },
+        base: { ref: pr.baseRef ?? world.repos[m[1]].defaultBranch ?? "main", repo: { full_name: m[1], default_branch: world.repos[m[1]].defaultBranch ?? "main" } },
         labels: (pr.labels ?? []).map((name) => ({ name })),
         additions: pr.additions ?? 3,
         deletions: pr.deletions ?? 1,
@@ -117,11 +126,21 @@ export function makeGh(world: World, postAs: { id: number; slug: string } = REVI
       if (mode === "inconsistent" && m[2] === ".github/CODEOWNERS") return { path: m[2] };
       throw new GhError(404);
     }
-    m = /^repos\/([^/]+\/[^/]+)\/compare\/main\.\.\.([0-9a-f]{40})$/.exec(path);
+    m = /^repos\/([^/]+\/[^/]+)\/compare\/([^/]+)\.\.\.([0-9a-f]{40})$/.exec(path);
     if (m && method === "GET") {
-      const pr = world.repos[m[1]]?.prs.find((p) => (p.sha ?? HEAD) === m![2]);
+      const pr = world.repos[m[1]]?.prs.find((p) => (p.sha ?? HEAD) === m![3]);
       if (!pr) throw new GhError(404);
-      return pr.diff ?? CLEAN_DIFF;
+      const base = decodeURIComponent(m[2]);
+      const mergeBase = pr.mergeBase ?? MB1;
+      if (req.accept && /diff/.test(req.accept)) {
+        // The diff is fetched by TWO SHAs, and only by the merge base the PR has right now. A ref name here is the unpinned fetch (a
+        // regression); any other sha is a stale or invented merge base.
+        if (!/^[0-9a-f]{40}$/.test(base)) throw new Error(`unplanned request: diff fetched by ref name ${base}`);
+        if (base !== mergeBase) throw new GhError(404);
+        return pr.diff ?? CLEAN_DIFF;
+      }
+      // JSON compare: the merge base of the PR's base ref and its head (what the review job reads before it can bind a verdict)
+      return { status: "ahead", ahead_by: 1, merge_base_commit: { sha: mergeBase }, commits: [], files: [] };
     }
     m = /^repos\/([^/]+\/[^/]+)\/commits\/([0-9a-f]{40})\/check-runs$/.exec(path);
     if (m && method === "GET") {
