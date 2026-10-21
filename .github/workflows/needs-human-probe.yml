@@ -20,6 +20,13 @@ name: Needs-human diagnostic probe (reusable)
 # suppress it. This probe's own comment IS posted with GITHUB_TOKEN, so it can
 # never re-trigger anything. The self-triggering shape that made the auto-merge
 # gate structurally inert cannot occur here by construction.
+#
+# stint #944 (2026-09-29): the sweep worker applies the `needs-human` label via
+# a GitHub App installation token — NOT a user token. That label event may NOT
+# fire this workflow. The NEEDS-HUMAN ROUTER (needs-human-router.ts) now bridges
+# this gap: when it finds a labeled issue with no probe comment ("no-probe"
+# disposition), it fires runProbe() inline from the same process. The router's
+# own workflow (needs-human-router.yml) carries the same federation step.
 
 on:
   workflow_call:

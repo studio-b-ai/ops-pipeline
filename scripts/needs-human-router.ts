@@ -44,6 +44,7 @@ import {
 import { railHold, type HoldRail } from "./lib/hold-rail.js";
 import { createAuthorizedReactorChecker } from "./lib/needs-human-authorization.js";
 import { PROBE_MARKER } from "./lib/needs-human-probe-lib.js";
+import { runProbe } from "./needs-human-probe.js";
 import {
   HOLD_RECEIPT_MARKER,
   ROUTE_RECEIPT_MARKER,
@@ -317,9 +318,34 @@ async function logMainOutcome(
       // human's explicit action.
       console.log(`${head}  skip-already-routed`);
       return;
-    case "no-probe":
-      console.log(`${head}  no-probe (no findings comment yet — nothing to route on)`);
+    case "no-probe": {
+      // ops-pipeline#575 / stint #944 (mechanic crew, 2026-09-29): machinery
+      // (the sweep worker) labels issues `needs-human` via a GitHub App
+      // installation token, not a user token. The probe workflow's `issues:
+      // labeled` trigger may not fire for non-user-token label events, so the
+      // issue lands here with no findings comment and is parked forever. The
+      // router now bridges that gap: when an escalated issue has no probe
+      // comment, the router fires the probe INLINE rather than just logging
+      // "no-probe" and parking the issue silently.
+      if (mutationsApplied >= ACTION_CAP) {
+        cappedCount++;
+        console.log(`${head}  no-probe (probe capped — deferred to next run)`);
+        return;
+      }
+      mutationsApplied++;
+      if (dryRun) {
+        console.log(`${head}  no-probe [PREVIEW — would fire probe inline (machinery-labeled bridge, stint #944)]`);
+        return;
+      }
+      try {
+        await runProbe(repo, issue.number);
+        console.log(`${head}  no-probe (fired probe inline — label was applied by machinery, not a user token; stint #944)`);
+        actionedThisRun.add(issue.number);
+      } catch (e) {
+        console.log(`${head}  no-probe (probe failed: ${e instanceof Error ? e.message : String(e)} — retry next run)`);
+      }
       return;
+    }
     case "close-rejected": {
       const result = tryApply(() => closeIssue(repo, issue.number, closeRejectedReceipt()), dryRun);
       logResult(head, "close-rejected (authorized 👎, pre-routing)", result);
