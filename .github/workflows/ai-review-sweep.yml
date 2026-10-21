@@ -2,7 +2,12 @@ name: AI review sweep
 
 # go-native (Kevin 2026-10-21; native-plan §4): the central `studiob-ai-review` check. One sweep reads the open pull requests of the repos in
 # scripts/native/manifest.json (today: toto, SHADOW — at most the 3 most recent PRs, and nothing requires the check yet), derives a verdict per
-# head SHA (deterministic legs + a 3-vote model review; see scripts/ai-review.ts), and posts ONE check run per SHA as the reviewer GitHub App.
+# head SHA (deterministic legs + a deterministic secret scan + a 3-vote model review; see scripts/ai-review.ts), and posts ONE check run per SHA as
+# the reviewer GitHub App.
+#
+# SHADOW NEVER BLOCKS: while a repo is shadow (live:false) EVERY check run is conclusion `neutral` (the would-be verdict rides in external_id and
+# output.summary), because the old merge robot still serving that repo reads any failing check as not clean. The post job re-checks the conclusion
+# against the manifest and skips a mismatch. Only a live:true repo gets success / failure.
 #
 # TWO JOBS, split on purpose:
 #   review  no `environment`, so its OIDC `sub` is the branch form `repo:studio-b-ai/ops-pipeline:ref:refs/heads/main` and matches the Anthropic
