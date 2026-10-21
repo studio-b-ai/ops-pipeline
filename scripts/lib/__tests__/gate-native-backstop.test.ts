@@ -31,7 +31,7 @@ const nativeDetail = { ...nativeRow, conditions: { ref_name: { include: ["~DEFAU
 const BLOCKED_PR = JSON.stringify({
   author: { login: "app/studiob-fleet-bot" },
   labels: [{ name: "fleet-internal" }],
-  createdAt: "2026-10-21T08:00:00Z",
+  createdAt: "2026-01-15T08:00:00Z",
   state: "OPEN",
   isDraft: false,
   mergeStateStatus: "BLOCKED", // a deterministic early short-circuit: the gate reads the PR and stops at the ci-rollup leg

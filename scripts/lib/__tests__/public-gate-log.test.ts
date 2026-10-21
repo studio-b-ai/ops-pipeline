@@ -3,7 +3,7 @@ import { installPublicGateLog, toPublicGateLine } from "../public-gate-log.js";
 import { parseReceipts } from "../squasher-health-classify.js";
 
 // Go-native Phase A, PR-A2 item 5 — gate logs carry only repo, PR, SHA and a verdict enum.
-// Rule #223: the REAL toPublicGateLine / installPublicGateLog, fed RECORDED lines (verbatim from run 39524054966, 2026-10-21 00:58Z,
+// Rule #223: the REAL toPublicGateLine / installPublicGateLog, fed RECORDED lines (verbatim from ops-pipeline run 39524054966,
 // the run the plan's review found leaking bolt-wms#3936's verdict text). Rule #322/#471: known-bad (every leak shape is gone) AND
 // known-good (the fields the monitors and operators need survive; the health monitor's real parser still reads the receipts).
 

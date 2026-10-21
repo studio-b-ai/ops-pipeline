@@ -33,8 +33,8 @@ const row = (over: Record<string, unknown> = {}) => ({
   enforcement: "active",
   node_id: "RRS_lACqUmVwb3NpdG9yec5J7LhBzgFmFDE",
   _links: { self: { href: "https://api.github.com/repos/studio-b-ai/toto/rulesets/111" } },
-  created_at: "2026-10-21T08:00:00.000-04:00",
-  updated_at: "2026-10-21T08:00:00.000-04:00",
+  created_at: "2026-01-15T08:00:00.000-04:00",
+  updated_at: "2026-01-15T08:00:00.000-04:00",
   ...over,
 });
 const detail = (over: Record<string, unknown> = {}) => ({
@@ -45,7 +45,7 @@ const detail = (over: Record<string, unknown> = {}) => ({
   current_user_can_bypass: "never",
   ...over,
 });
-/** the one live ruleset in the org on 2026-10-21 (chassis) — a real known-bad: a ruleset that is NOT the native one */
+/** the one live ruleset in the org when this was written (chassis) — a real known-bad: a ruleset that is NOT the native one */
 const CHASSIS_ROW = row({ id: 23467057, name: "main — pull request required; automation bypass declared", source: "studio-b-ai/chassis" });
 
 function api(map: Record<string, unknown>): { read: RulesetReader; calls: string[] } {

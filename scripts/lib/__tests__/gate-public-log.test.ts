@@ -29,7 +29,7 @@ function prJson(over: Record<string, unknown> = {}): string {
   return JSON.stringify({
     author: { login: "app/studiob-fleet-bot" },
     labels: [{ name: "box" }, { name: "fleet-internal" }],
-    createdAt: "2026-10-21T08:00:00Z",
+    createdAt: "2026-01-15T08:00:00Z",
     state: "OPEN",
     isDraft: false,
     mergeStateStatus: "BEHIND",
@@ -54,7 +54,7 @@ const TIMELINE = JSON.stringify({
           pageInfo: { hasPreviousPage: false, startCursor: null },
           nodes: [
             { __typename: "PullRequestCommit" },
-            { __typename: "LabeledEvent", label: { name: "box" }, actor: { __typename: "User", login: "kbibelhausen" }, createdAt: "2026-10-21T09:00:00Z" },
+            { __typename: "LabeledEvent", label: { name: "box" }, actor: { __typename: "User", login: "kbibelhausen" }, createdAt: "2026-01-15T09:00:00Z" },
           ],
         },
       },
