@@ -4,7 +4,7 @@
     {
       "repo": "studio-b-ai/bolt-wms",
       "enabled_classes": "docs-comment,test-only,code-fix",
-      "sensitive_path_patterns": "^\\.github/actions/,^(?!.*__tests__/).*([Tt]ier|[Cc]ustomer-?[Cc]lass|trade-rung|trade-application|[Ww]orksheet|[Pp]romotion|[Dd]iscount|msrp|map-floor|rail-audit),^(?!.*__tests__/).*([Ss]ecret|[Tt]oken|[Cc]redential|[Pp]assword|[Pp]ermission|msal|ApiKey|[Ll]ogin),^(?!.*__tests__/)(?!docs/).*([Aa]pi[-_]?[Kk]ey|stock-api-admin|seed-admin|UserAdmin|[Ii]dentity|sas-agents|bootstrap-users|create-workers|provision-cs-rep|order-embed)",
+      "sensitive_path_patterns": "^\\.github/actions/,^(?!.*__tests__/).*([Tt]ier|[Cc]ustomer-?[Cc]lass|trade-rung|trade-application|[Ww]orksheet|[Pp]romotion|[Dd]iscount|msrp|map-floor|rail-audit),^(?!.*__tests__/).*([Ss]ecret|[Tt]oken|[Cc]redential|[Pp]assword|[Pp]ermission|msal|ApiKey|[Ll]ogin),^(?!.*__tests__/)(?!docs/).*([Aa]pi[-_]?[Kk]ey|stock-api-admin|seed-admin|UserAdmin|[Ii]dentity|sas-agents|bootstrap-users|create-workers|provision-cs-rep|order-embed),(^|/)node_modules/",
       "safe_path_globs": "src/**,client/src/**,hubspot/src/**,scripts/**,docs/**",
       "required_checks": "Client — TypeScript + Build,Server — TypeScript + Tests",
       "train": true
@@ -12,7 +12,7 @@
     {
       "repo": "studio-b-ai/studiob",
       "enabled_classes": "docs-comment,test-only,code-fix",
-      "sensitive_path_patterns": "^packages/api/src/routes/(shopify|acumatica),^(?!.*__tests__/).*([Ss]ecret|[Tt]oken|[Cc]redential|[Pp]assword|[Pp]ermission|session-(pool|gate|manager|bridge)|soap-login|[Ll]ogin),^(?!.*__tests__/)(?!docs/).*(view-as|[Ii]mpersonat|[Ii]dentity|[Ll]icens|seed-heritage|zoom-app-context)",
+      "sensitive_path_patterns": "^packages/api/src/routes/(shopify|acumatica),^(?!.*__tests__/).*([Ss]ecret|[Tt]oken|[Cc]redential|[Pp]assword|[Pp]ermission|session-(pool|gate|manager|bridge)|soap-login|[Ll]ogin),^(?!.*__tests__/)(?!docs/).*(view-as|[Ii]mpersonat|[Ii]dentity|[Ll]icens|seed-heritage|zoom-app-context),(^|/)node_modules/",
       "safe_path_globs": "packages/*/src/**,scripts/**,docs/**",
       "required_checks": "Build + boot + probe,tsc --noEmit (SDK drift guard) (api),turbo run test (all workspace suites)",
       "required_checks_path_deps": "tsc --noEmit (SDK drift guard) (api)=packages/**",
@@ -21,7 +21,7 @@
     {
       "repo": "studio-b-ai/studiob-price-sync",
       "enabled_classes": "docs-comment,test-only,code-fix",
-      "sensitive_path_patterns": "^scripts/",
+      "sensitive_path_patterns": "^scripts/,(^|/)node_modules/",
       "safe_path_globs": "src/**,scripts/**,docs/**",
       "required_checks": "Extension bundle + type baseline",
       "train": true
@@ -29,7 +29,7 @@
     {
       "repo": "studio-b-ai/asthetik-trade-theme",
       "enabled_classes": "docs-comment,test-only,code-fix",
-      "sensitive_path_patterns": "^(sections|blocks|snippets|templates|locales|layout|config)/",
+      "sensitive_path_patterns": "^(sections|blocks|snippets|templates|locales|layout|config)/,(^|/)node_modules/",
       "safe_path_globs": "sections/**,snippets/**,assets/**,templates/**,layout/**,locales/**",
       "required_checks": "Theme check + schema limits",
       "train": true
@@ -45,7 +45,7 @@
     {
       "repo": "studio-b-ai/radio",
       "enabled_classes": "docs-comment,test-only,code-fix,fleet-internal",
-      "sensitive_path_patterns": "^\\.github/actions/,(^|/)(auth|credential|secret|token),([Pp]assword|session-gate|ghost-key|cos/tiers|[Pp]ermission)",
+      "sensitive_path_patterns": "^\\.github/actions/,(^|/)(auth|credential|secret|token),([Pp]assword|session-gate|ghost-key|cos/tiers|[Pp]ermission),(^|/)node_modules/",
       "safe_path_globs": "src/**,tests/**,scripts/**,docs/**,mcp/**,routines/**",
       "required_checks": "Build & Check,Cross-System QA / API Tests (Vitest)",
       "train": true
@@ -53,7 +53,7 @@
     {
       "repo": "studio-b-ai/ops-pipeline",
       "enabled_classes": "docs-comment,test-only,code-fix",
-      "sensitive_path_patterns": "(^|/)squasher-fleet\\.json$|(^|/)label-authority\\.ts$|(^|/)\\.github/workflows/,^scripts/(pr-automerge-gate|post-merge-tripwire|restart-train|squasher-|box-patch-id|automerge-skip-allowlist|door-watch|needs-human-),^scripts/lib/(automerge-|gate-|fleet-sweep-|merge-door|needs-human-|box-patch-id|restart-train|timetable-gate|train-liveness|tripwire-|hold-rail|squasher-|door-watch|label-authority|github-issues|anthropic-credentials|railway-deployment-probes|railway-volume-probes),^scripts/lib/__tests__/.*(automerge|gate-|label-authority|merge-door|tripwire|restart-train|squasher|fleet-sweep|door-|needs-human|box-patch-id|timetable|hold-rail|eligibility|github-issues|anthropic-credentials),^scripts/(credential|grants|gateway-token|cloudflare-token|provision-railway|CREDENTIAL)|^scripts/lib/(credential-|gateway-token|grants-drift),^[.]github/,^scripts/(ai-review|native|merge-window|arm-backstop),^scripts/lib/(ai-review|native|merge-window),^scripts/package,^scripts/(tsconfig[^/]*[.]json$|[.]npmrc$|vitest[.]config),^scripts/(stale-pr-sweep|backlog-|repo-hygiene|dead-cron|required-checks-drift|shipped-ledger|train-liveness|railway-volume),^scripts/lib/(config[.]ts$|severity-issue-reconcile|stale-pr-|backlog-|repo-hygiene|dead-cron|required-checks-drift|shipped-ledger|railway-volume-|arm-backstop),^scripts/cfo-brief/",
+      "sensitive_path_patterns": "(^|/)squasher-fleet\\.json$|(^|/)label-authority\\.ts$|(^|/)\\.github/workflows/,^scripts/(pr-automerge-gate|post-merge-tripwire|restart-train|squasher-|box-patch-id|automerge-skip-allowlist|door-watch|needs-human-),^scripts/lib/(automerge-|gate-|fleet-sweep-|merge-door|needs-human-|box-patch-id|restart-train|timetable-gate|train-liveness|tripwire-|hold-rail|squasher-|door-watch|label-authority|github-issues|anthropic-credentials|railway-deployment-probes|railway-volume-probes),^scripts/lib/__tests__/.*(automerge|gate-|label-authority|merge-door|tripwire|restart-train|squasher|fleet-sweep|door-|needs-human|box-patch-id|timetable|hold-rail|eligibility|github-issues|anthropic-credentials),^scripts/(credential|grants|gateway-token|cloudflare-token|provision-railway|CREDENTIAL)|^scripts/lib/(credential-|gateway-token|grants-drift),^[.]github/,^scripts/(ai-review|native|merge-window|arm-backstop),^scripts/lib/(ai-review|native|merge-window),^scripts/package,^scripts/(tsconfig[^/]*[.]json$|[.]npmrc$|vitest[.]config),^scripts/(stale-pr-sweep|backlog-|repo-hygiene|dead-cron|required-checks-drift|shipped-ledger|train-liveness|railway-volume),^scripts/lib/(config[.]ts$|severity-issue-reconcile|stale-pr-|backlog-|repo-hygiene|dead-cron|required-checks-drift|shipped-ledger|railway-volume-|arm-backstop),^scripts/cfo-brief/,(^|/)node_modules/",
       "safe_path_globs": "scripts/**",
       "required_checks": "Scripts — typecheck + tests",
       "train": false
@@ -94,7 +94,7 @@
     {
       "repo": "studio-b-ai/claude-config-plane",
       "enabled_classes": "docs-comment,test-only,code-fix,fleet-internal",
-      "sensitive_path_patterns": "(^|/)(settings\\.json|shift-runner/shifts\\.yaml|config-push/),^shift-runner/lib/fleet-internal-label[.]sh$,^shift-runner/opencode-seat/(opencode[.]jsonc|RULES[.]md|plugins/),^shift-runner/(seats[.]yaml|settings/)",
+      "sensitive_path_patterns": "(^|/)(settings\\.json|shift-runner/shifts\\.yaml|config-push/),^shift-runner/lib/fleet-internal-label[.]sh$,^shift-runner/opencode-seat/(opencode[.]jsonc|RULES[.]md|plugins/),^shift-runner/(seats[.]yaml|settings/),(^|/)node_modules/",
       "safe_path_globs": "bin/**,shift-runner/**,skills/**,.gitignore",
       "required_checks": "syntax",
       "train": true
@@ -102,7 +102,7 @@
     {
       "repo": "studio-b-ai/claude-hooks",
       "enabled_classes": "docs-comment,test-only,code-fix,fleet-internal",
-      "sensitive_path_patterns": "(secret|token|credential|deploy-command|op-cli|settings-registration|direct-session|email-send)",
+      "sensitive_path_patterns": "(secret|token|credential|deploy-command|op-cli|settings-registration|direct-session|email-send),(^|/)node_modules/",
       "safe_path_globs": "*.py",
       "required_checks": "syntax",
       "train": false
@@ -122,7 +122,7 @@
     {
       "repo": "studio-b-ai/toto",
       "enabled_classes": "docs-comment,code-fix,fleet-internal",
-      "sensitive_path_patterns": "^\\.github/actions/,^src-tauri/(capabilities/|tauri[.]conf[.]json$)",
+      "sensitive_path_patterns": "^\\.github/actions/,^src-tauri/(capabilities/|tauri[.]conf[.]json$),(^|/)node_modules/",
       "safe_path_globs": "src/**,qa/**,src-tauri/**",
       "required_checks": "qa / node-guards",
       "train": true
