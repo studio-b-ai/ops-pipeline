@@ -471,7 +471,7 @@ describe("resolveSweepPopulation", () => {
   });
 
   it("treats a missing `train` field as off (absent is not enabled)", () => {
-    const pop = resolveSweepPopulation([], [{ repo: "studio-b-ai/roundhouse" }]).map((p) => p.repo);
+    const pop = resolveSweepPopulation([], [{ repo: "studio-b-ai/lightsout" }]).map((p) => p.repo);
     expect(pop).toEqual([]);
   });
 

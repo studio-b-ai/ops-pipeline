@@ -143,3 +143,28 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.mint.outputs.token }}
         run: npx tsx required-checks-drift-worker.ts ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+
+      # Mechanic crew stint #380 (2026-09-15) — the squasher-fleet canonical-name leg
+      # (scripts/squasher-fleet-canonical-check.ts; design in
+      # scripts/lib/squasher-fleet-canonical.ts's header). Fourth independent leg,
+      # fourth independent failure domain: `!cancelled()` (Rule #320) so no earlier
+      # leg's failure silently skips it.
+      #
+      # WHY HERE AND NOT IN THE PR GATE: the drift vector is a repo rename in
+      # GitHub's UI — no pull request in this repo is involved, so a pull_request
+      # check structurally cannot catch the class (door-watch-coherence-check.ts's
+      # header lays out the same live-state-vs-checkout reasoning). GitHub serves
+      # the old name via redirect indefinitely, so nothing else in the fleet fails
+      # when a rename lands — this probe is the only thing that resolves canonical
+      # identity rather than reachability. Needs ONLY `metadata:read` on the minted
+      # fleet token (GET /repos/{owner}/{repo}, redirects included) — the one
+      # permission the App has always held, so unlike the two legs above there is
+      # NO expected degradation: a non-zero exit here is real drift (or a real
+      # instrument failure, which exits 2 and fails closed), and the red run is
+      # the intended alarm. Read-only, flags-only: it never edits the registry.
+      - name: Run squasher-fleet canonical-name check
+        if: ${{ !cancelled() }}
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+        run: npx tsx squasher-fleet-canonical-check.ts
