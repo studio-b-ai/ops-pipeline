@@ -230,6 +230,17 @@ describe("pr-automerge-gate.ts parks a review-FLAGGED head instead of re-rolling
     expect(helper).toContain('flagCardMarkersFor("review", headSha)');
   });
 
+  it("the poster searches the SAME shared vocabulary — no second spelling to drift", () => {
+    const start = src.indexOf("function postFlagCard");
+    expect(start).toBeGreaterThan(-1);
+    const end = src.indexOf("function reviewFlagCardOnHead", start);
+    expect(end).toBeGreaterThan(start);
+    const helper = src.slice(start, end);
+    expect(helper).toContain("flagCardMarkersFor(leg as CardLeg, headSha)");
+    // Negative control: the old per-site spelling (card.marker + card.legacyMarker) is gone.
+    expect(helper).not.toContain("card.legacyMarker");
+  });
+
   it("the probe is fail-closed — a blind oracle crashes the run, never waves a re-roll through (#322)", () => {
     const start = src.indexOf("function reviewFlagCardOnHead");
     // The helper ends at the review-leg section banner — bound the window there.
