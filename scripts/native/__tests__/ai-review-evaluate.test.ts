@@ -416,6 +416,8 @@ describe("the external_id is a cache: no new model spend when a hold lifts, a wa
     expect(p.externalId).toBe("v1:pass:");
     expect(p.source).toBe("cached");
     expect(r.requests).toHaveLength(0);
+    // the history is only visible with filter=all (GitHub's default `latest` would hide the older pass behind the newer failure)
+    expect(r.calls.find((c) => /check-runs$/.test(c.path))?.query).toMatchObject({ check_name: "studiob-ai-review", filter: "all" });
   });
   it("a dismissed waiver is re-derived from the cached model block (waived:K → block K), no model call", async () => {
     const { world, mode } = setup({ reviews: [{ id: 1, login: "kbibelhausen", state: "DISMISSED", commit_id: HEAD }] });

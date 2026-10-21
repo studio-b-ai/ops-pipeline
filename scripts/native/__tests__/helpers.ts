@@ -125,7 +125,16 @@ export function makeGh(world: World, postAs: { id: number; slug: string } = REVI
     }
     m = /^repos\/([^/]+\/[^/]+)\/commits\/([0-9a-f]{40})\/check-runs$/.exec(path);
     if (m && method === "GET") {
-      const runs = (world.checkRuns[`${m[1]}@${m[2]}`] ?? []).filter((r) => (r.name ?? "studiob-ai-review") === req.query?.check_name);
+      let runs = (world.checkRuns[`${m[1]}@${m[2]}`] ?? []).filter((r) => (r.name ?? "studiob-ai-review") === req.query?.check_name);
+      // GitHub's default is `filter=latest`: ONE run per check name (per app). Only `filter=all` returns the history.
+      if (req.query?.filter !== "all") {
+        const newest = new Map<number | null, CheckRunFixture>();
+        for (const r of runs) {
+          const k = r.app?.id ?? null;
+          if (!newest.has(k) || r.id > newest.get(k)!.id) newest.set(k, r);
+        }
+        runs = [...newest.values()];
+      }
       return { total_count: runs.length, check_runs: runs.map((r) => ({ name: "studiob-ai-review", status: "completed", conclusion: null, external_id: null, app: null, ...r })) };
     }
     m = /^repos\/([^/]+\/[^/]+)\/check-runs$/.exec(path);

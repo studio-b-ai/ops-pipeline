@@ -230,11 +230,15 @@ export interface CheckRunRecord {
   appSlug: string | null;
 }
 
-/** Every `studiob-ai-review` check run on the SHA (any source), as records. The caller filters by app. */
+/**
+ * Every `studiob-ai-review` check run on the SHA (any source), as records. The caller filters by app.
+ * `filter: "all"` is load-bearing: the endpoint's default is `latest` — one run per check name — so after a deterministic failure (a hold)
+ * the earlier MODEL verdict would be invisible, and lifting the hold would cost a new model review instead of re-using the cache.
+ */
 export async function listReviewCheckRuns(gh: GhApi, repo: string, headSha: string): Promise<CheckRunRecord[]> {
   checkRepo(repo);
   checkSha(headSha);
-  const o = rec(await gh({ path: `repos/${repo}/commits/${headSha}/check-runs`, query: { check_name: CHECK_NAME, per_page: 100 } }));
+  const o = rec(await gh({ path: `repos/${repo}/commits/${headSha}/check-runs`, query: { check_name: CHECK_NAME, filter: "all", per_page: 100 } }));
   return arr(o.check_runs ?? []).map((r) => {
     const x = rec(r);
     const app = x.app === null || x.app === undefined ? null : rec(x.app);
