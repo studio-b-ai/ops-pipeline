@@ -35,6 +35,12 @@ routes:
     worker: squasher
   - label: enhancement
     worker: enhancement-worker
+  # codebase-sweep findings (design 2026-09-08, D1) — filed on power-unit with
+  # BOTH `opportunity` and `enhancement`, so the enhancement route above already
+  # fires; this line makes the sweep's own label route explicitly even if a
+  # finding ever lands without the co-label.
+  - label: opportunity
+    worker: enhancement-worker
   - label: drain
     worker: drain
 
