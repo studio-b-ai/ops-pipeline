@@ -8,6 +8,7 @@ import {
   NATIVE_RULESET_NAME,
   detectNative,
   exclusionLogLine,
+  reposForDoor,
   runCli,
   scanNative,
   targetsDefaultBranch,
@@ -173,6 +174,35 @@ describe("scanNative — per-run cache, fixed log lines", () => {
     expect(r.log.join("\n")).not.toContain("::set-output");
   });
   it("exclusionLogLine: not-native has no line", () => expect(exclusionLogLine("o/r", "not-native")).toBeNull());
+});
+
+describe("reposForDoor — what the restart train iterates", () => {
+  it("drops the native repo (and a repo whose check failed), keeps the plain one, and says why", () => {
+    const { read } = api({
+      [LIST("o/native")]: [row()],
+      [DETAIL("o/native", 111)]: detail(),
+      [LIST("o/plain")]: [],
+      [LIST("o/broken")]: new Error("HTTP 500"),
+    });
+    const r = reposForDoor(["o/native", "o/plain", "o/broken"] as const, read);
+    expect(r.active).toEqual(["o/plain"]);
+    expect(r.log).toEqual(["excluded: native o/native", "excluded: native-check-failed o/broken (fail-closed: ruleset read failed)"]);
+  });
+  it("control: with no native repo the door keeps every repo and logs nothing", () => {
+    const { read } = api({ [LIST("o/a")]: [], [LIST("o/b")]: [CHASSIS_ROW] });
+    expect(reposForDoor(["o/a", "o/b"], read)).toEqual({ active: ["o/a", "o/b"], log: [] });
+  });
+  it("restart-train.ts builds its tickets ONLY from the door's active repos (the stale-label strip, the merge and the in-flight label all hang off them)", () => {
+    const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "restart-train.ts"), "utf-8");
+    const start = src.indexOf("async function fetchTickets(");
+    const end = src.indexOf("\nasync function postLines(", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const body = src.slice(start, end);
+    expect(body).toContain("reposForDoor(TICKET_REPOS");
+    expect(body).toContain("for (const repo of door.active)");
+    expect(body).not.toMatch(/of TICKET_REPOS\)/); // a raw iteration over TICKET_REPOS here would bypass the exclusion
+  });
 });
 
 describe("runCli — argument handling + cache file", () => {

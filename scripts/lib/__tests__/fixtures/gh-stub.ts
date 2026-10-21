@@ -6,6 +6,9 @@
  * matched in order against the joined argv (`"api repos/o/r/rulesets?per_page=100"`); the first match wins:
  *   { match: /regex/, out: "<stdout>" }                 → prints `out`, exit 0
  *   { match: /regex/, fail: true }                      → stderr noise, exit 1 (an API error)
+ *   { ..., token: "x" }                                 → the rule only matches when the call runs under GH_TOKEN=x (compared, never
+ *                                                         printed — Rule #259; tests pass dummy tokens), so a test can prove WHICH
+ *                                                         credential a call used: the wrong one is unmapped (exit 97).
  * An UNMAPPED call exits 97 — a test never silently talks to a default.
  */
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
@@ -15,6 +18,7 @@ export interface GhStubRule {
   match: RegExp;
   out?: string;
   fail?: boolean;
+  token?: string;
 }
 
 const sq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
@@ -28,7 +32,8 @@ export function makeGhStub(dir: string, rules: GhStubRule[]): { binDir: string; 
   rules.forEach((r, i) => {
     const outFile = join(dir, `gh-out-${i}`);
     writeFileSync(outFile, r.out ?? "");
-    lines.push(`if printf '%s' "$*" | grep -qE -e ${sq(r.match.source)}; then`);
+    const tokenGuard = r.token === undefined ? "" : `[ "\${GH_TOKEN:-}" = ${sq(r.token)} ] && `;
+    lines.push(`if ${tokenGuard}printf '%s' "$*" | grep -qE -e ${sq(r.match.source)}; then`);
     lines.push(r.fail ? `  echo "gh: stub API failure (HTTP 500)" >&2; exit 1` : `  cat ${sq(outFile)}; exit 0`);
     lines.push("fi");
   });

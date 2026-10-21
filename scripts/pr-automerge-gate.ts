@@ -121,6 +121,7 @@ import { parseArgs } from "./lib/automerge-args.js";
 import { reviewSystemPromptFor } from "./lib/automerge-review-prompt.js";
 import { formatGateReceiptLine, type GateReceiptLeg } from "./lib/automerge-telemetry.js";
 import { enrollGateRefusal, resolveGateRefusals } from "./lib/gate-enroll.js";
+import { reposForDoor } from "./lib/native-exclusion.js";
 import { buildFlagCard, flagCardMarkersFor, isCardLeg, type CardLeg } from "./lib/gate-flag-card.js";
 import { mergeDoorFrom, formatTrainMergeReceipt, type MergeDoor } from "./lib/merge-door.js";
 import {
@@ -2122,8 +2123,17 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
  * merged the PR. The loud non-zero exit is preserved (this is a genuine
  * misconfiguration/bug worth a red CI run), not swallowed into a silent "wait".
  */
-async function main(): Promise<void> {
-  const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps, trainReady } = parseArgs(process.argv.slice(2));
+export async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
+  const { repo, pr, enabledClasses, sensitivePathPatterns, safePathGlobs, requiredChecks, requiredChecksPathDeps, trainReady } = parseArgs(argv);
+  // go-native backstop (PR-A2, Kevin 2026-10-21): a repo with an active `main - native merge v1` ruleset is GitHub's to merge. The
+  // sweeps already skip it at enumeration; THIS makes "no label write, no update-branch, no merge on a native repo" structural for
+  // every way the gate can be reached (a manual dispatch of squasher-automerge.yml, a future caller). It runs before the first PR read.
+  // FAIL CLOSED: an unreadable ruleset list excludes the repo too (lib/native-exclusion.ts). Exits 0 — an exclusion is not a failure.
+  const door = reposForDoor([repo]);
+  if (door.active.length === 0) {
+    for (const line of door.log) console.log(line);
+    return;
+  }
   // ops#190 rung A2: `--train-ready` routes to the A-side label-authority gate.
   // `evaluateTrainReady` NEVER throws (its wrapper is the fail-closed catch-all —
   // every outcome, including unexpected errors, resolves to a refusal with its own

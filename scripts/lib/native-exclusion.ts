@@ -112,6 +112,16 @@ export function scanNative(repos: readonly string[], read: RulesetReader, cache:
   return { excluded, log };
 }
 
+/** The repos the door may act on: the input minus every excluded repo (native, or the check failed), plus the fixed log lines. */
+export function reposForDoor<T extends string>(
+  repos: readonly T[],
+  read: RulesetReader = defaultGhReader,
+  cache: NativeCache = new Map(),
+): { active: T[]; log: string[] } {
+  const { excluded, log } = scanNative(repos, read, cache);
+  return { active: repos.filter((r) => !excluded.includes(r)), log };
+}
+
 // ───────────────────────────── CLI (the sweep's `scan` step) ─────────────────────────────
 
 function loadCacheFile(path: string): NativeCache {
