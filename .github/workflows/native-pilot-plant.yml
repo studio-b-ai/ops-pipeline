@@ -1,0 +1,93 @@
+name: Native pilot plant
+
+# Go-native pilot (plan §7): plants ONE control PR on studio-b-ai/toto, authored by the fleet App (studiob-fleet-bot), so the pilot's
+# a / b / c1 / e1 / h receipts measure what the App can and cannot get through GitHub's own merge rules. The logic and every limit live
+# in scripts/native-pilot-plant.ts; this file only mints the token and hands it over.
+#
+#   workflow_dispatch only. Nothing schedules it, nothing calls it, and it is not a required check anywhere. A person (Kevin's terminal)
+#   or the runner heartbeat's dispatch-profile token starts it, once per control, when the pilot sequence says so.
+#
+# What it can touch (three independent limits — the first two are the API's, the third is the script's own guard):
+#   1. The minted token is narrowed to ONE repository (toto) and TWO permissions (contents:write, pull-requests:write). It cannot read
+#      or write rulesets, settings, secrets, environments, checks, statuses, actions or workflows; it carries no `workflows` permission,
+#      so it cannot push a workflow file.
+#   2. toto's guard / native rulesets decide what merges. The planter never merges, approves, labels or comments.
+#   3. scripts/native-pilot-plant.ts refuses any repo but toto and any path outside its hard-coded list, and only forwards the REST calls
+#      it needs (see `guardApi`).
+#
+# `if: github.ref == 'refs/heads/main'` keeps a branch copy of this file from running the planter with the fleet key. It is a
+# convenience, not a security boundary (a branch's own copy of this file decides its own `if`); the boundary is that dispatching a
+# workflow needs actions:write, which only Kevin and the dispatch profile hold, plus limits 1 to 3 above.
+#
+# Public-repo hygiene: ops-pipeline is public and toto is private. The script prints only fixed lines (repo, control, run id, PR number,
+# SHA, enum). No file name, content, GitHub error text or token ever reaches this log.
+#
+# Until the reviewer App (studiob-reviewer) exists the planter is still harmless: a PR it opens just waits (the review check never
+# posts), and the two known-bad controls (c1, e1) are not even armed unless toto already has the native ruleset.
+
+on:
+  workflow_dispatch:
+    inputs:
+      control:
+        description: "Which pilot control to plant on toto (a known-good, b owned path, c1 failing review, e1 leash, h hold)"
+        required: true
+        type: choice
+        options:
+          - a
+          - b
+          - c1
+          - e1
+          - h
+
+# Job-level work with the ambient GITHUB_TOKEN is checkout only (read). Everything that writes rides the minted token below.
+permissions:
+  contents: read
+
+concurrency:
+  group: native-pilot-plant
+  cancel-in-progress: false
+
+jobs:
+  plant:
+    name: "Plant one pilot control on toto (fleet App token)"
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci
+
+      # Narrowed on purpose: one repo, two permissions. Do not widen this step to make a control "work" — a control that needs more is the
+      # wrong control (a test pins this block, scripts/lib/__tests__/native-pilot-plant.test.ts).
+      - name: Mint fleet installation token (toto only; contents + pull requests)
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+          repositories: toto
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Fail loud if the fleet token did not mint
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token -- check the FLEET_APP_ID / FLEET_APP_PRIVATE_KEY secrets and that the studiob-fleet-bot App installation includes toto with contents + pull-requests write." >&2
+          exit 1
+
+      # The control and run id arrive as environment variables, never interpolated into the shell line.
+      - name: Plant the control
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          CONTROL: ${{ inputs.control }}
+          RUN_ID: ${{ github.run_id }}
+        run: npx tsx native-pilot-plant.ts
