@@ -13,9 +13,10 @@ const PASS_ID = `v1:pass::${MB1}`;
 
 const APPROVE = (id = 1, commit: string | null = HEAD, login = "kbibelhausen"): ReviewFixture => ({ id, login, state: "APPROVED", commit_id: commit });
 
+/** LIVE by default: these tests are about verdicts and their success / failure conclusions. Shadow (every conclusion neutral) has its own section. */
 function setup(pr: Partial<PrFixture> = {}, opts: { codeowners?: "ok" | "errors" | "absent" | "inconsistent" | "down"; mode?: "live" | "shadow" } = {}) {
   const world: World = makeWorld(REPO, { prs: [{ number: 7, ...pr }], codeowners: opts.codeowners ?? "ok" });
-  return { world, mode: opts.mode ?? ("shadow" as const) };
+  return { world, mode: opts.mode ?? ("live" as const) };
 }
 async function run(world: World, mode: "live" | "shadow", model: Parameters<typeof makeClient>[0], pr = 7) {
   const g = makeGh(world);
@@ -134,22 +135,23 @@ describe("leg 3 — CODEOWNERS errors → failure C", () => {
 });
 
 describe("leg 4 — size cap → failure Z, Kevin-waivable", () => {
-  it("too many changed lines → Z with no diff fetched and no model call", async () => {
+  it("too many changed lines → Z with no model call; the diff IS read, once, for the secret scan (S is evaluated even on a PR that is already blocked for size)", async () => {
     const { world, mode } = setup({ additions: SIZE_CAP.maxChangedLines, deletions: 1 });
     const r = await run(world, mode, [PASS, PASS, PASS]);
     expect(posted(r.result).externalId).toBe("v1:block:Z");
-    expect(touched(r.calls, /compare/)).toBe(false);
+    expect(compares(r.calls).map((c) => c.kind)).toEqual(["merge-base", "diff"]);
     expect(r.requests).toHaveLength(0);
+    expect(r.built()).toBe(0);
   });
   it("too many files → Z", async () => {
     const { world, mode } = setup({ changedFiles: SIZE_CAP.maxFiles + 1 });
     expect(posted((await run(world, mode, [PASS])).result).externalId).toBe("v1:block:Z");
   });
-  it("a diff over the byte cap → Z after the fetch, still no model call", async () => {
+  it("a diff over the byte cap → Z after the fetch, still no model call, and the diff was read exactly once", async () => {
     const { world, mode } = setup({ diff: "x".repeat(SIZE_CAP.maxDiffBytes + 1) });
     const r = await run(world, mode, [PASS, PASS, PASS]);
     expect(posted(r.result).externalId).toBe("v1:block:Z");
-    expect(touched(r.calls, /compare/)).toBe(true);
+    expect(compares(r.calls).map((c) => c.kind)).toEqual(["merge-base", "diff"]);
     expect(r.requests).toHaveLength(0);
   });
   it("exactly at the cap is NOT oversize (known-good boundary)", () => {
@@ -652,12 +654,17 @@ describe("the cache is bound to the MERGE BASE, not just the head SHA (the retar
     expect(r.requests).toHaveLength(0);
   });
 
-  it("…but a Kevin approval on the head still resolves a PR when the merge base cannot be read (the waiver is deterministic and needs no diff)", async () => {
-    const { world, mode } = setup({ reviews: [APPROVE(1, HEAD)] });
-    world.failOn = (req) => (/compare/.test(req.path) ? 500 : null);
-    const p = posted((await run(world, mode, [PASS])).result);
-    expect(p.externalId).toBe("v1:waived:");
-    expect(p.conclusion).toBe("success");
+  it("…and a Kevin approval does NOT resolve a PR when the diff cannot be read: the secret scan could not run, so there is no success (no verdict; the failure already posted stands)", async () => {
+    for (const [what, failOn] of [
+      ["merge base unreadable", (req: { path: string; accept?: string }) => (/compare/.test(req.path) ? 500 : null)],
+      ["diff unreadable", (req: { path: string; accept?: string }) => (/compare/.test(req.path) && req.accept ? 502 : null)],
+    ] as const) {
+      const { world, mode } = setup({ reviews: [APPROVE(1, HEAD)] });
+      world.failOn = failOn;
+      const r = await run(world, mode, [PASS]);
+      expect(r.result, what).toEqual({ kind: "error", leg: what === "merge base unreadable" ? "base" : "diff" });
+      expect(r.requests, what).toHaveLength(0);
+    }
   });
 
   it("a malformed merge base in the compare response is no verdict (leg base)", async () => {

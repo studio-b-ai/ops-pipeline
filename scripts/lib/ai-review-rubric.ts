@@ -75,12 +75,14 @@ export function frameDiff(diff: string, nonce: string): string {
 
 // ───────────────────────────── reasons: data for the private check run ─────────────────────────────
 
-/** Control characters, private-key blocks and token-shaped strings out; length capped. Reasons are data, never trusted. */
+/** Control characters, private-key blocks and token-shaped strings out; length capped. Reasons are data, never trusted.
+ *  Deliberately BROAD (an over-redacted reason costs nothing). The secret scan that decides category S (ai-review-secrets.ts) has its own, tighter
+ *  floors, and a test pins that everything the scan detects is also redacted here. */
 export function sanitizeReasons(text: string, max = 1200): string {
   let t = text.replace(/\r\n?/g, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
   t = t.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[redacted private key]");
   t = t.replace(
-    /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,})/g,
+    /\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{16,}|(?:AKIA|ASIA)[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,})/g,
     "[redacted token]",
   );
   // long opaque runs that contain a digit (hex / base64 / random keys); long snake_case or kebab-case identifiers without digits survive

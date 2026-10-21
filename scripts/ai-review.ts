@@ -10,6 +10,11 @@
  * Until the reviewer App exists (REVIEWER_APP_ID absent) `post` logs "reviewer app not configured; nothing posted" and exits 0 having
  * made no API call. Nothing here merges, labels, approves, comments, or changes a setting; the only write is POST repos/R/check-runs.
  *
+ * Shadow never blocks. A repo with live:false is still served by the old merge robot, which reads any failing check as not clean, so every
+ * check run posted for a shadow repo is `neutral` (the would-be verdict rides in external_id and output.summary). The review job derives the
+ * conclusion from the manifest mode, and the post job RE-CHECKS it against its own read of the manifest: an entry whose conclusion is not
+ * the one the manifest allows for that repo is skipped, never posted (`mode-mismatch`).
+ *
  * ops-pipeline is a PUBLIC repo: the log carries repo, PR, SHA and verdict enums only (lib/ai-review-log.ts is the choke point). Reasons
  * go into the check run's output.summary on the private repo, and into the sealed handoff on the way there.
  */
@@ -23,6 +28,7 @@ import { createCheckRun, ghCli, listOpenPrs, listReviewCheckRuns, type GhApi } f
 import { openHandoff, sealWithinLimit, type Handoff, type HandoffContext, type HandoffEntry } from "./lib/ai-review-handoff.js";
 import { installAiReviewLog, logEvent } from "./lib/ai-review-log.js";
 import { loadManifest, modeFor, SHADOW_PR_CAP, type Manifest } from "./lib/ai-review-manifest.js";
+import { conclusionFor, parseExternalId, type ReviewMode } from "./lib/ai-review-verdict.js";
 
 /** slug of the reviewer GitHub App; overridable with REVIEWER_APP_SLUG. A cache pre-filter only — the post job matches the numeric id. */
 export const DEFAULT_REVIEWER_SLUG = "studiob-reviewer";
@@ -98,13 +104,13 @@ export async function runReview(deps: ReviewDeps): Promise<{ handoff: Handoff; c
           break;
         case "unchanged":
           counts.unchanged++;
-          logEvent({ e: "verdict", repo: entry.repo, pr: pr.number, sha: r.headSha, verdict: r.verdict.kind, categories: r.verdict.categories.join(""), source: r.source, action: "unchanged" });
+          logEvent({ e: "verdict", repo: entry.repo, pr: pr.number, sha: r.headSha, verdict: r.verdict.kind, categories: r.verdict.categories.join(""), source: r.source, action: "unchanged", conclusion: conclusionFor(r.verdict.kind, mode) });
           break;
         case "post":
           work--;
           counts.post++;
           entries.push({ repo: entry.repo, pr: pr.number, headSha: r.headSha, conclusion: r.conclusion, externalId: r.externalId, title: r.title, summary: r.summary });
-          logEvent({ e: "verdict", repo: entry.repo, pr: pr.number, sha: r.headSha, verdict: r.verdict.kind, categories: r.verdict.categories.join(""), source: r.source, action: "post" });
+          logEvent({ e: "verdict", repo: entry.repo, pr: pr.number, sha: r.headSha, verdict: r.verdict.kind, categories: r.verdict.categories.join(""), source: r.source, action: "post", conclusion: r.conclusion });
           break;
       }
     }
@@ -121,15 +127,30 @@ export interface PostDeps {
 }
 
 export async function runPost(deps: PostDeps): Promise<{ posted: number; skipped: number; failed: number }> {
-  const active = new Set(deps.manifest.repos.filter((e) => modeFor(e) !== "off").map((e) => e.repo.toLowerCase()));
+  // repo → mode, from the post job's OWN read of the (Kevin-owned) manifest; the handoff is authenticated but never decides what a repo may conclude
+  const modes = new Map<string, ReviewMode>();
+  for (const e of deps.manifest.repos) {
+    const m = modeFor(e);
+    if (m !== "off") modes.set(e.repo.toLowerCase(), m);
+  }
   let posted = 0;
   let skipped = 0;
   let failed = 0;
   for (const e of deps.handoff.entries) {
     // the handoff is authenticated, but the post job still acts only on repos the (owned) manifest names
-    if (!active.has(e.repo.toLowerCase())) {
+    const mode = modes.get(e.repo.toLowerCase());
+    if (mode === undefined) {
       skipped++;
       logEvent({ e: "post-skipped", repo: e.repo, pr: e.pr, reason: "not-in-manifest" });
+      continue;
+    }
+    // shadow → neutral, live → success/failure, decided HERE from the manifest. An entry that disagrees (a stale review job, a manifest that
+    // changed between the jobs, a forged-but-authenticated payload) is not posted: a failure must never land on a shadow repo, and a repo
+    // that is live must never receive a neutral that no one will enforce. The next sweep re-derives it.
+    const verdict = parseExternalId(e.externalId);
+    if (verdict === null || e.conclusion !== conclusionFor(verdict.kind, mode)) {
+      skipped++;
+      logEvent({ e: "post-skipped", repo: e.repo, pr: e.pr, reason: "mode-mismatch" });
       continue;
     }
     try {

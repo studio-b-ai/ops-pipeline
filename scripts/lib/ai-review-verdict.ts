@@ -16,10 +16,20 @@
  * non-canonical string). The free-text reasons live ONLY in the check run's `output.summary` on the private repo.
  *
  * Categories
- *   model rubric   S secret material · I injection aimed at the reviewer · K owner-reserved (Kevin-list) content in a neutral path ·
+ *   model rubric   S secret material (ALSO found by the deterministic scan in ai-review-secrets.ts, which runs before any waiver can produce
+ *                  a success) · I injection aimed at the reviewer · K owner-reserved (Kevin-list) content in a neutral path ·
  *                  D destructive / test-weakening / disabled guard / obvious defect · U the model blocked without a recognized category
  *   deterministic  H held (hold / needs-human label) · F fork PR · B base branch is not the default branch · C CODEOWNERS errors (or missing,
  *                  in a live repo) · Z over the size cap
+ *
+ * Conclusion vs verdict. The VERDICT (pass | block | waived, and the categories) is what the sweep derived. The CONCLUSION is what the check
+ * run says to GitHub, and it depends on the repository's mode in scripts/native/manifest.json:
+ *   live     pass | waived → success      block → failure
+ *   shadow   EVERY verdict → neutral      (the would-be verdict is in external_id and output.summary; nothing is enforced)
+ * A shadow repo is still served by the old merge robot, which reads any failing check as "not clean" (automerge-classify.ts isRollupClean);
+ * a neutral is clean there, so a shadow review can never hold a PR. The verdict is never read back from the conclusion: the cache reads the
+ * external_id for the MODEL outcome only, and every other leg (gates, waiver, secret scan, conclusion) is re-derived each sweep — which is
+ * why flipping a repo to live re-derives each verdict instead of reusing a neutral as a pass.
  *
  * Waiver (native-plan §4): a kbibelhausen APPROVED review whose commit_id equals the head SHA waives I, K, D and Z — and nothing else.
  * S is never waivable (rotate the secret instead); H lifts by removing the label; F and C are never waived; U is not waivable
@@ -36,8 +46,11 @@ export const MODEL_CATEGORIES: readonly Category[] = ["S", "I", "K", "D", "U"];
 export const WAIVABLE: ReadonlySet<Category> = new Set<Category>(["I", "K", "D", "Z"]);
 
 export type VerdictKind = "pass" | "block" | "waived";
-export type Conclusion = "success" | "failure";
-export type Source = "gate" | "cached" | "model" | "waiver";
+export type Conclusion = "success" | "failure" | "neutral";
+/** The manifest mode a verdict is posted under (a repo that is neither live nor shadow is never reviewed, so it has no mode here). */
+export type ReviewMode = "live" | "shadow";
+/** gate = a deterministic leg · scan = the deterministic secret scan · cached = an earlier model verdict reused · model = a fresh vote · waiver = Kevin's approval */
+export type Source = "gate" | "scan" | "cached" | "model" | "waiver";
 
 export interface Verdict {
   kind: VerdictKind;
@@ -103,8 +116,19 @@ export function parseExternalId(id: string | null | undefined): Verdict | null {
   return mergeBase === undefined ? { kind, categories } : { kind, categories, mergeBase };
 }
 
-export function conclusionFor(kind: VerdictKind): Conclusion {
+/**
+ * What the check run says. SHADOW IS ALWAYS NEUTRAL, whatever the verdict: a failure in a shadow repo would trip the old merge robot's
+ * rollup (any failing latest-per-name check is "not clean"), and the reviewer must not block anything it does not yet own. Only a live
+ * repo gets success / failure. `mode` has no default on purpose: every caller states which one it means.
+ */
+export function conclusionFor(kind: VerdictKind, mode: ReviewMode): Conclusion {
+  if (mode === "shadow") return "neutral";
   return kind === "block" ? "failure" : "success";
+}
+
+/** True when `conclusion` is one a post could legitimately carry for this verdict: neutral (shadow, any verdict) or the live conclusion. */
+export function conclusionAgrees(kind: VerdictKind, conclusion: string): boolean {
+  return conclusion === "neutral" || conclusion === conclusionFor(kind, "live");
 }
 
 /**
@@ -125,7 +149,7 @@ export function cachedModelOutcome(v: Verdict | null, currentMergeBase: string |
 }
 
 const CATEGORY_TEXT: Record<Category, string> = {
-  S: "secret material in the diff (never waivable: remove it and rotate it)",
+  S: "secret material in the diff, found by the deterministic scan or by the model (never waivable: remove it and rotate it)",
   I: "text in the diff aimed at the reviewer (injection)",
   K: "owner-reserved content (pricing, legal and claims, credentials and security, the merge machinery, live customer deploys, Acumatica publishes) in a path that looks neutral",
   D: "destructive or unsafe change (data loss, a weakened test, a disabled guard, an obvious defect)",
@@ -150,6 +174,8 @@ function fenceData(text: string): string {
 export interface SummaryInput {
   verdict: Verdict;
   source: Source;
+  /** the repository's mode: a shadow summary says it is neutral and what the same verdict would be live */
+  mode: ReviewMode;
   /** deterministic detail lines (labels, CODEOWNERS errors, sizes) — never model text */
   detail?: string[];
   /** model reasons, already sanitized by sanitizeReasons — rendered as fenced data */
@@ -168,7 +194,8 @@ function howToClear(v: Verdict): string {
   if (c.has("B")) lines.push("Retarget the pull request to the default branch; the next sweep reviews it against that branch. B cannot be waived.");
   if (c.has("C")) lines.push("Fix CODEOWNERS at this commit (see the detail above), then push.");
   if (c.has("U")) lines.push("Push a change or re-run; the model's answer could not be classified.");
-  if ([...c].some((x) => WAIVABLE.has(x))) {
+  // a waiver clears a verdict only when EVERY category in it is waivable; one S, H, F, B, C or U in the mix keeps it a failure
+  if ([...c].every((x) => WAIVABLE.has(x))) {
     lines.push("Push a fix, or approve this exact commit as kbibelhausen to waive I, K, D and Z (the approval is bound to the head SHA).");
   }
   return lines.map((l) => `- ${l}`).join("\n");
@@ -176,7 +203,15 @@ function howToClear(v: Verdict): string {
 
 export function renderSummary(s: SummaryInput): string {
   const head = s.verdict.kind === "pass" ? "PASS" : s.verdict.kind === "waived" ? "WAIVED" : "BLOCK";
-  const out: string[] = [`**studiob-ai-review: ${head}**`, ""];
+  const out: string[] =
+    s.mode === "shadow"
+      ? [
+          `**studiob-ai-review (shadow): would be ${head}**`,
+          "",
+          `Shadow mode: this check run is NEUTRAL and blocks nothing. In a live repository the same verdict posts ${conclusionFor(s.verdict.kind, "live")}.`,
+          "",
+        ]
+      : [`**studiob-ai-review: ${head}**`, ""];
   if (s.verdict.categories.length > 0) {
     out.push(s.verdict.kind === "waived" ? "Waived categories:" : "Categories:");
     for (const c of s.verdict.categories) out.push(`- ${c}: ${describeCategory(c)}`);
@@ -191,7 +226,7 @@ export function renderSummary(s: SummaryInput): string {
     out.push(`Model votes: ${s.votes.join(", ")} (PASS needs 2 of 3 exact first-line PASS).`, "");
   }
   if (s.verdict.mergeBase) out.push(`Reviewed diff: merge base ${s.verdict.mergeBase} to the head commit.`, "");
-  if (s.source === "cached") out.push("The model verdict was reused from an earlier review of this exact commit against this exact merge base.", "");
+  if (s.source === "cached") out.push("This verdict was reused from an earlier review of this exact commit against this exact merge base.", "");
   if (s.verdict.kind === "waived") {
     out.push("Waived by an approving review from kbibelhausen on this exact commit. S, H, F, B and C are never waived.", "");
   }
@@ -203,7 +238,8 @@ export function renderSummary(s: SummaryInput): string {
   return out.join("\n").trim().slice(0, 8000);
 }
 
-export function renderTitle(v: Verdict): string {
+export function renderTitle(v: Verdict, mode: ReviewMode): string {
   const head = v.kind === "pass" ? "PASS" : v.kind === "waived" ? "WAIVED" : "BLOCK";
-  return v.categories.length > 0 ? `${head} (${v.categories.join(", ")})` : head;
+  const base = v.categories.length > 0 ? `${head} (${v.categories.join(", ")})` : head;
+  return mode === "shadow" ? `SHADOW, would be ${base}` : base;
 }

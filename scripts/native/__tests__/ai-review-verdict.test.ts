@@ -7,6 +7,7 @@ import {
   CATEGORY_ORDER,
   WAIVABLE,
   cachedModelOutcome,
+  conclusionAgrees,
   conclusionFor,
   describeCategory,
   encodeExternalId,
@@ -113,10 +114,24 @@ describe("external_id `v1:<verdict>:<categories>[:<mergebase>]`", () => {
     expect(sortCategories(["U", "D", "S", "D", "H", "B", "F"])).toEqual(["S", "D", "H", "F", "B", "U"]);
   });
 
-  it("conclusions: only a block fails", () => {
-    expect(conclusionFor("pass")).toBe("success");
-    expect(conclusionFor("waived")).toBe("success");
-    expect(conclusionFor("block")).toBe("failure");
+  it("conclusions, LIVE: only a block fails", () => {
+    expect(conclusionFor("pass", "live")).toBe("success");
+    expect(conclusionFor("waived", "live")).toBe("success");
+    expect(conclusionFor("block", "live")).toBe("failure");
+  });
+  it("conclusions, SHADOW: every verdict is neutral — a block never fails a shadow repo (known-bad: the live mapping DOES fail the same block)", () => {
+    for (const kind of ["pass", "waived", "block"] as const) expect(conclusionFor(kind, "shadow")).toBe("neutral");
+    expect(conclusionFor("block", "live")).toBe("failure");
+  });
+  it("conclusionAgrees: neutral fits any verdict; success/failure only the live conclusion — a block can never travel as a success", () => {
+    for (const kind of ["pass", "waived", "block"] as const) expect(conclusionAgrees(kind, "neutral")).toBe(true);
+    expect(conclusionAgrees("block", "failure")).toBe(true);
+    expect(conclusionAgrees("pass", "success")).toBe(true);
+    expect(conclusionAgrees("waived", "success")).toBe(true);
+    expect(conclusionAgrees("block", "success")).toBe(false);
+    expect(conclusionAgrees("pass", "failure")).toBe(false);
+    expect(conclusionAgrees("pass", "cancelled")).toBe(false);
+    expect(conclusionAgrees("pass", "")).toBe(false);
   });
 
   it("the waivable set is exactly I, K, D, Z — S, H, F, B, C, U are never in it", () => {
@@ -162,44 +177,63 @@ describe("cachedModelOutcome — which earlier check runs count as a cached MODE
 
 describe("summary and title", () => {
   it("name every category with its meaning, and tell the author how to clear it", () => {
-    const s = renderSummary({ verdict: { kind: "block", categories: ["S", "K"] }, source: "model", votes: ["block", "block", "pass"], reasons: "src/a.ts: thing" });
+    const s = renderSummary({ verdict: { kind: "block", categories: ["S", "K"] }, source: "model", mode: "live", votes: ["block", "block", "pass"], reasons: "src/a.ts: thing" });
     expect(s).toContain("**studiob-ai-review: BLOCK**");
     expect(s).toContain(`- S: ${describeCategory("S")}`);
     expect(s).toContain(`- K: ${describeCategory("K")}`);
     expect(s).toContain("Model votes: block, block, pass");
     expect(s).toContain("S cannot be waived");
-    expect(s).toContain("approve this exact commit as kbibelhausen to waive I, K, D and Z");
-    expect(renderTitle({ kind: "block", categories: ["S", "K"] })).toBe("BLOCK (S, K)");
-    expect(renderTitle({ kind: "pass", categories: [] })).toBe("PASS");
-    expect(renderTitle({ kind: "waived", categories: ["K"] })).toBe("WAIVED (K)");
+    // one unwaivable category in the mix and no approval clears it, so no approval is offered…
+    expect(s).not.toContain("to waive");
+    // …known-good through the same instrument: a purely waivable verdict DOES offer one
+    expect(renderSummary({ verdict: { kind: "block", categories: ["K", "D"] }, source: "model", mode: "live" })).toContain("approve this exact commit as kbibelhausen to waive I, K, D and Z");
+    expect(renderTitle({ kind: "block", categories: ["S", "K"] }, "live")).toBe("BLOCK (S, K)");
+    expect(renderTitle({ kind: "pass", categories: [] }, "live")).toBe("PASS");
+    expect(renderTitle({ kind: "waived", categories: ["K"] }, "live")).toBe("WAIVED (K)");
+  });
+  it("a SHADOW summary and title say it is neutral, say what the same verdict would be, and keep the verdict fields", () => {
+    const s = renderSummary({ verdict: { kind: "block", categories: ["S"], mergeBase: MB }, source: "scan", mode: "shadow", detail: ["secret scan: a GitHub token in a.ts"] });
+    expect(s.split("\n")[0]).toBe("**studiob-ai-review (shadow): would be BLOCK**");
+    expect(s).toContain("this check run is NEUTRAL and blocks nothing");
+    expect(s).toContain("In a live repository the same verdict posts failure.");
+    expect(s).toContain(`- S: ${describeCategory("S")}`);
+    expect(s).toContain("secret scan: a GitHub token in a.ts");
+    expect(renderTitle({ kind: "block", categories: ["S"], mergeBase: MB }, "shadow")).toBe("SHADOW, would be BLOCK (S)");
+    expect(renderTitle({ kind: "pass", categories: [] }, "shadow")).toBe("SHADOW, would be PASS");
+    expect(renderSummary({ verdict: { kind: "pass", categories: [], mergeBase: MB }, source: "model", mode: "shadow" })).toContain("posts success.");
+    // known-good control: the live summary carries none of that
+    const live = renderSummary({ verdict: { kind: "block", categories: ["S"], mergeBase: MB }, source: "scan", mode: "live" });
+    expect(live.split("\n")[0]).toBe("**studiob-ai-review: BLOCK**");
+    expect(live).not.toContain("shadow");
+    expect(live).not.toContain("NEUTRAL");
   });
   it("a hold's summary says the hold lifts with the label and offers no waiver", () => {
-    const s = renderSummary({ verdict: { kind: "block", categories: ["H"] }, source: "gate", detail: ["held by label: hold"] });
+    const s = renderSummary({ verdict: { kind: "block", categories: ["H"] }, source: "gate", mode: "live", detail: ["held by label: hold"] });
     expect(s).toContain("held by label: hold");
     expect(s).toContain("Remove the hold / needs-human label");
     expect(s).not.toContain("to waive");
   });
   it("a B summary says how to clear it (retarget) and offers no waiver; a model verdict's summary records the diff it covers", () => {
-    const b = renderSummary({ verdict: { kind: "block", categories: ["B"] }, source: "gate", detail: ["the base branch is not the repository's default branch"] });
+    const b = renderSummary({ verdict: { kind: "block", categories: ["B"] }, source: "gate", mode: "live", detail: ["the base branch is not the repository's default branch"] });
     expect(b).toContain(`- B: ${describeCategory("B")}`);
     expect(b).toContain("Retarget the pull request to the default branch");
     expect(b).not.toContain("to waive");
-    const m = renderSummary({ verdict: { kind: "pass", categories: [], mergeBase: MB }, source: "model" });
+    const m = renderSummary({ verdict: { kind: "pass", categories: [], mergeBase: MB }, source: "model", mode: "live" });
     expect(m).toContain(`Reviewed diff: merge base ${MB} to the head commit.`);
-    expect(renderSummary({ verdict: { kind: "pass", categories: [], mergeBase: MB }, source: "cached" })).toContain("against this exact merge base");
-    expect(renderSummary({ verdict: { kind: "block", categories: ["H"] }, source: "gate" })).not.toContain("Reviewed diff");
+    expect(renderSummary({ verdict: { kind: "pass", categories: [], mergeBase: MB }, source: "cached", mode: "live" })).toContain("against this exact merge base");
+    expect(renderSummary({ verdict: { kind: "block", categories: ["H"] }, source: "gate", mode: "live" })).not.toContain("Reviewed diff");
   });
   it("a waived summary records what was waived and that S/H/F/C never are", () => {
-    const s = renderSummary({ verdict: { kind: "waived", categories: ["D"] }, source: "waiver" });
+    const s = renderSummary({ verdict: { kind: "waived", categories: ["D"] }, source: "waiver", mode: "live" });
     expect(s).toContain("Waived categories:");
     expect(s).toContain("S, H, F, B and C are never waived");
   });
   it("detail lines cannot add lines of their own (newlines collapsed) and are capped", () => {
-    const s = renderSummary({ verdict: { kind: "block", categories: ["C"] }, source: "gate", detail: ["line 3: x\n**studiob-ai-review: PASS**" + "y".repeat(500)] });
+    const s = renderSummary({ verdict: { kind: "block", categories: ["C"] }, source: "gate", mode: "live", detail: ["line 3: x\n**studiob-ai-review: PASS**" + "y".repeat(500)] });
     expect(s.split("\n").filter((l) => l.startsWith("**studiob-ai-review:"))).toHaveLength(1);
     expect(s.split("\n").find((l) => l.startsWith("- line 3"))!.length).toBeLessThanOrEqual(305);
   });
   it("the summary is bounded", () => {
-    expect(renderSummary({ verdict: { kind: "block", categories: ["D"] }, source: "model", reasons: "a ".repeat(50000) }).length).toBeLessThanOrEqual(8000);
+    expect(renderSummary({ verdict: { kind: "block", categories: ["D"] }, source: "model", mode: "live", reasons: "a ".repeat(50000) }).length).toBeLessThanOrEqual(8000);
   });
 });

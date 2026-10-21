@@ -17,7 +17,7 @@
  */
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { gunzipSync, gzipSync } from "node:zlib";
-import { conclusionFor, encodeExternalId, parseExternalId } from "./ai-review-verdict.js";
+import { conclusionAgrees, encodeExternalId, parseExternalId } from "./ai-review-verdict.js";
 import type { Conclusion } from "./ai-review-verdict.js";
 
 export interface HandoffEntry {
@@ -101,14 +101,16 @@ export function validateHandoff(x: unknown): Handoff {
       typeof r.repo !== "string" || !REPO_RE.test(r.repo) ||
       !Number.isInteger(r.pr) || (r.pr as number) <= 0 ||
       typeof r.headSha !== "string" || !SHA_RE.test(r.headSha) ||
-      (r.conclusion !== "success" && r.conclusion !== "failure") ||
+      (r.conclusion !== "success" && r.conclusion !== "failure" && r.conclusion !== "neutral") ||
       typeof r.externalId !== "string" || typeof r.title !== "string" || typeof r.summary !== "string"
     ) {
       throw new Error("bad entry");
     }
     const verdict = parseExternalId(r.externalId);
-    // the conclusion and the external_id must agree, and the external_id must be canonical (encode∘parse round-trips)
-    if (!verdict || encodeExternalId(verdict) !== r.externalId || conclusionFor(verdict.kind) !== r.conclusion) throw new Error("bad entry");
+    // the external_id must be canonical (encode∘parse round-trips) and the conclusion must be one this verdict can carry: `neutral` (a shadow
+    // repo, any verdict) or the live conclusion. A block can never travel as `success`. Which of the two a repo gets is the manifest's call,
+    // which the post job re-checks (runPost); this is only the shape.
+    if (!verdict || encodeExternalId(verdict) !== r.externalId || !conclusionAgrees(verdict.kind, r.conclusion)) throw new Error("bad entry");
     return { repo: r.repo, pr: r.pr as number, headSha: r.headSha, conclusion: r.conclusion, externalId: r.externalId, title: r.title, summary: r.summary };
   });
   return { v: 1, entries };

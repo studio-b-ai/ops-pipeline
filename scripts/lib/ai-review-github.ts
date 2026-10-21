@@ -282,7 +282,8 @@ export async function listReviewCheckRuns(gh: GhApi, repo: string, headSha: stri
 
 export interface CheckRunPayload {
   headSha: string;
-  conclusion: "success" | "failure";
+  /** neutral for every verdict of a shadow repo; success / failure only for a live one */
+  conclusion: "success" | "failure" | "neutral";
   externalId: string;
   title: string;
   summary: string;

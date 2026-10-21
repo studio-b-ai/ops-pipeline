@@ -10,12 +10,12 @@
  *
  * What may reach the log (everything else is dropped):
  *   [ai-review] sweep repos=N prs=N post=N unchanged=N skipped=N errors=N
- *   [ai-review] R#N sha=<40-hex> verdict=<pass|block|waived> categories=<LETTERS|-> source=<gate|cached|model|waiver> action=<post|unchanged>
+ *   [ai-review] R#N sha=<40-hex> verdict=<pass|block|waived> categories=<LETTERS|-> source=<enum> action=<post|unchanged> conclusion=<success|failure|neutral>
  *   [ai-review] R#N verdict=none leg=<enum>
  *   [ai-review] R#N skip=<draft|closed>
  *   [ai-review] R list-failed
- *   [ai-review] posted R#N sha=<40-hex> conclusion=<success|failure>
- *   [ai-review] post-skipped R#N reason=<unchanged|not-in-manifest>
+ *   [ai-review] posted R#N sha=<40-hex> conclusion=<success|failure|neutral>
+ *   [ai-review] post-skipped R#N reason=<unchanged|not-in-manifest|mode-mismatch>
  *   [ai-review] post-failed R#N
  *   [ai-review] post done posted=N skipped=N failed=N
  *   [ai-review] reviewer app not configured; nothing posted
@@ -30,12 +30,12 @@ const SHA = "[0-9a-f]{40}";
 
 export type LogEvent =
   | { e: "sweep"; repos: number; prs: number; post: number; unchanged: number; skipped: number; errors: number }
-  | { e: "verdict"; repo: string; pr: number; sha: string; verdict: "pass" | "block" | "waived"; categories: string; source: string; action: "post" | "unchanged" }
+  | { e: "verdict"; repo: string; pr: number; sha: string; verdict: "pass" | "block" | "waived"; categories: string; source: string; action: "post" | "unchanged"; conclusion: "success" | "failure" | "neutral" }
   | { e: "no-verdict"; repo: string; pr: number; leg: string }
   | { e: "skip"; repo: string; pr: number; reason: "draft" | "closed" }
   | { e: "list-failed"; repo: string }
-  | { e: "posted"; repo: string; pr: number; sha: string; conclusion: "success" | "failure" }
-  | { e: "post-skipped"; repo: string; pr: number; reason: "unchanged" | "not-in-manifest" }
+  | { e: "posted"; repo: string; pr: number; sha: string; conclusion: "success" | "failure" | "neutral" }
+  | { e: "post-skipped"; repo: string; pr: number; reason: "unchanged" | "not-in-manifest" | "mode-mismatch" }
   | { e: "post-failed"; repo: string; pr: number }
   | { e: "post-done"; posted: number; skipped: number; failed: number }
   | { e: "not-configured" }
@@ -52,7 +52,7 @@ export function formatLogEvent(ev: LogEvent): string {
     case "sweep":
       return `[ai-review] sweep repos=${safeInt(ev.repos)} prs=${safeInt(ev.prs)} post=${safeInt(ev.post)} unchanged=${safeInt(ev.unchanged)} skipped=${safeInt(ev.skipped)} errors=${safeInt(ev.errors)}`;
     case "verdict":
-      return `[ai-review] ${safeRepo(ev.repo)}#${safeInt(ev.pr)} sha=${safeSha(ev.sha)} verdict=${ev.verdict} categories=${safeCats(ev.categories)} source=${safeEnum(ev.source)} action=${ev.action}`;
+      return `[ai-review] ${safeRepo(ev.repo)}#${safeInt(ev.pr)} sha=${safeSha(ev.sha)} verdict=${ev.verdict} categories=${safeCats(ev.categories)} source=${safeEnum(ev.source)} action=${ev.action} conclusion=${ev.conclusion}`;
     case "no-verdict":
       return `[ai-review] ${safeRepo(ev.repo)}#${safeInt(ev.pr)} verdict=none leg=${safeEnum(ev.leg)}`;
     case "skip":
@@ -76,12 +76,12 @@ export function formatLogEvent(ev: LogEvent): string {
 
 const LINE_RES: RegExp[] = [
   /^\[ai-review\] sweep repos=\d+ prs=\d+ post=\d+ unchanged=\d+ skipped=\d+ errors=\d+$/,
-  new RegExp(`^\\[ai-review\\] ${REPO}#\\d+ sha=${SHA} verdict=(pass|block|waived) categories=([A-Z]{1,10}|-) source=${ENUM} action=(post|unchanged)$`),
+  new RegExp(`^\\[ai-review\\] ${REPO}#\\d+ sha=${SHA} verdict=(pass|block|waived) categories=([A-Z]{1,10}|-) source=${ENUM} action=(post|unchanged) conclusion=(success|failure|neutral)$`),
   new RegExp(`^\\[ai-review\\] ${REPO}#\\d+ verdict=none leg=${ENUM}$`),
   new RegExp(`^\\[ai-review\\] ${REPO}#\\d+ skip=(draft|closed)$`),
   new RegExp(`^\\[ai-review\\] ${REPO} list-failed$`),
-  new RegExp(`^\\[ai-review\\] posted ${REPO}#\\d+ sha=${SHA} conclusion=(success|failure)$`),
-  new RegExp(`^\\[ai-review\\] post-skipped ${REPO}#\\d+ reason=(unchanged|not-in-manifest)$`),
+  new RegExp(`^\\[ai-review\\] posted ${REPO}#\\d+ sha=${SHA} conclusion=(success|failure|neutral)$`),
+  new RegExp(`^\\[ai-review\\] post-skipped ${REPO}#\\d+ reason=(unchanged|not-in-manifest|mode-mismatch)$`),
   new RegExp(`^\\[ai-review\\] post-failed ${REPO}#\\d+$`),
   /^\[ai-review\] post done posted=\d+ skipped=\d+ failed=\d+$/,
   /^\[ai-review\] reviewer app not configured; nothing posted$/,

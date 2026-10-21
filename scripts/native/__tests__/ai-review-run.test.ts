@@ -37,7 +37,7 @@ afterEach(() => {
 const manifestOf = (...entries: Array<{ repo: string; live: boolean; shadow: boolean }>) => parseManifest({ repos: entries });
 const SHADOW = manifestOf({ repo: REPO, live: false, shadow: true });
 const LIVE = manifestOf({ repo: REPO, live: true, shadow: false });
-const deps = (world: World, model: Parameters<typeof makeClient>[0], manifest = SHADOW) => {
+const deps = (world: World, model: Parameters<typeof makeClient>[0], manifest = LIVE) => {
   const g = makeGh(world);
   const c = makeClient(model);
   return { g, c, d: { gh: g.gh, client: c.client, manifest, reviewerSlug: DEFAULT_REVIEWER_SLUG, sleep: noSleep } };
@@ -56,7 +56,7 @@ describe("shadow cap and live mode", () => {
     calls.map((c) => /\/pulls\/(\d+)$/.exec(c.path)?.[1]).filter((n): n is string => !!n).map(Number);
 
   it("shadow reviews only the 3 most-recent NON-DRAFT PRs (newest first); the draft and the older PRs are never read", async () => {
-    const { g, d } = deps(six(), [PASS, PASS, PASS]);
+    const { g, d } = deps(six(), [PASS, PASS, PASS], SHADOW);
     const r = await runReview(d);
     expect(prReads(g.calls)).toEqual([59, 58, 57]);
     expect(r.counts).toMatchObject({ repos: 1, prs: 3, post: 3 });
@@ -102,7 +102,7 @@ describe("shadow cap and live mode", () => {
 describe("the review half never writes", () => {
   it("every request of a full sweep is a GET (no check run, no label, no comment, no merge)", async () => {
     const world = makeWorld(REPO, { prs: [{ number: 1, sha: sha("1") }, { number: 2, sha: sha("2"), labels: ["hold"] }, { number: 3, sha: sha("3"), headRepo: "x/y" }] });
-    const { g, d } = deps(world, [block("K"), block("K"), block("K")]);
+    const { g, d } = deps(world, [block("K"), block("K"), block("K")], SHADOW);
     const r = await runReview(d);
     expect(r.counts.post).toBe(3);
     expect(g.calls.filter((c) => (c.method ?? "GET") !== "GET")).toEqual([]);
@@ -124,7 +124,7 @@ describe("post: the exact check run, reasons only in output.summary", () => {
     const { g, d } = deps(world, [block("D", "src/a.ts: REASON-CANARY-7 plain bug"), block("D", "src/a.ts: REASON-CANARY-7 plain bug"), block("D", "src/a.ts: REASON-CANARY-7 plain bug")]);
     const { handoff } = await runReview(d);
     const post = makeGh(world); // post half: a different token/identity, same world
-    const r = await runPost({ gh: post.gh, manifest: SHADOW, handoff, reviewerAppId: REVIEWER.id });
+    const r = await runPost({ gh: post.gh, manifest: LIVE, handoff, reviewerAppId: REVIEWER.id });
     expect(r).toEqual({ posted: 1, skipped: 0, failed: 0 });
     expect(g.posts).toHaveLength(0);
     expect(post.posts).toHaveLength(1);
@@ -149,8 +149,8 @@ describe("post: the exact check run, reasons only in output.summary", () => {
     const { d } = deps(world, [PASS, PASS, PASS]);
     const { handoff } = await runReview(d);
     const post = makeGh(world);
-    await runPost({ gh: post.gh, manifest: SHADOW, handoff, reviewerAppId: REVIEWER.id });
-    const again = await runPost({ gh: post.gh, manifest: SHADOW, handoff, reviewerAppId: REVIEWER.id });
+    await runPost({ gh: post.gh, manifest: LIVE, handoff, reviewerAppId: REVIEWER.id });
+    const again = await runPost({ gh: post.gh, manifest: LIVE, handoff, reviewerAppId: REVIEWER.id });
     expect(again).toEqual({ posted: 0, skipped: 1, failed: 0 });
     expect(post.posts).toHaveLength(1);
   });
@@ -159,14 +159,14 @@ describe("post: the exact check run, reasons only in output.summary", () => {
     world.checkRuns[`${REPO}@${HEAD}`] = [{ id: 1, status: "completed", conclusion: "success", external_id: PASS_ID, app: { id: 15368, slug: REVIEWER.slug } }];
     const handoff: Handoff = { v: 1, entries: [entry({ externalId: PASS_ID, conclusion: "success" })] };
     const post = makeGh(world);
-    const r = await runPost({ gh: post.gh, manifest: SHADOW, handoff, reviewerAppId: REVIEWER.id });
+    const r = await runPost({ gh: post.gh, manifest: LIVE, handoff, reviewerAppId: REVIEWER.id });
     expect(r.posted).toBe(1);
   });
   it("acts only on repos the manifest names (an authenticated handoff entry for another repo is skipped)", async () => {
     const world: World = { repos: { [REPO]: { prs: [] }, "studio-b-ai/bolt-wms": { prs: [] } }, checkRuns: {} };
     const post = makeGh(world);
     const handoff: Handoff = { v: 1, entries: [entry({ repo: "studio-b-ai/bolt-wms" })] };
-    const r = await runPost({ gh: post.gh, manifest: SHADOW, handoff, reviewerAppId: REVIEWER.id });
+    const r = await runPost({ gh: post.gh, manifest: LIVE, handoff, reviewerAppId: REVIEWER.id });
     expect(r).toEqual({ posted: 0, skipped: 1, failed: 0 });
     expect(post.calls).toHaveLength(0);
   });
@@ -174,7 +174,7 @@ describe("post: the exact check run, reasons only in output.summary", () => {
     const world = makeWorld(REPO, { prs: [{ number: 5, sha: HEAD }] });
     world.failOn = (req) => ((req.method ?? "GET") === "POST" ? 403 : null);
     const post = makeGh(world);
-    const r = await runPost({ gh: post.gh, manifest: SHADOW, handoff: { v: 1, entries: [entry()] }, reviewerAppId: REVIEWER.id });
+    const r = await runPost({ gh: post.gh, manifest: LIVE, handoff: { v: 1, entries: [entry()] }, reviewerAppId: REVIEWER.id });
     expect(r).toEqual({ posted: 0, skipped: 0, failed: 1 });
     expect(world.checkRuns[`${REPO}@${HEAD}`] ?? []).toHaveLength(0);
   });
@@ -186,7 +186,7 @@ describe("a retarget, through the whole sweep (runReview → runPost): a verdict
     const { d, c } = deps(world, model);
     const { handoff } = await runReview(d);
     const post = makeGh(world); // the post half: the reviewer App's identity, same world
-    const r = await runPost({ gh: post.gh, manifest: SHADOW, handoff, reviewerAppId: REVIEWER.id });
+    const r = await runPost({ gh: post.gh, manifest: LIVE, handoff, reviewerAppId: REVIEWER.id });
     return { handoff, r, posts: post.posts, requests: c.requests };
   };
 
@@ -236,9 +236,9 @@ describe("a retarget, through the whole sweep (runReview → runPost): a verdict
     const world = makeWorld(REPO, { prs: [{ number: 5, sha: HEAD }] });
     world.checkRuns[`${REPO}@${HEAD}`] = [{ id: 1, status: "completed", conclusion: "success", external_id: PASS_ID, app: REVIEWER }];
     const post = makeGh(world);
-    const other = await runPost({ gh: post.gh, manifest: SHADOW, handoff: { v: 1, entries: [entry({ externalId: `v1:pass::${MB2}` })] }, reviewerAppId: REVIEWER.id });
+    const other = await runPost({ gh: post.gh, manifest: LIVE, handoff: { v: 1, entries: [entry({ externalId: `v1:pass::${MB2}` })] }, reviewerAppId: REVIEWER.id });
     expect(other).toEqual({ posted: 1, skipped: 0, failed: 0 });
-    const same = await runPost({ gh: post.gh, manifest: SHADOW, handoff: { v: 1, entries: [entry({ externalId: `v1:pass::${MB2}` })] }, reviewerAppId: REVIEWER.id });
+    const same = await runPost({ gh: post.gh, manifest: LIVE, handoff: { v: 1, entries: [entry({ externalId: `v1:pass::${MB2}` })] }, reviewerAppId: REVIEWER.id });
     expect(same).toEqual({ posted: 0, skipped: 1, failed: 0 });
   });
 
@@ -255,6 +255,10 @@ describe("a retarget, through the whole sweep (runReview → runPost): a verdict
 
 function entry(over: Partial<HandoffEntry> = {}): HandoffEntry {
   return { repo: REPO, pr: 5, headSha: HEAD, conclusion: "success", externalId: PASS_ID, title: "PASS", summary: "ok", ...over };
+}
+/** What the REAL manifest (toto, shadow) allows the post job to publish: every verdict is neutral. */
+function shadowEntry(over: Partial<HandoffEntry> = {}): HandoffEntry {
+  return entry({ conclusion: "neutral", ...over });
 }
 
 describe("main post — the reviewer App is not configured yet", () => {
@@ -291,7 +295,7 @@ describe("main post — the reviewer App is not configured yet", () => {
   it("known-good control through the same instrument: WITH an app id the same handoff is posted", async () => {
     const world = makeWorld(REPO, { prs: [{ number: 5, sha: HEAD }] });
     const g = makeGh(world);
-    const blob = sealHandoff({ v: 1, entries: [entry()] }, KEY, CTX);
+    const blob = sealHandoff({ v: 1, entries: [shadowEntry()] }, KEY, CTX);
     const { result } = await capture(() => main(["post"], { ...ENV, REVIEWER_APP_ID: String(REVIEWER.id), AI_REVIEW_HANDOFF: blob }, { gh: g.gh, manifestPath: REAL_MANIFEST }));
     expect(result).toBe(0);
     expect(g.posts).toHaveLength(1);
@@ -373,7 +377,7 @@ describe("main post — tamper evidence", () => {
     }
   }
   it("known-good: the genuine blob posts", async () => {
-    const r = await post(sealHandoff({ v: 1, entries: [entry()] }, KEY, CTX));
+    const r = await post(sealHandoff({ v: 1, entries: [shadowEntry()] }, KEY, CTX));
     expect(r.code).toBe(0);
     expect(r.posts).toHaveLength(1);
   });
@@ -410,7 +414,8 @@ describe("main review", () => {
     expect(blob).not.toContain("REASON-CANARY-review");
     const opened = openHandoff(blob, KEY, CTX);
     expect(opened.entries).toHaveLength(1);
-    expect(opened.entries[0]).toMatchObject({ repo: REPO, pr: 5, headSha: HEAD, conclusion: "failure", externalId: `v1:block:K:${MB1}` });
+    // the REAL manifest is toto in shadow: the model BLOCKed, and the check run that will be posted is neutral, never failure
+    expect(opened.entries[0]).toMatchObject({ repo: REPO, pr: 5, headSha: HEAD, conclusion: "neutral", externalId: `v1:block:K:${MB1}` });
     expect(opened.entries[0].summary).toContain("REASON-CANARY-review");
     expect(() => openHandoff(blob, KEY, { ...CTX, runId: "9" })).toThrow();
   });
@@ -510,12 +515,12 @@ describe("public-log hygiene — no reason text, and nothing outside the grammar
 
   it("every category letter of the closed vocabulary (all ten, B included) survives the log grammar — it never collapses to `-`", () => {
     const all = CATEGORY_ORDER.join("");
-    const line = formatLogEvent({ e: "verdict", repo: REPO, pr: 1, sha: HEAD, verdict: "block", categories: all, source: "gate", action: "post" });
+    const line = formatLogEvent({ e: "verdict", repo: REPO, pr: 1, sha: HEAD, verdict: "block", categories: all, source: "gate", action: "post", conclusion: "failure" });
     expect(line).toContain(`categories=${all} `);
     expect(toPublicLine(line)).toBe(line);
-    expect(formatLogEvent({ e: "verdict", repo: REPO, pr: 1, sha: HEAD, verdict: "block", categories: "B", source: "gate", action: "post" })).toContain("categories=B ");
+    expect(formatLogEvent({ e: "verdict", repo: REPO, pr: 1, sha: HEAD, verdict: "block", categories: "B", source: "gate", action: "post", conclusion: "failure" })).toContain("categories=B ");
     // known-bad: a category string outside the closed letters is still replaced, not printed
-    expect(formatLogEvent({ e: "verdict", repo: REPO, pr: 1, sha: HEAD, verdict: "block", categories: "K reason=x", source: "gate", action: "post" })).toContain("categories=- ");
+    expect(formatLogEvent({ e: "verdict", repo: REPO, pr: 1, sha: HEAD, verdict: "block", categories: "K reason=x", source: "gate", action: "post", conclusion: "failure" })).toContain("categories=- ");
   });
 
   it("the grammar refuses free text even when it is shaped like a log line", () => {

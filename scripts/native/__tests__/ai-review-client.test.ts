@@ -53,7 +53,8 @@ describe("main review — the Anthropic client", () => {
       throw new Error("must not be called");
     });
     const world = makeWorld(REPO, { prs: [{ number: 1, sha: sha("1"), labels: ["hold"] }, { number: 2, sha: sha("2"), headRepo: "x/y" }, { number: 3, sha: HEAD }] });
-    world.checkRuns[`${REPO}@${HEAD}`] = [{ id: 1, status: "completed", conclusion: "success", external_id: `v1:pass::${MB1}`, app: { id: 1, slug: "studiob-reviewer" } }];
+    // what a shadow sweep posted earlier: neutral (so it is "already posted"; a leftover `success` would be re-posted as neutral)
+    world.checkRuns[`${REPO}@${HEAD}`] = [{ id: 1, status: "completed", conclusion: "neutral", external_id: `v1:pass::${MB1}`, app: { id: 1, slug: "studiob-reviewer" } }];
     const r = await sweep(world);
     expect(r.code).toBe(0);
     expect(r.handoff!.entries.map((e) => e.externalId).sort()).toEqual(["v1:block:F", "v1:block:H"]);
@@ -67,7 +68,7 @@ describe("main review — the Anthropic client", () => {
     const world = makeWorld(REPO, { prs: [{ number: 1, sha: sha("1") }, { number: 2, sha: sha("2"), labels: ["needs-human"] }] });
     const r = await sweep(world);
     expect(r.code).toBe(0);
-    expect(r.handoff!.entries.map((e) => ({ pr: e.pr, conclusion: e.conclusion }))).toEqual([{ pr: 2, conclusion: "failure" }]);
+    expect(r.handoff!.entries.map((e) => ({ pr: e.pr, conclusion: e.conclusion }))).toEqual([{ pr: 2, conclusion: "neutral" }]); // the real manifest is shadow: even the hold is neutral, and PR 1 has no verdict at all
     expect(anthropicClientMock).toHaveBeenCalled();
   });
 });

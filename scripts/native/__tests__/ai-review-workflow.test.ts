@@ -234,6 +234,7 @@ describe("import closure — the reviewer imports only from registry-protected p
       "scripts/lib/ai-review-log.ts",
       "scripts/lib/ai-review-manifest.ts",
       "scripts/lib/ai-review-rubric.ts",
+      "scripts/lib/ai-review-secrets.ts",
       "scripts/lib/ai-review-verdict.ts",
       "scripts/lib/anthropic-credentials.ts",
     ]);
