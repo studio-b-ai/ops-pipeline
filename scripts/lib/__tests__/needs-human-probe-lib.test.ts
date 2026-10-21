@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   alreadyProbed,
+  buildSourceFooter,
   buildSystemPrompt,
   buildUserPrompt,
   CAPS,
@@ -9,7 +10,9 @@ import {
   parseProbeRouting,
   PROBE_MARKER,
   renderComment,
+  STALE_THRESHOLD_MS,
   type ProbeContext,
+  type ProbeSource,
 } from "../needs-human-probe-lib.js";
 
 describe("alreadyProbed (once-per-issue dedup)", () => {
@@ -319,5 +322,95 @@ describe("looksLikeAttemptedTrailer (codex pass 2/3/4 P2 — malformed/incomplet
   it("still false for a genuinely legacy comment even with a terse one-line Confidence section (heading-boundary reasoning holds regardless of section length)", () => {
     const body = ["## Culprit hypothesis", "x", "## NEEDS-KEVIN", "no", "## Confidence + what would falsify this", "n/a"].join("\n");
     expect(looksLikeAttemptedTrailer(body)).toBe(false);
+  });
+});
+
+describe("buildSourceFooter (ops-pipeline#578, stint 939 — sources footer)", () => {
+  const fakeNow = new Date("2026-10-21T01:13:40Z");
+
+  it("lists each source with its type, label, and ISO timestamp", () => {
+    const sources: ProbeSource[] = [
+      { type: "issue", label: "#42", timestamp: "2026-10-20T12:00:00Z" },
+      { type: "comment", label: 'by @user: "the bug is in auth.ts…"', timestamp: "2026-10-19T08:00:00Z" },
+      { type: "file", label: "src/auth.ts", timestamp: "2026-10-18T06:00:00Z" },
+    ];
+    const f = buildSourceFooter(sources, fakeNow);
+    expect(f).toContain("## Sources");
+    expect(f).toContain("- **issue:** #42 (2026-10-20 12:00:00 UTC)");
+    expect(f).toContain('- **comment:** by @user: "the bug is in auth.ts…" (2026-10-19 08:00:00 UTC)');
+    expect(f).toContain("- **file:** src/auth.ts (2026-10-18 06:00:00 UTC)");
+  });
+
+  it("annotates stale sources with stale-since and days ago", () => {
+    const staleTs = new Date(fakeNow.getTime() - STALE_THRESHOLD_MS - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const sources: ProbeSource[] = [
+      { type: "file", label: "stale.ts", timestamp: staleTs },
+    ];
+    const f = buildSourceFooter(sources, fakeNow);
+    expect(f).toContain("stale-since");
+    expect(f).toContain("d ago");
+  });
+
+  it("fresh sources (within threshold) do NOT get stale annotation (negative control, Rule #322)", () => {
+    const freshTs = new Date(fakeNow.getTime() - 5 * 24 * 60 * 60 * 1000).toISOString();
+    const sources: ProbeSource[] = [
+      { type: "file", label: "fresh.ts", timestamp: freshTs },
+    ];
+    const f = buildSourceFooter(sources, fakeNow);
+    expect(f).not.toContain("stale-since");
+    expect(f).toContain("fresh.ts");
+  });
+
+  it("handles null timestamp gracefully", () => {
+    const sources: ProbeSource[] = [
+      { type: "file", label: "missing.ts", timestamp: null, note: "not found at repo HEAD" },
+    ];
+    const f = buildSourceFooter(sources, fakeNow);
+    expect(f).toContain("- **file:** missing.ts");
+    expect(f).toContain("not found at repo HEAD");
+  });
+
+  it("empty sources produces only the heading with a trailing blank line", () => {
+    const f = buildSourceFooter([], fakeNow);
+    expect(f).toBe("## Sources\n\n");
+  });
+
+  it("returns an empty string for an empty array with heading and trailing newline (machine parseable)", () => {
+    const f = buildSourceFooter([], fakeNow);
+    expect(f).toContain("## Sources");
+    expect(f.endsWith("\n")).toBe(true);
+  });
+});
+
+describe("renderComment with sources footer", () => {
+  it("includes the ## Sources section when sources are provided", () => {
+    const sources: ProbeSource[] = [
+      { type: "issue", label: "#1", timestamp: "2026-10-20T12:00:00Z" },
+      { type: "file", label: "src/app.ts", timestamp: "2026-10-18T06:00:00Z" },
+    ];
+    const c = renderComment("## Culprit hypothesis\nbroken", "claude-sonnet-5", sources);
+    expect(c).toContain("## Sources");
+    expect(c).toContain("- **issue:** #1");
+    expect(c).toContain("- **file:** src/app.ts");
+    expect(c).toContain(PROBE_MARKER); // still carries the dedup marker
+  });
+
+  it("renders markdown sources separately from the model's diagnosis (machine-parseable)", () => {
+    const diagnosis = "## Culprit hypothesis\nthe sync filter\n\n## Confidence + what would falsify this\nhigh\n\nROUTING: same-repo\nNEEDS-KEVIN: no";
+    const sources: ProbeSource[] = [
+      { type: "issue", label: "#42", timestamp: "2026-10-20T12:00:00Z" },
+    ];
+    const c = renderComment(diagnosis, "claude-sonnet-5", sources);
+    // Sources footer comes AFTER the model's trailer — the trailer is parsed first by looking at the COMMENT body
+    // (which includes the probe header + diagnosis), not the sources footer. The trailer must remain parseable.
+    const routing = parseProbeRouting(c);
+    expect(routing).toEqual({ routing: "same-repo", needsKevin: false });
+  });
+
+  it("omits the ## Sources section when no sources array is provided (backward-compatible)", () => {
+    const c = renderComment("## Culprit hypothesis\ntest", "claude-sonnet-5");
+    expect(c).not.toContain("## Sources");
+    expect(c).toContain(PROBE_MARKER);
+    expect(c).toContain("## Culprit hypothesis");
   });
 });

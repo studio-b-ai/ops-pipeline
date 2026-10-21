@@ -5,7 +5,22 @@
  * The probe auto-dispatches when the bug-squasher escalates an issue `needs-human`:
  * it gathers read-only context and posts ONE findings comment so the human arrives
  * pre-briefed. Humans enter at the FIX-LAYER decision, not the diagnosis.
+ *
+ * ops-pipeline#578 sources footer (stint 939): every source the brief read is listed
+ * with its newest timestamp; stale sources print stale-since, missing ones fail the
+ * lap by name. The footer is appended after the diagnosis in renderComment().
  */
+
+/** A source the probe read — listed in the sources footer with its newest timestamp. */
+export interface ProbeSource {
+  type: "issue" | "comment" | "file";
+  label: string;
+  timestamp: string | null;   // ISO 8601, null when unavailable
+  note?: string;               // "stale-since YYYY-MM-DD" or "not found at repo HEAD"
+}
+
+/** Sources older than this threshold get a stale-since annotation. */
+export const STALE_THRESHOLD_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
 /** Dedup marker: presence in any existing comment means this issue was already probed. */
 export const PROBE_MARKER = "<!-- needs-human-probe:v1 -->";
@@ -234,6 +249,35 @@ export function looksLikeAttemptedTrailer(commentBody: string): boolean {
   return tail.some((l) => l.includes("ROUTING:") || l.includes("NEEDS-KEVIN:"));
 }
 
+/**
+ * Renders the sources footer — a machine-parseable list of every source the probe
+ * read with its newest timestamp. Stale sources (older than STALE_THRESHOLD_MS)
+ * get a stale-since annotation; missing sources are listed by name with a note so
+ * the lap-verdict system can fail the lap by name (ops-pipeline#578, stint 939).
+ */
+export function buildSourceFooter(sources: ProbeSource[], now: Date = new Date()): string {
+  const lines: string[] = [];
+  lines.push("## Sources");
+  lines.push("");
+  const staleCutoff = new Date(now.getTime() - STALE_THRESHOLD_MS);
+  for (const s of sources) {
+    let line = `- **${s.type}:** ${s.label}`;
+    if (s.timestamp) {
+      const ts = new Date(s.timestamp);
+      const iso = ts.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
+      line += ` (${iso})`;
+      if (ts < staleCutoff) {
+        const days = Math.floor((now.getTime() - ts.getTime()) / (24 * 60 * 60 * 1000));
+        line += ` — stale-since ${ts.toISOString().split("T")[0]} (${days}d ago)`;
+      }
+    }
+    if (s.note) line += ` — ${s.note}`;
+    lines.push(line);
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
 export function buildUserPrompt(ctx: ProbeContext): string {
   const parts: string[] = [];
   parts.push(`Repository: ${ctx.repo}`);
@@ -263,9 +307,14 @@ export function buildUserPrompt(ctx: ProbeContext): string {
  * The posted comment. Leads with what it IS (auto-dispatched, a hypothesis) so the
  * prose never claims more than the mechanism delivers (#412) — the reader must know
  * this is #167's "diagnosis to verify", not a verified prescription.
+ *
+ * When `sources` is provided, a machine-parseable ## Sources footer is inserted
+ * between the diagnosis body and its machine trailer (ops-pipeline#66) so the
+ * trailer stays at the absolute tail for parseProbeRouting (ops-pipeline#578,
+ * stint 939).
  */
-export function renderComment(diagnosis: string, model: string): string {
-  return [
+export function renderComment(diagnosis: string, model: string, sources?: ProbeSource[]): string {
+  const parts = [
     PROBE_MARKER,
     "🔎 **Read-only diagnostic probe** — auto-dispatched on the `needs-human` escalation (ops-pipeline#20, Project 3).",
     "",
@@ -273,6 +322,38 @@ export function renderComment(diagnosis: string, model: string): string {
     "",
     "---",
     "",
-    diagnosis.trim(),
-  ].join("\n");
+  ];
+
+  if (!sources || sources.length === 0) {
+    parts.push(diagnosis.trim());
+    return parts.join("\n");
+  }
+
+  const diagLines = diagnosis.trim().split("\n");
+  const nonBlankIdxs: number[] = [];
+  for (let i = 0; i < diagLines.length; i++) {
+    if (diagLines[i].trim().length > 0) nonBlankIdxs.push(i);
+  }
+
+  let bodyEnd = diagLines.length;
+  let trailerLines: string[] = [];
+
+  if (nonBlankIdxs.length >= 2) {
+    const lastIdx = nonBlankIdxs[nonBlankIdxs.length - 1] as number;
+    const secondLastIdx = nonBlankIdxs[nonBlankIdxs.length - 2] as number;
+    const lastLine = diagLines[lastIdx].trim();
+    const secondLastLine = diagLines[secondLastIdx].trim();
+    if (NEEDS_KEVIN_LINE_RE.test(lastLine) && ROUTING_LINE_RE.test(secondLastLine)) {
+      bodyEnd = secondLastIdx;
+      trailerLines = diagLines.slice(secondLastIdx);
+    }
+  }
+
+  const body = diagLines.slice(0, bodyEnd).join("\n").trimEnd();
+  parts.push(body);
+  parts.push("", buildSourceFooter(sources));
+  if (trailerLines.length > 0) {
+    parts.push(trailerLines.join("\n"));
+  }
+  return parts.join("\n");
 }
