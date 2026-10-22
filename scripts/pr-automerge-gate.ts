@@ -565,6 +565,45 @@ function fetchHeadSha(repo: string, pr: number): string {
   return gh(["api", `repos/${repo}/pulls/${pr}`, "--jq", ".head.sha"]).trim();
 }
 
+/**
+ * stint #1018 (2026-10-22): a stacked PR (base ≠ main) whose parent has already
+ * landed can be merged into its stale base — the merge call succeeds but the
+ * code never reaches main. This check detects whether the base branch's content
+ * has already been merged to the default branch by looking for a merged PR whose
+ * head was that same base branch name targeting main.
+ *
+ * Fail-closed: an API error ⇒ stale (refuse the merge), never "pass-through".
+ * Returns clean only when base is main (nothing to check) or when no merged PR
+ * with head === baseRefName targets main.
+ */
+function checkStackedBaseOverlap(repo: string, baseRefName: string): { stale: boolean; detail: string | null } {
+  if (baseRefName === "main") return { stale: false, detail: null };
+  try {
+    const result = gh([
+      "pr", "list", "--repo", repo,
+      "--head", baseRefName,
+      "--base", "main",
+      "--state", "merged",
+      "--limit", "1",
+      "--json", "number",
+    ]);
+    const parsed = JSON.parse(result.trim());
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      return {
+        stale: true,
+        detail: `stacked PR: base branch \`${baseRefName}\` was the head of a merged PR targeting main (PR #${parsed[0].number}) — merging into a stale base would NOT reach main; re-target this PR to main first`,
+      };
+    }
+    return { stale: false, detail: null };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      stale: true,
+      detail: `stacked-PR guard: could not determine whether base branch \`${baseRefName}\` has already been merged to main — fail-closed: ${message}`,
+    };
+  }
+}
+
 function mergePr(repo: string, pr: number, headRefOid: string): void {
   const args = ["pr", "merge", String(pr), "--repo", repo, "--squash", "--match-head-commit", headRefOid];
   for (let attempt = 1; attempt <= BASE_MODIFIED_MAX_ATTEMPTS; attempt++) {
@@ -941,6 +980,19 @@ async function evaluate(
   // 2026-09-09 Kevin 'widen': the code-fix cap counts additions only (deletions of dead code are not risk).
   const codeFixLines = prJson.additions;
   const ciClean = isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo));
+
+  // ── stacked-base guard (stint #1018): a stacked PR (base ≠ main) whose parent
+  // already landed can be merged into its stale base — the merge call succeeds but
+  // the code never reaches main. Detect BEFORE the ci-rollup leg because
+  // mergeStateStatus can be CLEAN on a stale base. Cheap: one gh pr list call. ──
+  const stackedBaseCheck = checkStackedBaseOverlap(repo, prJson.baseRefName);
+  if (stackedBaseCheck.stale) {
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${stackedBaseCheck.detail}`);
+    console.log(
+      formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "stacked-base", reasons: [stackedBaseCheck.detail!] }),
+    );
+    return;
+  }
 
   // ── Leg "ci-rollup" (cheap, no diff fetch, no API spend): state + non-draft + CI +
   //    merge readiness. isDraft is checked here because GitHub reports
@@ -1799,6 +1851,17 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
           `skipping re-read (UNKNOWN + !ciClean = unmergeable either way)`,
       );
     }
+  }
+
+  // ── stacked-base guard (stint #1018): a stacked PR (base ≠ main) whose parent
+  // already landed can be merged into its stale base — the merge call succeeds but
+  // the code never reaches main. Cheap: one gh pr list call; placed here (after
+  // UNKNOWN retry, before any timeline fetch or review spend) so it catches stale
+  // bases early. ──
+  const stackedBaseCheck = checkStackedBaseOverlap(repo, prJson.baseRefName);
+  if (stackedBaseCheck.stale) {
+    logTrainGateLine(repo, pr, "refused", stackedBaseCheck.detail!);
+    return { outcome: "refused", detail: stackedBaseCheck.detail! };
   }
 
   // ── Cheap structural fast-path (ops#190 A2; scope narrowed in codex pass 2) ──
