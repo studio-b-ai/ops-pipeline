@@ -108,6 +108,19 @@ describe("formatGateReceiptLine", () => {
     expect(line).not.toContain("reasons=");
   });
 
+  it("emits leg=base-branch on a stacked-PR orphaned-base miss", () => {
+    const line = formatGateReceiptLine({
+      repo: "studio-b-ai/ops-pipeline",
+      pr: 601,
+      prClass: "unclassified",
+      verdict: "missed",
+      leg: "base-branch",
+      reasons: ["base branch 'feature/foo' no longer exists on remote"],
+    });
+    expect(line).toContain("leg=base-branch");
+    expect(line).toContain('reasons="base branch \'feature/foo\' no longer exists on remote"');
+  });
+
   // ───── Positives ─────
 
   it("omits leg and reasons entirely on a qualified verdict", () => {

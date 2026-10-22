@@ -565,6 +565,17 @@ function fetchHeadSha(repo: string, pr: number): string {
   return gh(["api", `repos/${repo}/pulls/${pr}`, "--jq", ".head.sha"]).trim();
 }
 
+function branchExistsOnRemote(repo: string, branch: string): boolean {
+  try {
+    gh(["api", `repos/${repo}/git/refs/heads/${encodeURIComponent(branch)}`]);
+    return true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/not found/i.test(msg)) return false;
+    throw e;
+  }
+}
+
 function mergePr(repo: string, pr: number, headRefOid: string): void {
   const args = ["pr", "merge", String(pr), "--repo", repo, "--squash", "--match-head-commit", headRefOid];
   for (let attempt = 1; attempt <= BASE_MODIFIED_MAX_ATTEMPTS; attempt++) {
@@ -910,6 +921,22 @@ async function evaluate(
   }
   const author = prJson.author.login;
   const labels = prJson.labels.map((l) => l.name);
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // stint #1018: a stacked PR whose parent was merged (and the branch deleted) can
+  // appear mergeable — but merging into the now-deleted parent branch "succeeds"
+  // without the code ever reaching main. Check that the base branch still exists
+  // before proceeding.
+  // ═══════════════════════════════════════════════════════════════════════════════
+  if (prJson.baseRefName !== "main") {
+    if (!branchExistsOnRemote(repo, prJson.baseRefName)) {
+      const detail = `base branch '${prJson.baseRefName}' no longer exists on remote (stacked PR whose parent was merged and the branch was deleted — needs retargeting to a live branch before merging)`;
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}.`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "base-branch", reasons: [detail] }));
+      return;
+    }
+  }
+
   // 2026-09-13 (Kevin "door pens"): a DIRTY fleet-internal PR was refused forever — crews branch from a stale main and never
   // rebase (cp#272/#277, radio#1010, brain#252 sat DIRTY 10h+). Ask GitHub to update the branch from base (a merge commit,
   // never a force-push; conflicts leave it DIRTY and the receipt says so). The PR re-runs CI and is re-evaluated when its

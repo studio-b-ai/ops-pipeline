@@ -51,6 +51,11 @@ export type GateReceiptVerdict = "qualified" | "missed" | "candidate";
  *                  (including any API error — fail-closed).
  * - `held`         (ops-pipeline#260 leg 4) Kevin's `hold` label is present — parked
  *                  by his word; nothing merges while it stays. Not a decision ask.
+ * - `base-branch`  (stint #1018) the PR's base branch no longer exists on the remote
+ *                  (stacked PR whose parent was merged and the branch deleted — the PR
+ *                  needs retargeting to a live branch before it can be safely merged;
+ *                  merging into a deleted branch "succeeds" but the code never reaches
+ *                  main).
  * - `queued`       (ops-pipeline#260 leg 4) Kevin's `queued` label was present and
  *                  authorizing, but the cycle aborted before/at the merge (revalidate
  *                  drift, or the sha-pinned merge call itself failed). Never retried
@@ -66,6 +71,7 @@ export type GateReceiptLeg =
   | "named-checks"
   | "review"
   | "held"
+  | "base-branch"
   | "box"
   // 2026-09-06 (codex P1 on the code-fix door): the PR's head moved between the
   // gate's review read and its label writes — nothing written, next run re-evaluates.
