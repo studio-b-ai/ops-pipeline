@@ -59,7 +59,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const CONFIG_FILE = join(HERE, "backlog-managers.yaml");
 const DOOR_REGISTRY_FILE = join(HERE, "squasher-fleet.json");
 const LABEL = "stacked-pr";
-const LABEL_DESCRIPTION = "stint#1018: open = a PR targets a non-default branch whose parent PR already merged (auto-reconciled)";
+const LABEL_DESCRIPTION = "stint#1018: open = PR targets non-default branch whose parent PR already merged (auto-reconciled)";
 const LABEL_COLOR = "D73A4A"; // red — stacked PRs targeting dead bases are a merge defect
 const PR_LIST_LIMIT = 500;
 
