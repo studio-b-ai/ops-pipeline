@@ -1,0 +1,95 @@
+name: Stacked PR Sweep
+
+# mechanic stint #1018: "A stacked PR can be merged into its parent's branch after the
+# parent lands, so the fix looks merged but never reaches main."
+#
+# Flags-only detector — watches for PRs whose baseRefName is not the default branch
+# and whose base branch was the head of a MERGED parent PR (the parent landed, the
+# child was never re-targeted). Opens/updates/closes a per-repo auto-reconciled
+# [stacked-pr] issue. Never rebases/re-targets/merges a PR itself.
+#
+# Fleet App token required for the SAME reason as stale-pr-sweep.yml and repo-hygiene.yml:
+# this worker reads PRs across MULTIPLE org repos, which a repo-scoped ambient
+# GITHUB_TOKEN structurally cannot do. studiob-fleet-bot's installation-level
+# pull_requests:read + issues:write + metadata:read covers every read and write this
+# worker performs.
+
+on:
+  schedule:
+    # Friday 15:00 UTC — weekly sweep (mirrors stale-pr-sweep's cadence: a stacked-PR
+    # defect takes days to develop and a daily run would re-report the same findings).
+    - cron: "0 15 * * 5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Real reads throughout (every configured repo's PR list + issue list) — zero issue mutations, preview only"
+        required: false
+        type: boolean
+        default: true
+      now:
+        description: "ISO 8601 timestamp overriding the clock (the #464/#471 plant ladder) — omit for the real current time"
+        required: false
+        type: string
+        default: ""
+      repos:
+        description: "Comma-separated repo allowlist (e.g. studio-b-ai/ops-pipeline) — omit for the full fleet"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stacked-pr-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: "Stacked-PR sweep — fleet-internal stacked-PR defect watch (fleet App token)"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: "Install deps"
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: "Mint fleet installation token"
+        id: mint
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.FLEET_APP_ID }}
+          private-key: ${{ secrets.FLEET_APP_PRIVATE_KEY }}
+          owner: studio-b-ai
+
+      - name: "Fail loud if the fleet token did not mint"
+        if: steps.mint.outputs.token == ''
+        run: |
+          echo "::error::actions/create-github-app-token produced no token — check FLEET_APP_ID / FLEET_APP_PRIVATE_KEY." >&2
+          exit 1
+
+      - name: "Run stacked-pr sweep"
+        id: run_worker
+        working-directory: scripts
+        env:
+          GH_TOKEN: ${{ steps.mint.outputs.token }}
+          DRY_RUN_FLAG: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+          NOW_INPUT: ${{ inputs.now }}
+          REPOS_INPUT: ${{ inputs.repos }}
+        run: |
+          args=()
+          if [ -n "$DRY_RUN_FLAG" ]; then args+=("--dry-run"); fi
+          if [ -n "$NOW_INPUT" ]; then args+=(--now "$NOW_INPUT"); fi
+          if [ -n "$REPOS_INPUT" ]; then args+=(--repos "$REPOS_INPUT"); fi
+          npx tsx stacked-pr-sweep.ts "${args[@]}"
+
+      - name: "Report terminal status"
+        if: always()
+        run: |
+          echo "stacked-pr-sweep workflow terminal status: ${{ job.status }} (run_worker outcome: ${{ steps.run_worker.outcome }})"
