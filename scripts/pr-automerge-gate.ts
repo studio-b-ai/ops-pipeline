@@ -1007,6 +1007,23 @@ async function evaluate(
     // fall-through: the ready label was present but not authorizing — the normal legs decide.
   }
 
+  // ── Leg "stacked-base" (stint #1018): never auto-merge a PR whose base is NOT main.
+  // When a parent PR merges, GitHub auto-retargets child PRs' baseRefName from the
+  // parent's feature branch to main (~30s–2min). Merging the child before that
+  // auto-retarget completes squashes the child's commits into the parent's now-merged
+  // (or deleted) branch — the merge looks successful but never reaches main
+  // (Rule #142/#328). The squasher parks stacked PRs here; the next sweep picks them
+  // up after retarget. Kevin's explicit `box`/`queued` (handled by evaluateQueuedOverride
+  // above) is NOT blocked by this leg — it is the human-authorizing path and its
+  // callers (heritage-restart-train / box-patch-id-labeled) merge via their own
+  // gate with their own baseRefName discipline. ──
+  if (prJson.baseRefName !== "main") {
+    const detail = `baseRefName is '${prJson.baseRefName}' (not 'main') — stacked PR waiting for GitHub auto-retarget after parent merged (Rule #142/#328)`;
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}. No diff fetch, no review call.`);
+    console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "stacked-base", reasons: [detail] }));
+    return;
+  }
+
   // ── Diff fetch + per-file classification (unchanged mechanics) — BEFORE any API spend ──
   const diff = fetchDiffBySha(repo, prJson.baseRefName, prJson.headRefOid);
   const parsed = parseUnifiedDiff(diff);
