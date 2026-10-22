@@ -1,0 +1,87 @@
+# post-merge-reachability.yml — reusable post-merge reachability guard (cargo #1018).
+#
+# Fires after EVERY merged PR (not just automerged ones): verifies the merge commit
+# is an ancestor of origin/main. A stacked PR merged into its parent's branch after
+# the parent landed creates a merge commit on the dead parent branch — it looks
+# merged but never reaches main. This workflow catches that after the fact.
+#
+# Caller wiring (per-repo):
+#
+#   on:
+#     pull_request:
+#       types: [closed]
+#   jobs:
+#     reachability:
+#       if: github.event.pull_request.merged == true
+#       permissions:
+#         issues: write
+#       uses: studio-b-ai/ops-pipeline/.github/workflows/post-merge-reachability.yml@main
+#       with:
+#         repo: ${{ github.repository }}
+#         pr_number: ${{ github.event.pull_request.number }}
+#         merge_sha: ${{ github.event.pull_request.merge_commit_sha }}
+#
+# Checked out at @main, not @v1 — same deliberate canary posture as squasher-automerge.yml.
+
+name: post-merge-reachability
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: "Target repo as owner/name (the repo whose PR merged)"
+        required: true
+        type: string
+      pr_number:
+        description: "Merged PR number"
+        required: true
+        type: string
+      merge_sha:
+        description: "Squash merge commit sha (event.pull_request.merge_commit_sha)"
+        required: true
+        type: string
+
+jobs:
+  reachability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out target repo
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repo }}
+          token: ${{ github.token }}
+          fetch-depth: 0
+
+      - name: Fetch main
+        run: git fetch origin main
+
+      - name: Verify merge commit reachable from main
+        id: check
+        run: |
+          set -euo pipefail
+          MERGE_SHA="${{ inputs.merge_sha }}"
+          if git merge-base --is-ancestor "$MERGE_SHA" origin/main; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+            echo "[ok] post-merge-reachability ${{ inputs.repo }}#${{ inputs.pr_number }}: merge commit $MERGE_SHA is reachable from origin/main"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "[ALARM] post-merge-reachability ${{ inputs.repo }}#${{ inputs.pr_number }}: merge commit $MERGE_SHA is NOT reachable from origin/main — likely merged into a stacked parent branch that never reached main (cargo #1018)"
+          fi
+
+      - name: Open alarm issue (cargo #1018 — stacked PR merged to dead branch)
+        if: steps.check.outputs.reachable == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create \
+            --repo "${{ inputs.repo }}" \
+            --title "cargo #1018: PR #${{ inputs.pr_number }} merge commit not reachable from main" \
+            --label "P1" \
+            --body "**Post-merge reachability alarm** (cargo #1018).
+
+          PR **#${{ inputs.pr_number }}** was merged, but its merge commit (\`${{ inputs.merge_sha }}\`) is **not reachable from \`origin/main\`**.
+
+          This means the PR was likely a **stacked PR** whose base was a parent branch that had already been merged into main — the merge landed on the dead parent branch, and the fix is not live.
+
+          **Recovery**: re-open the changes as a new PR targeting \`main\` directly."

@@ -49,6 +49,10 @@ export type GateReceiptVerdict = "qualified" | "missed" | "candidate";
  *                  in-flight / not strictly SUCCESS on the head commit.
  * - `review`       the independent review returned anything other than exactly CLEAN
  *                  (including any API error — fail-closed).
+ * - `base-branch`  the PR's base is not the default branch `main` — a stacked PR
+ *                  whose parent landed leaves its merge commit on the parent's dead
+ *                  branch, never reaching main (cargo #1018). Fail-closed:
+ *                  nothing merges until the PR's base is `main`.
  * - `held`         (ops-pipeline#260 leg 4) Kevin's `hold` label is present — parked
  *                  by his word; nothing merges while it stays. Not a decision ask.
  * - `queued`       (ops-pipeline#260 leg 4) Kevin's `queued` label was present and
@@ -65,6 +69,7 @@ export type GateReceiptLeg =
   | "eligibility"
   | "named-checks"
   | "review"
+  | "base-branch"
   | "held"
   | "box"
   // 2026-09-06 (codex P1 on the code-fix door): the PR's head moved between the

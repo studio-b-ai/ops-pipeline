@@ -963,7 +963,22 @@ async function evaluate(
     return;
   }
 
-  // ── Leg "other" (cheap, no diff fetch, no API spend): authoritative file-list
+  // ── Leg "base-branch" (cargo #1018): refuse stacked PRs whose base is not the
+  // default branch. A stacked PR that merges into its parent's branch after the parent
+  // lands looks merged but never reaches main — the merge commit sits on a dead
+  // branch. Fail-closed: nothing merges until the base is `main`. A draft stacked PR
+  // (caught by ci-rollup above) is allowed to exist; this leg only fires on
+  // otherwise-mergeable non-draft PRs.
+  if (prJson.baseRefName !== "main") {
+    const detail = `base branch is '${prJson.baseRefName}', not 'main' (stacked PR — merge would land on a dead branch, never reaching main)`;
+    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${detail}. No diff fetch, no review call.`);
+    console.log(
+      formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "base-branch", reasons: [detail] }),
+    );
+    return;
+  }
+
+  // ── Leg "truncation" (cheap, no diff fetch, no API spend): authoritative file-list
   // completeness. `gh pr view --json files` pages the underlying GraphQL `files`
   // connection at its default size (100, unpaginated) — a PR touching MORE files
   // than that silently returns only the first page, with nothing in the CLI output
@@ -1815,6 +1830,14 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
   // authority predicate strips then) — fail-closed at both points.
   if (prJson.state !== "OPEN" || prJson.isDraft) {
     const detail = `not evaluable (state=${prJson.state} isDraft=${prJson.isDraft})`;
+    logTrainGateLine(repo, pr, "refused", detail);
+    return { outcome: "refused", detail };
+  }
+
+  // cargo #1018: refuse stacked PRs in train mode too — a human box on a non-main
+  // base still lands the merge commit on a dead branch.
+  if (prJson.baseRefName !== "main") {
+    const detail = `base branch is '${prJson.baseRefName}', not 'main' (stacked PR — a box on this PR would land on a dead branch, never reaching main)`;
     logTrainGateLine(repo, pr, "refused", detail);
     return { outcome: "refused", detail };
   }
