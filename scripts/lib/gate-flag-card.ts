@@ -45,9 +45,9 @@
 
 /** The refusal legs that can carry a card. Mirrors gate-enroll's DECISION_LEGS: a
  *  machinery leg (truncation, held, eligibility, head-moved) is not a human's to clear. */
-export type CardLeg = "review" | "class-match" | "line-cap" | "named-checks";
+export type CardLeg = "review" | "class-match" | "line-cap" | "named-checks" | "stacked";
 
-const CARD_LEGS: ReadonlySet<string> = new Set<CardLeg>(["review", "class-match", "line-cap", "named-checks"]);
+const CARD_LEGS: ReadonlySet<string> = new Set<CardLeg>(["review", "class-match", "line-cap", "named-checks", "stacked"]);
 
 /** True when `leg` is a refusal a human label can clear — i.e. one that earns a card. */
 export function isCardLeg(leg: string): leg is CardLeg {
@@ -72,7 +72,9 @@ export function doorSentenceFor(leg: CardLeg): string {
       ? "the diff did not resolve to an enabled class"
       : leg === "line-cap"
         ? "the diff is over this class's line cap"
-        : "a named required check is not satisfied";
+        : leg === "stacked"
+          ? "the base branch has already been merged to main — this PR must be rebased onto main"
+          : "a named required check is not satisfied";
   return (
     `_This refusal is a **${leg}** leg — ${what}. **Accept = box.** ` +
     "A `box` label from a merge-authorized human on this head overrides a decision leg and lets the next sweep merge; `hold` parks it. " +

@@ -165,6 +165,7 @@ import {
   type CheckRunLike,
   type GitCommandRunner,
 } from "./lib/box-patch-id.js";
+import { checkStackedPr } from "./lib/stacked-pr-guard.js";
 
 const REVIEW_MODEL = "claude-sonnet-5";
 const REVIEW_MAX_TOKENS = 512;
@@ -259,6 +260,39 @@ function fetchPr(repo: string, pr: number): PrJson {
 function headRepoOf(prJson: PrJson): string | undefined {
   if (!prJson.headRepositoryOwner || !prJson.headRepository) return undefined;
   return `${prJson.headRepositoryOwner.login}/${prJson.headRepository.name}`;
+}
+
+/**
+ * Check whether the given branch has already been merged into main.
+ * Uses `gh pr list` with per-page 1 (cheapest possible API call — one merged result
+ * is enough to prove the branch landed). Returns false if the gh call fails
+ * (fail-closed: an unreadable base-branch status blocks the merge via
+ * checkStackedPr's second leg, not this function's default).
+ */
+function isBaseBranchMergedToMain(repo: string, branchName: string): boolean {
+  try {
+    const out = gh([
+      "pr", "list", "--repo", repo, "--head", branchName,
+      "--base", "main", "--state", "merged", "--json", "number",
+      "--limit", "1",
+    ]);
+    return JSON.parse(out).length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function baseBranchHasOpenPrToMain(repo: string, branchName: string): boolean {
+  try {
+    const out = gh([
+      "pr", "list", "--repo", repo, "--head", branchName,
+      "--base", "main", "--state", "open", "--json", "number",
+      "--limit", "1",
+    ]);
+    return JSON.parse(out).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 // ───────────────────────────── box-patch-id wiring (ops-pipeline#190 rollout step 5) ─────────────────────────────
@@ -563,45 +597,6 @@ function isBaseBranchModified(message: string): boolean {
  *  trigger for the background mergeability recompute the retry needs to out-wait. */
 function fetchHeadSha(repo: string, pr: number): string {
   return gh(["api", `repos/${repo}/pulls/${pr}`, "--jq", ".head.sha"]).trim();
-}
-
-/**
- * stint #1018 (2026-10-22): a stacked PR (base ≠ main) whose parent has already
- * landed can be merged into its stale base — the merge call succeeds but the
- * code never reaches main. This check detects whether the base branch's content
- * has already been merged to the default branch by looking for a merged PR whose
- * head was that same base branch name targeting main.
- *
- * Fail-closed: an API error ⇒ stale (refuse the merge), never "pass-through".
- * Returns clean only when base is main (nothing to check) or when no merged PR
- * with head === baseRefName targets main.
- */
-function checkStackedBaseOverlap(repo: string, baseRefName: string): { stale: boolean; detail: string | null } {
-  if (baseRefName === "main") return { stale: false, detail: null };
-  try {
-    const result = gh([
-      "pr", "list", "--repo", repo,
-      "--head", baseRefName,
-      "--base", "main",
-      "--state", "merged",
-      "--limit", "1",
-      "--json", "number",
-    ]);
-    const parsed = JSON.parse(result.trim());
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      return {
-        stale: true,
-        detail: `stacked PR: base branch \`${baseRefName}\` was the head of a merged PR targeting main (PR #${parsed[0].number}) — merging into a stale base would NOT reach main; re-target this PR to main first`,
-      };
-    }
-    return { stale: false, detail: null };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      stale: true,
-      detail: `stacked-PR guard: could not determine whether base branch \`${baseRefName}\` has already been merged to main — fail-closed: ${message}`,
-    };
-  }
 }
 
 function mergePr(repo: string, pr: number, headRefOid: string): void {
@@ -981,19 +976,6 @@ async function evaluate(
   const codeFixLines = prJson.additions;
   const ciClean = isRollupClean(prJson.statusCheckRollup, loadSanctionedSkips(repo));
 
-  // ── stacked-base guard (stint #1018): a stacked PR (base ≠ main) whose parent
-  // already landed can be merged into its stale base — the merge call succeeds but
-  // the code never reaches main. Detect BEFORE the ci-rollup leg because
-  // mergeStateStatus can be CLEAN on a stale base. Cheap: one gh pr list call. ──
-  const stackedBaseCheck = checkStackedBaseOverlap(repo, prJson.baseRefName);
-  if (stackedBaseCheck.stale) {
-    console.log(`[wait] pr-automerge-gate ${repo}#${pr}: ${stackedBaseCheck.detail}`);
-    console.log(
-      formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "stacked-base", reasons: [stackedBaseCheck.detail!] }),
-    );
-    return;
-  }
-
   // ── Leg "ci-rollup" (cheap, no diff fetch, no API spend): state + non-draft + CI +
   //    merge readiness. isDraft is checked here because GitHub reports
   //    mergeStateStatus=CLEAN for an otherwise-mergeable DRAFT (ops-pipeline#202) — a
@@ -1057,6 +1039,24 @@ async function evaluate(
     const outcome = await evaluateQueuedOverride(repo, pr, prJson, labels);
     if (outcome !== "fall-through") return;
     // fall-through: the ready label was present but not authorizing — the normal legs decide.
+  }
+
+  // ── Leg "stacked" (stint #1018): refuse a PR whose base branch has already been
+  // merged into main via its own PR. The stacked scenario: PR #1 (feature/x → main)
+  // merges; PR #2 (some-fix → feature/x) can still be merged into feature/x but the
+  // diff never reaches main. Checked BEFORE the diff fetch — cheap gh API calls only.
+  if (prJson.baseRefName !== "main") {
+    const baseMerged = isBaseBranchMergedToMain(repo, prJson.baseRefName);
+    const baseHasOpen = baseBranchHasOpenPrToMain(repo, prJson.baseRefName);
+    const stackedCheck = checkStackedPr({ baseRefName: prJson.baseRefName, baseBranchMergedToMain: baseMerged, baseBranchHasOpenPrToMain: baseHasOpen });
+    if (!stackedCheck.safe) {
+      const detail = stackedCheck.reason ?? "base branch has already been merged to main";
+      console.log(`[wait] pr-automerge-gate ${repo}#${pr}: stacked-PR guard — ${detail}. No diff fetch, no review call.`);
+      console.log(formatGateReceiptLine({ repo, pr, prClass: "unclassified", verdict: "missed", leg: "stacked", reasons: [detail] }));
+      await enrollGateRefusal({ repo, pr, headSha: prJson.headRefOid, leg: "stacked", reasons: [detail], additions: prJson.additions, deletions: prJson.deletions });
+      postFlagCard(repo, pr, "stacked", prJson.headRefOid, [detail]);
+      return;
+    }
   }
 
   // ── Diff fetch + per-file classification (unchanged mechanics) — BEFORE any API spend ──
@@ -1851,17 +1851,6 @@ async function evaluateTrainReadyInner(repo: string, pr: number, opts: TrainRead
           `skipping re-read (UNKNOWN + !ciClean = unmergeable either way)`,
       );
     }
-  }
-
-  // ── stacked-base guard (stint #1018): a stacked PR (base ≠ main) whose parent
-  // already landed can be merged into its stale base — the merge call succeeds but
-  // the code never reaches main. Cheap: one gh pr list call; placed here (after
-  // UNKNOWN retry, before any timeline fetch or review spend) so it catches stale
-  // bases early. ──
-  const stackedBaseCheck = checkStackedBaseOverlap(repo, prJson.baseRefName);
-  if (stackedBaseCheck.stale) {
-    logTrainGateLine(repo, pr, "refused", stackedBaseCheck.detail!);
-    return { outcome: "refused", detail: stackedBaseCheck.detail! };
   }
 
   // ── Cheap structural fast-path (ops#190 A2; scope narrowed in codex pass 2) ──

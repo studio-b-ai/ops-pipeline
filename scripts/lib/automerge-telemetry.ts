@@ -49,10 +49,6 @@ export type GateReceiptVerdict = "qualified" | "missed" | "candidate";
  *                  in-flight / not strictly SUCCESS on the head commit.
  * - `review`       the independent review returned anything other than exactly CLEAN
  *                  (including any API error — fail-closed).
- * - `stacked-base` (stint #1018) a stacked PR (base ≠ main) whose parent already
- *                  landed — the merge call succeeds on the stale base but the code
- *                  never reaches main. A machine detection, not a decision: the fix
- *                  is re-targeting the PR to main.
  * - `held`         (ops-pipeline#260 leg 4) Kevin's `hold` label is present — parked
  *                  by his word; nothing merges while it stays. Not a decision ask.
  * - `queued`       (ops-pipeline#260 leg 4) Kevin's `queued` label was present and
@@ -71,6 +67,7 @@ export type GateReceiptLeg =
   | "review"
   | "held"
   | "box"
+  | "stacked"
   // 2026-09-06 (codex P1 on the code-fix door): the PR's head moved between the
   // gate's review read and its label writes — nothing written, next run re-evaluates.
   | "head-moved"
@@ -79,10 +76,6 @@ export type GateReceiptLeg =
   // whose non-terminal state then deltas the gate's own revalidate. A decision leg,
   // not a wait: the loop cannot clear itself, so a human owns the outcome.
   | "flap-guard"
-  // stint #1018 (2026-10-22): a stacked PR (base ≠ main) whose parent already landed —
-  // the merge call succeeds on the stale base but the code never reaches main.
-  // A machine detection, never a decision; the fix is to re-target to main.
-  | "stacked-base"
   | "other";
 
 export interface GateReceiptInput {

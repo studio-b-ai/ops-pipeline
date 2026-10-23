@@ -144,7 +144,7 @@ describe("flagCardMarkersFor — one marker vocabulary for poster AND probe (sti
 });
 
 describe("isCardLeg admits exactly the decision legs", () => {
-  it.each(["review", "class-match", "line-cap", "named-checks"])("%s earns a card", (leg) => {
+  it.each(["review", "class-match", "line-cap", "named-checks", "stacked"])("%s earns a card", (leg) => {
     expect(isCardLeg(leg)).toBe(true);
   });
 
