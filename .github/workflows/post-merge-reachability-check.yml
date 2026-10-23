@@ -1,0 +1,94 @@
+name: post-merge-reachability-check
+
+# ops-pipeline stint #1018 — post-merge safety net: after a PR merges, verifies its
+# merge commit IS reachable from the default branch. If not, opens an alert issue.
+#
+# The 2026-10-22 dead-branch-merge class: bolt-wms#3945 was merged, but its base was
+# the parent PR's branch which had already landed on main — the merge commit reached
+# only the dead parent branch, not main. Without this check nobody knew the fix never
+# shipped.
+#
+# Caller wiring (per repo, pull_request:closed with merged:true):
+#
+#   on:
+#     pull_request:
+#       types: [closed]
+#   jobs:
+#     reachability:
+#       if: github.event.pull_request.merged == true
+#       permissions:
+#         contents: read
+#         issues: write
+#       uses: studio-b-ai/ops-pipeline/.github/workflows/post-merge-reachability-check.yml@main
+#       with:
+#         repo: ${{ github.repository }}
+#         pr_number: ${{ github.event.pull_request.number }}
+#         merge_sha: ${{ github.event.pull_request.merge_commit_sha }}
+#         default_branch: ${{ github.event.repository.default_branch }}
+#         title: ${{ github.event.pull_request.title }}
+#
+# Checked out at @main — same deliberate canary posture as squasher-automerge.yml;
+# graduation to a v1 tag is a controller decision.
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: "Target repo as owner/name"
+        required: true
+        type: string
+      pr_number:
+        description: "Merged PR number"
+        required: true
+        type: string
+      merge_sha:
+        description: "Merge commit SHA (event.pull_request.merge_commit_sha)"
+        required: true
+        type: string
+      default_branch:
+        description: "Repository default branch name (event.repository.default_branch)"
+        required: true
+        type: string
+      title:
+        description: "PR title (for issue body context)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: "Post-merge reachability check"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: ${{ inputs.repo }}
+          fetch-depth: 0
+          ref: ${{ inputs.default_branch }}
+
+      - uses: actions/checkout@v5
+        with:
+          repository: studio-b-ai/ops-pipeline
+          path: _ops-pipeline
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        working-directory: _ops-pipeline/scripts
+        run: npm ci || npm install
+
+      - name: Run post-merge reachability check
+        working-directory: _ops-pipeline/scripts
+        env:
+          INPUT_REPO: ${{ inputs.repo }}
+          INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+          INPUT_MERGE_SHA: ${{ inputs.merge_sha }}
+          INPUT_DEFAULT_BRANCH: ${{ inputs.default_branch }}
+          INPUT_TITLE: ${{ inputs.title }}
+          GH_TOKEN: ${{ github.token }}
+        run: npx tsx post-merge-reachability-check.ts
