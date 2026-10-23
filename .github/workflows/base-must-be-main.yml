@@ -1,0 +1,94 @@
+name: base-must-be-main
+
+# ops-pipeline stint #1018 — pre-merge gate: a non-draft PR whose base is NOT the default
+# branch fails a required check named "Base must be main".
+#
+# The 2026-10-22 incident: bolt-wms#3945 was stacked on bolt-wms#3934. Kevin merged #3934,
+# then #3945 whose base was still #3934's branch — the merge commit landed on the dead
+# parent branch, not main. The fix never shipped. No change can look merged without
+# reaching main.
+#
+# This reusable workflow runs as a required status check on pull_request. Consumer repos
+# call it from their own PR workflow:
+#
+#   jobs:
+#     base-must-be-main:
+#       uses: studio-b-ai/ops-pipeline/.github/workflows/base-must-be-main.yml@main
+#
+# Add "Base must be main" to the repo's required status checks in branch protection rules
+# after verifying both verdicts (Rules #464/#471):
+#   1. Open a non-draft PR targeting a feature branch → check FAILS
+#   2. Mark it as draft → check PASSES (stacked-PR workflow)
+#   3. Change base to main → check PASSES
+#
+# Draft PRs are always allowed — stacked-PR branches use drafts for children while the
+# parent is under review. An allowlist input (comma-separated base branch names) permits
+# cross-repo or special-purpose bases (e.g. gh-pages, release branches).
+#
+# CROSS-REPO NOTE: a called reusable workflow runs in the CALLER's repository context.
+# The explicit `repository:` on checkout is load-bearing so the TypeScript worker is read
+# from this repo. ops-pipeline is public, so no token is needed.
+
+on:
+  workflow_call:
+    inputs:
+      allow-list:
+        description: "CSV of base branch names allowed to target non-main (gh-pages, release/*, etc.)"
+        type: string
+        required: false
+        default: ""
+  workflow_dispatch:
+    inputs:
+      allow-list:
+        description: "CSV of base branch names allowed to target non-main"
+        type: string
+        required: false
+        default: ""
+      pr-base-ref:
+        description: "Simulated PR base ref (planted-verdict rung, Rules #464/#471)"
+        type: string
+        required: false
+        default: ""
+      pr-draft:
+        description: "Simulated PR draft flag"
+        type: choice
+        options:
+          - ""
+          - "true"
+          - "false"
+        default: ""
+      default-branch:
+        description: "Simulated default branch name"
+        type: string
+        required: false
+        default: "main"
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gate:
+    name: "Base must be main"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          repository: studio-b-ai/ops-pipeline
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install deps
+        working-directory: scripts
+        run: npm ci || npm install
+
+      - name: Run base-must-be-main gate
+        working-directory: scripts
+        env:
+          PR_BASE_REF: ${{ inputs.pr-base-ref || github.event.pull_request.base.ref }}
+          PR_DRAFT: ${{ inputs.pr-draft || github.event.pull_request.draft }}
+          DEFAULT_BRANCH: ${{ inputs.default-branch || github.event.repository.default_branch }}
+          ALLOW_LIST: ${{ inputs.allow-list }}
+        run: npx tsx base-must-be-main.ts
