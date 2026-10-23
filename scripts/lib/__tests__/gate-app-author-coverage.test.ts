@@ -103,6 +103,7 @@ const A2_DOOR_TESTS = [
   "fleet-sweep-liveness.test.ts",
   "automerge-sweep-native-exclusion.test.ts",
   "box-patch-id-labeled-workflow.test.ts",
+  "stacked-pr-guard.test.ts",
   "fixtures/gate-gh-stub.ts",
   "fixtures/gate-fleet-sweep-harness.ts",
 ].map((t) => `scripts/lib/__tests__/${t}`);
